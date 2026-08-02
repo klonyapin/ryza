@@ -87,7 +87,9 @@ def test_all_six_migrations_recorded(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT version FROM meta.schema_migrations ORDER BY version")
         versions = [r[0] for r in cur.fetchall()]
-    assert versions == ["0001", "0002", "0003", "0004", "0005", "0006"]
+    # T-001 の 6 マイグレーションが先頭に順序どおり記録されている。後続タスク
+    # （0007 報道部・0008 リサーチ取込 …）が積み増すため、先頭 6 件のみを検証する。
+    assert versions[:6] == ["0001", "0002", "0003", "0004", "0005", "0006"]
 
 
 # ── 受け入れ基準 2: 5 スキーマ・全テーブルが存在 ───────────────────────────
