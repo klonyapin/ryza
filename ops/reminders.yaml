@@ -56,3 +56,14 @@ reminders:
         project: ryza-main
         dataset: billing_export
     status: pending
+
+  - id: first-code-audit
+    what: "第1回フル実装監査(別ベンダー AI)— 最初の運用可能版の完成時"
+    conditions:
+      - type: date_after
+        date: "2026-09-15"
+    action:
+      type: issue_comment
+      issue: 15
+      body: "チェックポイント: 最初の運用可能版(データ取込→朝刊)は完成しているか。完成していれば実装監査を実施、未完成ならこのリマインダーの date を1ヶ月先に更新すること。"
+    status: pending
