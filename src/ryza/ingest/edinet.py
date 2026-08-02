@@ -24,7 +24,8 @@ import psycopg
 from ryza.db.conn import connect
 from ryza.ingest import base
 from ryza.ingest.base import Fetcher
-from ryza.provenance import EvidenceStore, Run, record, run as run_ctx
+from ryza.provenance import EvidenceStore, Run, record
+from ryza.provenance import run as run_ctx
 
 _API_BASE = "https://api.edinet-fsa.go.jp"
 SOURCE_NAME = "EDINET"

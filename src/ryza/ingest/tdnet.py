@@ -22,7 +22,8 @@ import psycopg
 from ryza.db.conn import connect
 from ryza.ingest import base
 from ryza.ingest.base import Fetcher
-from ryza.provenance import EvidenceStore, Run, run as run_ctx
+from ryza.provenance import EvidenceStore, Run
+from ryza.provenance import run as run_ctx
 
 SOURCE_NAME = "TDnet"
 # TDnet 適時開示情報の RSS。実 URL は運用時に環境変数で上書き可能にしておく。

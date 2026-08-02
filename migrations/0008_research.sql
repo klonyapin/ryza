@@ -48,6 +48,6 @@ COMMENT ON COLUMN market.calendar_events.run_id IS '生成ジョブ実行（リ�
 COMMENT ON TABLE market.watchlist IS
     'ウォッチ銘柄（ユーザー + FM）。前処理の一次重要度スコアが保有/ウォッチ状況として参照（§3）。';
 COMMENT ON COLUMN market.watchlist.instrument_id IS 'ウォッチ対象の銘柄 ID。';
-COMMENT ON COLUMN market.watchlist.added_by IS "'owner' または FM 名。";
+COMMENT ON COLUMN market.watchlist.added_by IS '''owner'' または FM 名。';
 COMMENT ON COLUMN market.watchlist.reason IS '追加理由。';
 COMMENT ON COLUMN market.watchlist.added_at IS '追加時刻。';

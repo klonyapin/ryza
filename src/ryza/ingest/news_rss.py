@@ -23,7 +23,8 @@ import yaml
 from ryza.db.conn import connect
 from ryza.ingest import base
 from ryza.ingest.base import Fetcher
-from ryza.provenance import EvidenceStore, Run, run as run_ctx
+from ryza.provenance import EvidenceStore, Run
+from ryza.provenance import run as run_ctx
 
 # config/feeds.yaml はリポジトリルート直下。src/ryza/ingest/news_rss.py から 3 つ上。
 _CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "feeds.yaml"
