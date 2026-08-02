@@ -1,5 +1,5 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-03 01:19 JST",
+ "generated_at": "2026-08-03 01:40 JST",
  "phase": "実装フェーズ(T-001 進行中)",
  "milestones": [
   {
@@ -220,9 +220,47 @@ window.RYZA_DATA = {
    "labels": [
     "digest"
    ]
+  },
+  {
+   "number": 17,
+   "title": "T-006: Ryza Discord Bot 基盤(GCE 常駐)",
+   "state": "OPEN",
+   "labels": [
+    "impl"
+   ]
   }
  ],
  "commits": [
+  {
+   "hash": "8bdbbcd",
+   "date": "08/03 01:39",
+   "subject": "docs: リサーチ層+情報分析 詳細設計 v1.0(常時稼働・階層0前処理・市場観更新規約・反証拠テスト)"
+  },
+  {
+   "hash": "d82b44c",
+   "date": "08/03 01:32",
+   "subject": "docs: 報道部設計のチャンネル名残存参照を統合後の構成に整理"
+  },
+  {
+   "hash": "ad761b2",
+   "date": "08/03 01:31",
+   "subject": "wip(bot): press スキーマ+outbox/approvals/killswitch/daily/main 骨格 (T-006)"
+  },
+  {
+   "hash": "088950f",
+   "date": "08/03 01:31",
+   "subject": "docs: 報道部設計改訂 — マスコットは外部API取得、チャンネル4統合+指定カテゴリ配下に自動設置"
+  },
+  {
+   "hash": "4573a6c",
+   "date": "08/03 01:25",
+   "subject": "docs: 報道部+Discord Bot 詳細設計 v1.0、T-006(Bot 基盤)発行"
+  },
+  {
+   "hash": "f6b72f0",
+   "date": "08/03 01:19",
+   "subject": "fix(ops): デプロイスクリプトの Cloud Build 設定を一時ファイル渡しに修正+進捗更新"
+  },
   {
    "hash": "b09cb20",
    "date": "08/02 16:14",
@@ -242,36 +280,6 @@ window.RYZA_DATA = {
    "hash": "6b05154",
    "date": "08/02 16:00",
    "subject": "docs: 営業期間=1ヶ月制(労働律速/データ律速の2分類)と柔軟な監査(重要性基準・リスクベース・ゼロトレランス)"
-  },
-  {
-   "hash": "b2a3069",
-   "date": "08/02 15:58",
-   "subject": "docs: IPS 複数プロファイル運用(開発フェーズ)と研究評価設計(事前登録・4層指標)を追加"
-  },
-  {
-   "hash": "f0b6f1a",
-   "date": "08/02 15:55",
-   "subject": "docs(governance): 監査項目 A-13〜A-17 とメタ監査(監査部門の更新機構)を追加"
-  },
-  {
-   "hash": "bee98b6",
-   "date": "08/02 15:52",
-   "subject": "docs: 議論規約(追従禁止・反対意見書・盲検レビュー)を追加"
-  },
-  {
-   "hash": "01d7a8b",
-   "date": "08/02 15:51",
-   "subject": "docs(governance): 実装監査(A-11 PR監査/A-12 四半期コード監査、別ベンダーAI)を恒久機能として追加"
-  },
-  {
-   "hash": "28ed7b3",
-   "date": "08/02 15:46",
-   "subject": "chore(site): 進捗更新(T-004/T-005 完了)"
-  },
-  {
-   "hash": "78e9cc8",
-   "date": "08/02 15:45",
-   "subject": "feat(ops): 週次運用ジョブ ops-weekly (T-004)"
   }
  ]
 };
