@@ -4,7 +4,7 @@
 
 - **状態**: 全体設計 v3.2 確定(2026-08-02)。実装開始。当面は**デモ取引専念**
 - **デプロイ先**: GCP(月額 $0〜数ドル構成)
-- **開発ステータスサイト**: https://ryza-status-794456148260.us-west1.run.app (Cloud Run、進捗の全体像)
+- **開発ステータスサイト(ローカル)**: `python3 site/build.py && python3 -m http.server 8080 -d site` → http://localhost:8080 。運用フェーズで Streamlit ダッシュボードに統合予定
 - **設計書(図入り)**: [docs/design/00-system-design.md](docs/design/00-system-design.md) — mermaid 図は GitHub 上でそのまま描画される
 
 ## ドキュメント地図
