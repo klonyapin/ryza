@@ -1,0 +1,22 @@
+services:
+  db:
+    build:
+      context: .
+      dockerfile: docker/postgres/Dockerfile
+    image: ryza-postgres:17
+    environment:
+      POSTGRES_USER: ryza
+      POSTGRES_PASSWORD: ryza
+      POSTGRES_DB: ryza
+    ports:
+      - "5432:5432"
+    volumes:
+      - ryza_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ryza -d ryza"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  ryza_pgdata:
