@@ -27,6 +27,7 @@ systemd(Restart=always)で常駐し:
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 import os
@@ -210,7 +211,10 @@ class RyzaBot(commands.Bot):
     # ── ループ ────────────────────────────────────────────────────────────
     @tasks.loop(seconds=POLL_SECONDS)
     async def poll_outbox(self) -> None:
-        await self._deliver_once()
+        # _deliver_once は同期 DB I/O と run_coroutine_threadsafe(...).result() を含むため、
+        # イベントループ上で直接実行するとハートビートを塞ぎ自己デッドロックする。
+        # 必ずワーカースレッドへ逃がす。
+        await asyncio.to_thread(self._deliver_sync)
 
     @poll_outbox.before_loop
     async def _before_poll(self) -> None:
@@ -229,7 +233,7 @@ class RyzaBot(commands.Bot):
     async def _before_daily(self) -> None:
         await self.wait_until_ready()
 
-    async def _deliver_once(self) -> None:
+    def _deliver_sync(self) -> None:
         loop = self.loop
 
         def send_fn(msg: outbox.OutboxMessage) -> str:
@@ -244,9 +248,7 @@ class RyzaBot(commands.Bot):
             channel = self.get_channel(int(channel_id))
             if channel is None:
                 raise RuntimeError(f"チャンネル取得失敗: {channel_id}")
-            # discord の I/O はコルーチン。同期 send_fn からイベントループに投げて待つ。
-            import asyncio
-
+            # discord の I/O はコルーチン。ワーカースレッドからイベントループに投げて待つ。
             fut = asyncio.run_coroutine_threadsafe(channel.send(embed=embed), loop)
             sent = fut.result(timeout=15)
             return str(sent.id)
