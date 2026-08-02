@@ -1,6 +1,7 @@
-"""J-Quants 取込テスト（HTTP 全モック）。
+"""J-Quants V2 取込テスト（HTTP 全モック）。
 
-正常系（認証→日足→bars 書込・SCD2・証憑・リネージ）・重複（冪等）・異常系（認証失敗）。
+正常系（API キー→日足→bars 書込・SCD2・証憑・リネージ）・重複（冪等）・
+認証（API キー未設定）・ページネーション。
 """
 
 from __future__ import annotations
@@ -13,40 +14,61 @@ from ryza.ingest import jquants
 from ryza.ingest.base import FetchResult
 
 
-def _auth(fetcher):
-    fetcher.add_json("token/auth_refresh", {"idToken": "ID_TOKEN"})
+def test_api_key_env(monkeypatch):
+    monkeypatch.setenv("RYZA_JQUANTS_API_KEY", "KEY123")
+    assert jquants.api_key() == "KEY123"
 
 
-def test_authenticate_ok(fetcher):
-    _auth(fetcher)
-    assert jquants.authenticate(fetcher, "REFRESH") == "ID_TOKEN"
-
-
-def test_authenticate_failure_raises(fetcher):
-    fetcher.add_status("token/auth_refresh", 401)
+def test_api_key_missing_raises(monkeypatch):
+    monkeypatch.delenv("RYZA_JQUANTS_API_KEY", raising=False)
+    monkeypatch.delenv("JQUANTS_API_KEY", raising=False)
     with pytest.raises(jquants.JQuantsAuthError):
-        jquants.authenticate(fetcher, "REFRESH")
+        jquants.api_key()
 
 
-def test_refresh_token_missing_raises(monkeypatch):
-    monkeypatch.delenv("RYZA_JQUANTS_REFRESH_TOKEN", raising=False)
-    monkeypatch.delenv("JQUANTS_REFRESH_TOKEN", raising=False)
-    with pytest.raises(jquants.JQuantsAuthError):
-        jquants.refresh_token()
+def test_auth_headers_uses_x_api_key():
+    assert jquants._auth_headers("KEY123") == {"x-api-key": "KEY123"}
+
+
+def test_fetch_daily_quotes_sends_api_key_header(fetcher):
+    fetcher.add("equities/bars/daily", FetchResult(
+        status=200, body=b'{"data": [{"Code": "72030"}]}',
+    ))
+    quotes = jquants.fetch_daily_quotes(fetcher, "KEY123", "2026-08-03")
+    assert quotes == [{"Code": "72030"}]
+
+
+def test_fetch_paginates_across_pages(fetcher):
+    # 1 ページ目は pagination_key を返し、2 ページ目で終端。部分一致で同一 URL に
+    # 2 回目以降は key 無しレスポンスを当てるため、先に登録したルートが優先される
+    # のを避けて 2 番目のルートを登録順で後にする。
+    class Paging:
+        def __init__(self):
+            self.n = 0
+
+        def fetch(self, url, *, params=None, headers=None, method="GET", data=None):
+            self.n += 1
+            if self.n == 1:
+                return FetchResult(
+                    status=200,
+                    body=b'{"data": [{"Code": "72030"}], "pagination_key": "K2"}',
+                )
+            return FetchResult(status=200, body=b'{"data": [{"Code": "67580"}]}')
+
+    rows = jquants._fetch_all(Paging(), "/v2/equities/master", key="KEY")
+    assert [r["Code"] for r in rows] == ["72030", "67580"]
 
 
 def _quotes():
     return [
-        {"Code": "72030", "Open": 100, "High": 110, "Low": 95, "Close": 105,
-         "Volume": 1000},
-        {"Code": "67580", "Open": 50, "High": 55, "Low": 48, "Close": 52,
-         "Volume": 500},
+        {"Code": "72030", "O": 100, "H": 110, "L": 95, "C": 105, "Vo": 1000},
+        {"Code": "67580", "O": 50, "H": 55, "L": 48, "C": 52, "Vo": 500},
     ]
 
 
 def test_ingest_daily_quotes_writes_bars_with_lineage(conn, run, store):
     as_of = datetime.now(UTC)
-    raw = b'{"daily_quotes": []}'
+    raw = b'{"data": []}'
     res = jquants.ingest_daily_quotes(
         conn, run, store, _quotes(),
         quote_date="2026-08-03", raw_response=raw, as_of=as_of,
@@ -79,6 +101,22 @@ def test_ingest_daily_quotes_writes_bars_with_lineage(conn, run, store):
         assert cur.fetchone()[0] == 2
 
 
+def test_ingest_daily_quotes_maps_v2_ohlcv(conn, run, store):
+    """V2 の O/H/L/C/Vo カラムが bars の OHLCV に正しく対応する。"""
+    as_of = datetime.now(UTC)
+    jquants.ingest_daily_quotes(
+        conn, run, store, _quotes()[:1],
+        quote_date="2026-08-03", raw_response=b"{}", as_of=as_of,
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT open, high, low, close, volume FROM market.bars b "
+            "JOIN market.instruments i USING (instrument_id) "
+            "WHERE i.symbol='7203.T' AND b.source='jquants'"
+        )
+        assert cur.fetchone() == (100, 110, 95, 105, 1000)
+
+
 def test_ingest_daily_quotes_idempotent(conn, run, store):
     as_of = datetime.now(UTC)
     kw = dict(quote_date="2026-08-03", raw_response=b"{}", as_of=as_of)
@@ -93,8 +131,8 @@ def test_ingest_daily_quotes_idempotent(conn, run, store):
 
 def test_ingest_statements_as_documents(conn, run, store):
     statements = [
-        {"LocalCode": "72030", "DisclosedDate": "2026-08-03",
-         "DisclosureNumber": "20260803001", "TypeOfDocument": "FYFinancialStatements"},
+        {"Code": "72030", "DiscDate": "2026-08-03",
+         "DiscNo": "20260803001", "DocType": "FYFinancialStatements"},
     ]
     r1 = jquants.ingest_statements(conn, run, store, statements)
     r2 = jquants.ingest_statements(conn, run, store, statements)
@@ -107,19 +145,18 @@ def test_ingest_statements_as_documents(conn, run, store):
         assert cur.fetchone()[0] == "filing"
 
 
-def test_run_daily_full_flow(conn, run, store, fetcher, monkeypatch):
-    monkeypatch.setenv("RYZA_JQUANTS_REFRESH_TOKEN", "REFRESH")
-    _auth(fetcher)
-    fetcher.add("listed/info", FetchResult(
+def test_run_daily_full_flow(conn, run, store, fetcher):
+    fetcher.add("equities/master", FetchResult(
         status=200,
-        body=b'{"info": [{"Code": "72030"}]}',
+        body=b'{"data": [{"Code": "72030"}]}',
     ))
-    fetcher.add("daily_quotes", FetchResult(
+    fetcher.add("equities/bars/daily", FetchResult(
         status=200,
-        body=b'{"daily_quotes": [{"Code":"72030","Open":1,"High":2,"Low":1,'
-             b'"Close":2,"Volume":10}]}',
+        body=b'{"data": [{"Code":"72030","O":1,"H":2,"L":1,"C":2,"Vo":10}]}',
     ))
-    result = jquants.run_daily(conn, run, store, fetcher, quote_date="2026-08-03")
+    result = jquants.run_daily(
+        conn, run, store, fetcher, quote_date="2026-08-03", key="KEY123"
+    )
     assert result.bars["written"] == 1
     assert result.instruments["resolved"] == 1
 
