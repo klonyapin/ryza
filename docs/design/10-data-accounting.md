@@ -189,12 +189,15 @@ CREATE TABLE ledger.accounts (
 
 CREATE TABLE ledger.evidence (
   evidence_id  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  kind         text NOT NULL,     -- broker_fill|broker_statement|gcp_billing|llm_usage|invoice|price_snapshot
+  kind         text NOT NULL,     -- broker_fill|broker_statement|gcp_billing|llm_usage|invoice|price_snapshot|decision
   payload_ref  text NOT NULL,     -- 証憑ストア(GCS)URI または内部参照
   sha256       bytea NOT NULL,
   source       text NOT NULL,
   retrieved_at timestamptz NOT NULL
 );
+-- 補足(2026-08-02 T-001 実装時に確定): 小さな内部記録(kind='decision' 等)は
+-- payload_ref に JSON をインライン格納してよい(sha256 は格納内容に対して計算)。
+-- 外部由来・大きいものは従来どおり証憑ストア URI を参照する。
 
 CREATE TABLE ledger.journal_entries (
   entry_id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

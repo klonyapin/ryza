@@ -1,5 +1,5 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-02 14:59 JST",
+ "generated_at": "2026-08-02 15:17 JST",
  "phase": "実装フェーズ(T-001 進行中)",
  "milestones": [
   {
@@ -38,7 +38,7 @@ window.RYZA_DATA = {
    "name": "T-001 DB基盤",
    "detail": "マイグレーション+帳簿制約",
    "issue": 1,
-   "status": "doing"
+   "status": "done"
   },
   {
    "name": "T-002 会計エンジン",
@@ -95,7 +95,7 @@ window.RYZA_DATA = {
   {
    "number": 1,
    "title": "T-001: リポジトリ骨格と DB マイグレーション基盤",
-   "state": "OPEN",
+   "state": "CLOSED",
    "labels": [
     "impl"
    ]
@@ -172,9 +172,65 @@ window.RYZA_DATA = {
    "labels": [
     "impl"
    ]
+  },
+  {
+   "number": 11,
+   "title": "GitHub トークンを Secret Manager へ登録(手作業・3分)",
+   "state": "OPEN",
+   "labels": [
+    "user-action"
+   ]
+  },
+  {
+   "number": 12,
+   "title": "T-004: 週次運用ジョブ ops-weekly(Cloud Run Job + Scheduler)",
+   "state": "OPEN",
+   "labels": [
+    "impl"
+   ]
   }
  ],
  "commits": [
+  {
+   "hash": "3eb5b00",
+   "date": "08/02 15:14",
+   "subject": "docs: E9(多重検定補正: DSR/PBO)追加、E8 の方法論的位置づけ明記、ops-weekly(T-004)発行"
+  },
+  {
+   "hash": "e0b0f0a",
+   "date": "08/02 15:13",
+   "subject": "feat(db): 5スキーマのマイグレーション基盤と帳簿制約 (T-001)"
+  },
+  {
+   "hash": "9a37dc3",
+   "date": "08/02 15:10",
+   "subject": "docs: 評価プロトコルに E8(資本スケール&開始時点スイープ)を追加"
+  },
+  {
+   "hash": "4191230",
+   "date": "08/02 15:07",
+   "subject": "feat(ops): リマインダー・レジストリと週次定例ルーチンの制度化"
+  },
+  {
+   "hash": "0297811",
+   "date": "08/02 15:05",
+   "subject": "wip(T-001): trade + ledger migrations with integrity triggers"
+  },
+  {
+   "hash": "c550b8f",
+   "date": "08/02 15:03",
+   "subject": "wip(T-001): migrate runner + meta/market/docs migrations"
+  },
+  {
+   "hash": "9b1897b",
+   "date": "08/02 15:00",
+   "subject": "wip(T-001): scaffold"
+  },
+  {
+   "hash": "4be3a00",
+   "date": "08/02 14:59",
+   "subject": "chore(site): デモ口座を保留に変更(自前シミュレータで代替、IBKRは執行層実装前に)"
+  },
   {
    "hash": "62c074f",
    "date": "08/02 14:57",
@@ -184,36 +240,6 @@ window.RYZA_DATA = {
    "hash": "c3f9983",
    "date": "08/02 14:53",
    "subject": "chore(site): 進捗データ更新(GCP セットアップ完了)"
-  },
-  {
-   "hash": "a5d984b",
-   "date": "08/02 14:43",
-   "subject": "docs: ステータスサイトをローカル配信に変更(Cloud Run 公開版を撤去)"
-  },
-  {
-   "hash": "dd21347",
-   "date": "08/02 14:41",
-   "subject": "feat(site): 開発ステータスサイト(Cloud Run)— ロードマップ・Issues・変更履歴の可視化"
-  },
-  {
-   "hash": "63a80f6",
-   "date": "08/02 14:31",
-   "subject": "docs(ips): レバレッジ型ETF禁止の理由を明記"
-  },
-  {
-   "hash": "7385c30",
-   "date": "08/02 13:48",
-   "subject": "docs(governance): AI役員体制(役職資産による人格永続化)と IPS 改訂フローを設計"
-  },
-  {
-   "hash": "39aa6a2",
-   "date": "08/02 12:59",
-   "subject": "docs(tasks): 実装指示書 T-001〜T-003 を発行(DB基盤・会計エンジン・証憑/リネージ)"
-  },
-  {
-   "hash": "3ce64ce",
-   "date": "08/02 12:56",
-   "subject": "docs: 全体設計 v3.2 とデータ基盤+会計詳細設計を確定"
   }
  ]
 };
