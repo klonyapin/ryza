@@ -5,6 +5,7 @@ description = "Ryza — 自動運用システム: データ基盤と会計マイ
 requires-python = ">=3.12"
 dependencies = [
     "psycopg[binary]>=3.2",
+    "pandas>=2.0",
 ]
 
 [project.optional-dependencies]
