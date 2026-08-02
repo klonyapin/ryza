@@ -1,0 +1,41 @@
+# config/feeds.yaml — 汎用ニュース RSS の取込対象。
+#
+# ingest.news_rss がこのリストを読み、各フィードを 15 分間隔でポーリングして
+# docs.documents（source_type は下記 source_type）へ冪等取込する。robots / 利用規約を
+# 尊重し、本文はリンク先を取得できる範囲に留める（設計 20-research §2）。
+#
+# ── 初期セット（設計リード確認待ち・私案）─────────────────────────────────────
+# 20-research §2（2026-08-03 更新）で「官公庁・中銀 RSS を初期セットに含める」ことは
+# 確定。以下 gov / central_bank ブロックは確定枠として active: true。一般報道社の
+# 公開 RSS 選定（日経系・Reuters・Bloomberg 等）は朝刊編集方針の回答を反映して確定する
+# ため、下部の news ブロックは active: false（コメント提案）で置いてある。URL は各社の
+# 実提供状況に合わせて確定時に差し替える。
+
+feeds:
+  # ── 官公庁・中央銀行（確定枠・§2）──────────────────────────────────────────
+  - name: 日銀
+    url: https://www.boj.or.jp/rss/whatsnew.xml
+    source_type: gov
+    active: true
+  - name: 財務省
+    url: https://www.mof.go.jp/rss/new.xml
+    source_type: gov
+    active: true
+  - name: 金融庁
+    url: https://www.fsa.go.jp/fsanews.rdf
+    source_type: gov
+    active: true
+  - name: FRB
+    url: https://www.federalreserve.gov/feeds/press_all.xml
+    source_type: central_bank
+    active: true
+
+  # ── 一般報道（私案・設計リード確認待ち: active=false）─────────────────────────
+  # 朝刊編集方針の回答を反映して確定する。候補（公開 RSS の提供有無を要確認）:
+  # - Reuters（ワールド/マーケット）  https://www.reutersagency.com/feed/
+  # - 日経系の公開 RSS（提供範囲を確認）
+  # - Bloomberg 公開分（提供範囲を確認）
+  # - name: Reuters
+  #   url: https://www.reutersagency.com/feed/?best-topics=business-finance
+  #   source_type: news
+  #   active: false

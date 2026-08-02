@@ -1,0 +1,38 @@
+# config/fred_series.yaml — FRED（セントルイス連銀）マクロ統計の取込対象系列。
+#
+# ingest.fred がこのリストを読み、各 series_id の観測値を FRED API から取得して
+# market.indicators へ書き込む（series_code は FRED ID に 'FRED:' 接頭辞を付す。
+# 例 'FRED:DGS10'）。統計改定は as_of と revision で表現する。
+#
+# ── 初期セット（私案・設計リード確認待ち）─────────────────────────────────────
+# 主要金利・物価・雇用を最小構成で。第2期に ISM・住宅・信用スプレッド等を情報分析班の
+# ミニ投資案として拡張する（§2 の継続プロセス）。id は FRED の series ID。
+
+series:
+  # ── 金利 ──────────────────────────────────────────────────────────────────
+  - id: DGS10          # 米 10 年国債利回り
+    active: true
+  - id: DGS2           # 米 2 年国債利回り
+    active: true
+  - id: FEDFUNDS       # 実効 FF レート（月次）
+    active: true
+  - id: T10Y2Y         # 10 年−2 年スプレッド（景気先行）
+    active: true
+
+  # ── 物価 ──────────────────────────────────────────────────────────────────
+  - id: CPIAUCSL       # 米 CPI（総合・季節調整）
+    active: true
+  - id: PCEPILFE       # コア PCE（FRB の物価目標指標）
+    active: true
+
+  # ── 雇用・景気 ────────────────────────────────────────────────────────────
+  - id: UNRATE         # 米 失業率
+    active: true
+  - id: PAYEMS         # 非農業部門雇用者数
+    active: true
+
+  # ── 追加候補（第2期・active=false）───────────────────────────────────────────
+  # - id: T10YIE       # 期待インフレ率（10 年 BEI）
+  #   active: false
+  # - id: BAMLH0A0HYM2 # ハイイールド OAS（信用スプレッド）
+  #   active: false
