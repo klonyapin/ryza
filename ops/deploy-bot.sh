@@ -173,7 +173,6 @@ WorkingDirectory=/opt/ryza
 ExecStart=/opt/ryza/.venv/bin/python -m ryza.bot.main
 Restart=always
 RestartSec=30
-RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
