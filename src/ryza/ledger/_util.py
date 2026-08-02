@@ -4,15 +4,19 @@
 移動平均法によるポジション再生(fills の再生)を提供する。
 
 - 金額はすべて Decimal で扱う(numeric 列と対応)。
-- 証憑は設計書 §5 の補足に従い、小さな内部記録は payload_ref に JSON をインライン格納し、
-  sha256 は格納内容(UTF-8 バイト列)に対して計算する(T-003 の GCS 証憑ストア完成まで
-  の DB 内フォールバック)。
+- 証憑作成(``create_evidence``)は T-003 の証憑ストア(``ryza.provenance.evidence``)経由に
+  統合済み(T-005)。環境変数 ``RYZA_EVIDENCE_DIR`` があれば ``EvidenceStore(LocalStorage(そのパス))``
+  で不変保存 + sha256 改竄検知 + 重複排除を行う。未設定時は設計書 §5 補足に従い、小さな内部記録は
+  payload_ref に JSON をインライン格納する(kind='decision' 等の内部記録はインライン許容)。
+- ``replay_position`` はどちらの経路の証憑でも payload を復元して読む。
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
+import os
 from datetime import UTC, datetime
 from datetime import date as _date
 from decimal import Decimal
@@ -20,7 +24,29 @@ from typing import Any
 
 import psycopg
 
+from ryza.provenance.evidence import EvidenceStore, LocalStorage
+
 CODE_VERSION = "T-002"
+
+# 証憑ストア経由で保存された payload_ref の URI スキーム(インライン格納との判別に使う)。
+_STORE_URI_SCHEMES = ("file://", "gs://")
+
+
+@functools.lru_cache(maxsize=8)
+def _evidence_store_for(evidence_dir: str) -> EvidenceStore:
+    """RYZA_EVIDENCE_DIR に対応する EvidenceStore を返す(パス単位でキャッシュ)。"""
+    return EvidenceStore(LocalStorage(evidence_dir))
+
+
+def _evidence_store() -> EvidenceStore | None:
+    """環境変数 ``RYZA_EVIDENCE_DIR`` があれば証憑ストアを、無ければ None を返す。
+
+    None のときは create_evidence が従来どおり payload_ref に JSON をインライン格納する。
+    """
+    evidence_dir = os.environ.get("RYZA_EVIDENCE_DIR")
+    if not evidence_dir:
+        return None
+    return _evidence_store_for(evidence_dir)
 
 
 def to_decimal(x: Any) -> Decimal:
@@ -66,6 +92,19 @@ def _canonical_json(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def _store_payload(payload: Any) -> bytes | dict[str, Any] | list[Any]:
+    """証憑ストア(``EvidenceStore.store``)が受ける型に正規化する。
+
+    dict/list/bytes はそのまま(dict/list は store 側が決定論的 JSON 化)。str は utf-8 バイト列に。
+    それ以外は決定論的 JSON バイト列にする。
+    """
+    if isinstance(payload, (bytes, dict, list)):
+        return payload
+    if isinstance(payload, str):
+        return payload.encode("utf-8")
+    return _canonical_json(payload).encode("utf-8")
+
+
 def create_evidence(
     conn: psycopg.Connection,
     *,
@@ -76,9 +115,15 @@ def create_evidence(
 ) -> int:
     """証憑行を作成し evidence_id を返す。
 
-    payload は dict/list/str。小さな内部記録は JSON を payload_ref にインライン格納し、
+    ``RYZA_EVIDENCE_DIR`` が設定されていれば T-003 の証憑ストア経由で保存する
+    (不変保存 + sha256 改竄検知 + 重複排除。retrieved_at はストアが設定するため無視)。
+    未設定時は小さな内部記録として JSON を payload_ref にインライン格納し、
     sha256 は JSON バイト列に対して計算する(設計書 §5 補足)。
     """
+    store = _evidence_store()
+    if store is not None:
+        return store.store(conn, kind, _store_payload(payload), source)
+
     text = _canonical_json(payload)
     digest = hashlib.sha256(text.encode("utf-8")).digest()
     with conn.cursor() as cur:
@@ -91,6 +136,28 @@ def create_evidence(
             (kind, text, digest, source, retrieved_at or _now()),
         )
         return cur.fetchone()[0]
+
+
+def load_evidence_payload(
+    conn: psycopg.Connection, evidence_id: int, payload_ref: str
+) -> Any | None:
+    """証憑の payload を JSON として復元する(ストア経由・インラインの両対応)。
+
+    payload_ref が証憑ストアの URI(file://|gs://)なら実体を取得して json.loads し、
+    そうでなければインライン JSON としてそのまま json.loads する。復元不能時は None。
+    """
+    if payload_ref.startswith(_STORE_URI_SCHEMES):
+        store = _evidence_store()
+        if store is not None:
+            try:
+                return json.loads(store.get(conn, evidence_id).decode("utf-8"))
+            except (ValueError, TypeError, KeyError, OSError):
+                return None
+        return None
+    try:
+        return json.loads(payload_ref)
+    except (ValueError, TypeError):
+        return None
 
 
 def resolve_evidence(
@@ -158,7 +225,7 @@ def replay_position(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT e.payload_ref
+            SELECT je.evidence_id, e.payload_ref
             FROM ledger.journal_entries je
             JOIN ledger.evidence e ON e.evidence_id = je.evidence_id
             WHERE je.book_id = %s
@@ -172,14 +239,13 @@ def replay_position(
             """,
             (book_id,),
         )
-        payloads = [r[0] for r in cur.fetchall()]
+        rows = cur.fetchall()
 
     qty = Decimal(0)
     cost = Decimal(0)
-    for text in payloads:
-        try:
-            fill = json.loads(text)
-        except (ValueError, TypeError):
+    for evidence_id, payload_ref in rows:
+        fill = load_evidence_payload(conn, evidence_id, payload_ref)
+        if not isinstance(fill, dict):
             continue
         if int(fill.get("instrument_id", -1)) != int(instrument_id):
             continue
