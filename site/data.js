@@ -1,5 +1,5 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-02 14:57 JST",
+ "generated_at": "2026-08-02 14:59 JST",
  "phase": "実装フェーズ(T-001 進行中)",
  "milestones": [
   {
@@ -175,6 +175,11 @@ window.RYZA_DATA = {
   }
  ],
  "commits": [
+  {
+   "hash": "62c074f",
+   "date": "08/02 14:57",
+   "subject": "chore(site): デモ口座開設を保留に変更(自前シミュレータで代替、IBKRは執行層実装前に)"
+  },
   {
    "hash": "c3f9983",
    "date": "08/02 14:53",
