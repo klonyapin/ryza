@@ -31,15 +31,15 @@ reminders:
     status: pending
 
   - id: ips-quarterly-review
-    what: "IPS 四半期レビュー(CIO による IPS 批判レポート起草)"
+    what: "IPS 月次レビュー(CIO による IPS 批判レポート起草。営業期間=1ヶ月制)"
     conditions:
       - type: date_after
-        date: "2026-11-02"
+        date: "2026-09-02"
     action:
       type: issue_create
-      title: "IPS 四半期レビュー(2026Q4)"
+      title: "IPS 月次レビュー(2026-09)"
       labels: [decision]
-      body: "docs/design/80-ips.md §2.1 のフローに従い、CIO が IPS 批判レポート(遵守実績・バインドした制約の機会費用・IPS 自体への批判)を起草し投資委員会で対話する。発効はユーザー決議のみ。完了時は ops/reminders.yaml に次回分(+3ヶ月)を登録すること。"
+      body: "docs/design/80-ips.md §2.1 のフローに従い、CIO が IPS 批判レポート(遵守実績・バインドした制約の機会費用・IPS 自体への批判)を起草し投資委員会で対話する。発効はユーザー決議のみ。完了時は ops/reminders.yaml に次回分(+1ヶ月)を登録すること。データ律速の統計は n≥20営業日を満たすまで「データ不足」と明記。"
     status: pending
 
   - id: billing-export-verify
