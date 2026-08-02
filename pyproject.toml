@@ -6,12 +6,18 @@ requires-python = ">=3.12"
 dependencies = [
     "psycopg[binary]>=3.2",
     "pandas>=2.0",
+    "pyyaml>=6.0.3",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+]
+# 経営管理部ジョブ ops-weekly(T-004)の実行時依存。BigQuery は bq_table_missing 条件でのみ
+# 使うため遅延インポート。デプロイイメージ(docker/ops)では .[ops] を入れる。
+ops = [
+    "google-cloud-bigquery>=3.0",
 ]
 
 [build-system]

@@ -1,0 +1,351 @@
+"""週次運用ジョブ ops-weekly の単体・統合テスト。
+
+- 条件エバリュエータ4種を真偽両方で検証(フィクスチャ)
+- 冪等性: 既発火リマインダーの二重発火なし / 当週ダイジェストの二重投稿なし /
+  同週2回実行で書き込みが増えない
+- DRY_RUN=1 のエンドツーエンド(GitHub API はモック、書き込みが発生しない)
+- reminders.yaml の status ターゲット書き換え(コメント・整形を保つ)
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from ryza.ops import weekly
+from ryza.ops.github import GitHubClient
+
+NOW = datetime(2026, 8, 2, 1, 0, tzinfo=UTC)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# 小さな合成 reminders.yaml(発火するもの/しないもの/既発火 を1つずつ)
+SYNTH_REMINDERS = """\
+version: 2
+reminders:
+  # 発火する(過去日)
+  - id: fires-now
+    what: "テスト: 過去日で発火"
+    conditions:
+      - type: date_after
+        date: "2020-01-01"
+    action:
+      type: issue_comment
+      issue: 5
+      body: "発火テスト"
+    status: pending
+
+  # まだ発火しない(未来日)
+  - id: not-yet
+    what: "テスト: 未来日"
+    conditions:
+      - type: date_after
+        date: "2999-01-01"
+    action:
+      type: issue_comment
+      issue: 6
+      body: "まだ"
+    status: pending
+
+  # 既発火(冪等性: スキップされる)
+  - id: already-fired
+    what: "テスト: 既発火"
+    conditions:
+      - type: date_after
+        date: "2020-01-01"
+    action:
+      type: issue_comment
+      issue: 7
+      body: "再発火しない"
+    status: "fired: 2026-01-05"
+"""
+
+
+class StubClient:
+    """weekly.* が使う高レベル GitHub API のフェイク。
+
+    reminders.yaml を ``files`` に保持し update_file で永続化する(2回目の run で
+    fired 済み状態が反映される)。dry_run 時は書き込みを実行せず記録もしない
+    (実クライアントの契約を模す。実クライアントの dry_run は test_github で別途検証)。
+    """
+
+    def __init__(
+        self,
+        *,
+        reminders_text: str = SYNTH_REMINDERS,
+        issues: list[dict[str, Any]] | None = None,
+        dir_entries: list[dict[str, Any]] | None = None,
+        commits: list[dict[str, Any]] | None = None,
+        dry_run: bool = False,
+    ) -> None:
+        self.dry_run = dry_run
+        self.files: dict[str, tuple[str, str]] = {"ops/reminders.yaml": (reminders_text, "sha0")}
+        self._issues = issues if issues is not None else []
+        self._dir = dir_entries or []
+        self._commits = commits or []
+        self._comments: dict[int, list[dict[str, Any]]] = {}
+        self.comments_posted: list[tuple[int, str]] = []
+        self.issues_created: list[dict[str, Any]] = []
+        self.files_updated: list[tuple[str, str]] = []
+        self._sha_seq = 0
+
+    # 読み取り
+    def get_file(self, path: str) -> tuple[str, str]:
+        return self.files[path]
+
+    def list_dir(self, path: str) -> list[dict[str, Any]]:
+        return self._dir
+
+    def list_issues(self, *, state="open", labels=None, since=None):
+        out = []
+        for i in self._issues:
+            if state != "all" and i.get("state", "open") != state:
+                continue
+            if labels:
+                names = {lb["name"] for lb in i.get("labels", [])}
+                if not set(labels) <= names:
+                    continue
+            out.append(i)
+        return out
+
+    def list_commits(self, *, since=None):
+        return self._commits
+
+    def list_issue_comments(self, issue_number: int):
+        return self._comments.get(issue_number, [])
+
+    # 書き込み(dry_run ガード)
+    def create_issue_comment(self, issue_number: int, body: str):
+        if self.dry_run:
+            return None
+        self.comments_posted.append((issue_number, body))
+        self._comments.setdefault(issue_number, []).append({"body": body})
+        return {"id": len(self.comments_posted)}
+
+    def create_issue(self, title: str, body: str, labels=None):
+        if self.dry_run:
+            return None
+        issue = {
+            "number": 900 + len(self.issues_created),
+            "title": title,
+            "state": "open",
+            "labels": [{"name": x} for x in (labels or [])],
+        }
+        self.issues_created.append(issue)
+        self._issues.append(issue)
+        return issue
+
+    def update_file(self, path: str, content: str, message: str, sha: str):
+        if self.dry_run:
+            return None
+        self._sha_seq += 1
+        new_sha = f"sha{self._sha_seq}"
+        self.files[path] = (content, new_sha)
+        self.files_updated.append((path, message))
+        return {"content": {"sha": new_sha}}
+
+
+def _true_bq(*_a):
+    return True
+
+
+def _false_bq(*_a):
+    return False
+
+
+# ── 条件エバリュエータ4種(真偽両方) ────────────────────────────────────────
+def test_cond_date_after():
+    client = StubClient()
+    assert weekly.evaluate_condition(
+        {"type": "date_after", "date": "2026-08-01"}, client, NOW, bq_checker=_false_bq
+    )
+    assert not weekly.evaluate_condition(
+        {"type": "date_after", "date": "2026-08-03"}, client, NOW, bq_checker=_false_bq
+    )
+
+
+def test_cond_issue_label_open():
+    issues = [{"number": 8, "state": "open", "labels": [{"name": "execution-layer"}]}]
+    client = StubClient(issues=issues)
+    assert weekly.evaluate_condition(
+        {"type": "issue_label_open", "label": "execution-layer"}, client, NOW, bq_checker=_false_bq
+    )
+    assert not weekly.evaluate_condition(
+        {"type": "issue_label_open", "label": "nonexistent"}, client, NOW, bq_checker=_false_bq
+    )
+
+
+def test_cond_task_file_glob():
+    with_broker = StubClient(dir_entries=[{"path": "docs/tasks/T-010-broker-adapter.md"}])
+    without = StubClient(dir_entries=[{"path": "docs/tasks/T-001-repo-and-db.md"}])
+    cond = {"type": "task_file_glob", "glob": "docs/tasks/*broker*"}
+    assert weekly.evaluate_condition(cond, with_broker, NOW, bq_checker=_false_bq)
+    assert not weekly.evaluate_condition(cond, without, NOW, bq_checker=_false_bq)
+
+
+def test_cond_bq_table_missing():
+    client = StubClient()
+    cond = {"type": "bq_table_missing", "project": "ryza-main", "dataset": "billing_export"}
+    assert weekly.evaluate_condition(cond, client, NOW, bq_checker=_true_bq)
+    assert not weekly.evaluate_condition(cond, client, NOW, bq_checker=_false_bq)
+
+
+def test_conditions_are_or():
+    client = StubClient()
+    conds = [
+        {"type": "date_after", "date": "2999-01-01"},  # False
+        {"type": "date_after", "date": "2000-01-01"},  # True
+    ]
+    assert weekly.evaluate_conditions(conds, client, NOW, bq_checker=_false_bq)
+
+
+# ── only_if(AND ゲート): billing-export-verify 型 ───────────────────────────
+def test_only_if_gate_blocks_when_false():
+    # date_after は True だが only_if(bq_table_missing)が False → 発火しない
+    text = """\
+version: 2
+reminders:
+  - id: billing
+    what: "x"
+    conditions:
+      - type: date_after
+        date: "2020-01-01"
+    action:
+      type: issue_comment
+      issue: 7
+      body: "警告"
+      only_if:
+        type: bq_table_missing
+        project: p
+        dataset: d
+    status: pending
+"""
+    client = StubClient(reminders_text=text)
+    doc = weekly.yaml.safe_load(text)
+    fired = weekly.fire_reminders(client, doc, text, "sha0", NOW, bq_checker=_false_bq)
+    assert fired == []
+    fired2 = weekly.fire_reminders(client, doc, text, "sha0", NOW, bq_checker=_true_bq)
+    assert fired2 == ["billing"]
+
+
+# ── set_reminder_status: ターゲット書き換え ─────────────────────────────────
+def test_set_reminder_status_targeted():
+    real = (REPO_ROOT / "ops" / "reminders.yaml").read_text(encoding="utf-8")
+    updated = weekly.set_reminder_status(real, "ips-quarterly-review", '"fired: 2026-08-02"')
+    # 対象だけ fired、他は pending のまま。
+    doc = weekly.yaml.safe_load(updated)
+    by_id = {r["id"]: r for r in doc["reminders"]}
+    assert by_id["ips-quarterly-review"]["status"] == "fired: 2026-08-02"
+    assert by_id["ibkr-account-application"]["status"] == "pending"
+    assert by_id["billing-export-verify"]["status"] == "pending"
+    # コメント行が保たれている(全体再シリアライズしていない)。
+    assert "# conditions は OR 評価" in updated
+
+
+# ── 発火 + 冪等性(既発火スキップ) ──────────────────────────────────────────
+def test_fire_skips_already_fired_and_future():
+    client = StubClient()
+    doc = weekly.yaml.safe_load(SYNTH_REMINDERS)
+    fired = weekly.fire_reminders(
+        client, doc, SYNTH_REMINDERS, "sha0", NOW, bq_checker=_false_bq
+    )
+    assert fired == ["fires-now"]  # not-yet(未来)・already-fired(既発火)は除外
+    assert client.comments_posted == [(5, "発火テスト")]
+    # reminders.yaml が1回コミットされ、status が fired になっている。
+    assert len(client.files_updated) == 1
+    new_text, _ = client.files["ops/reminders.yaml"]
+    by_id = {r["id"]: r for r in weekly.yaml.safe_load(new_text)["reminders"]}
+    assert by_id["fires-now"]["status"].startswith("fired")
+
+
+# ── 冪等性: 同週2回実行で書き込みが増えない ─────────────────────────────────
+def test_run_weekly_idempotent_across_runs():
+    digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
+    client = StubClient(issues=[digest_issue])
+    weekly.run_weekly(client, now=NOW, bq_checker=_false_bq)
+    writes_after_1 = (len(client.files_updated), len(client.comments_posted))
+    # 1回目: reminder 1件コミット + ダイジェスト1件コメント。
+    assert writes_after_1 == (1, 2)  # files_update=1, comments=(発火issue5)+(ダイジェスト)=2
+
+    weekly.run_weekly(client, now=NOW, bq_checker=_false_bq)
+    writes_after_2 = (len(client.files_updated), len(client.comments_posted))
+    # 2回目: 既発火スキップ + 当週ダイジェスト済み → 追加書き込みなし。
+    assert writes_after_2 == writes_after_1
+
+
+# ── 冪等性: ダイジェスト二重投稿なし ────────────────────────────────────────
+def test_digest_not_double_posted():
+    digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
+    client = StubClient(issues=[digest_issue])
+    assert weekly.post_digest(client, NOW, fired=[]) is True
+    assert weekly.post_digest(client, NOW, fired=[]) is False
+    assert len(client.comments_posted) == 1
+
+
+def test_digest_created_when_missing():
+    client = StubClient(issues=[])  # digest Issue が無い
+    posted = weekly.post_digest(client, NOW, fired=["x"])
+    assert posted is True
+    assert len(client.issues_created) == 1
+    assert client.issues_created[0]["labels"] == [{"name": "digest"}]
+
+
+# ── DRY_RUN エンドツーエンド(StubClient): 書き込みが発生しない ────────────────
+def test_dry_run_end_to_end_no_writes():
+    digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
+    client = StubClient(issues=[digest_issue], dry_run=True)
+    fired = weekly.run_weekly(client, now=NOW, bq_checker=_true_bq)
+    # 評価・発火判定は行われる(fires-now が対象)。
+    assert fired == ["fires-now"]
+    # だが書き込みは一切行われない。
+    assert client.comments_posted == []
+    assert client.issues_created == []
+    assert client.files_updated == []
+
+
+# ── DRY_RUN エンドツーエンド(実クライアント): ネットワーク書き込みが出ない ─────
+class _Resp:
+    def __init__(self, body: bytes) -> None:
+        self._b = body
+
+    def read(self) -> bytes:
+        return self._b
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return None
+
+
+class _PathOpener:
+    def __init__(self, routes):
+        self.routes = routes
+        self.records = []
+
+    def open(self, req):
+        path = req.full_url.split("api.github.com", 1)[-1].split("?", 1)[0]
+        self.records.append({"method": req.get_method(), "path": path})
+        payload = self.routes.get(("GET", path))
+        return _Resp(json.dumps(payload).encode() if payload is not None else b"")
+
+
+def test_dry_run_real_client_makes_no_write_requests():
+    digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
+    routes = {
+        ("GET", "/repos/acme/ryza/contents/ops/reminders.yaml"): {
+            "content": base64.b64encode(SYNTH_REMINDERS.encode()).decode(),
+            "sha": "sha0",
+        },
+        ("GET", "/repos/acme/ryza/issues"): [digest_issue],
+        ("GET", "/repos/acme/ryza/issues/9/comments"): [],
+        ("GET", "/repos/acme/ryza/commits"): [],
+    }
+    opener = _PathOpener(routes)
+    client = GitHubClient("tok", "acme/ryza", dry_run=True, opener=opener)
+    fired = weekly.run_weekly(client, now=NOW, bq_checker=_true_bq)
+    assert fired == ["fires-now"]
+    # opener に届いたのは GET のみ(POST/PUT なし)。
+    assert all(r["method"] == "GET" for r in opener.records)
