@@ -220,8 +220,9 @@ class RyzaBot(commands.Bot):
     async def daily_report(self) -> None:
         now = dt.datetime.now(dt.UTC)
         with connect() as conn:
-            with start_run("bot.daily", conn=conn) as r:
-                daily_mod.enqueue_daily(conn, now, r.run_id)
+            r = start_run("bot.daily", conn=conn)
+            daily_mod.enqueue_daily(conn, now, r.run_id)
+            r.finish("success")
             conn.commit()
 
     @daily_report.before_loop
