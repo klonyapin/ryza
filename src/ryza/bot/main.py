@@ -5,13 +5,15 @@ systemd(Restart=always)で常駐し:
 - 18:00 JST に日報を投入(``daily.enqueue_daily``)
 - ``#承認`` のボタン押下を ``governance.decisions`` に記録(オーナー検証)
 - ``/kill`` ``/resume``(2段階)で Kill Switch を操作
-- 起動時に ``#経営`` へ再起動通知(outbox 経由)
+- 起動時に4チャンネル(報道/承認/運営/dev)を指定カテゴリ配下へ ensure し、``#運営`` へ再起動通知
 
-**このモジュールは discord.py に依存する唯一の層**(純ロジックは outbox/approvals/killswitch/daily)。
+**このモジュールは discord.py に依存する唯一の層**
+(純ロジックは outbox/approvals/killswitch/daily/channels)。
 テストはこのモジュールを import せず、純ロジックをライブ DB で検証する。
 
 トークンは Secret Manager から起動時ロード(env ``RYZA_DISCORD_TOKEN`` があれば優先=ローカル検証用)。
-チャンネル ID・オーナー ID は環境変数で与える(ハードコードしない)。
+オーナー ID・カテゴリ ID は環境変数で与える(ハードコードしない)。実チャンネル ID は起動時に
+カテゴリ配下を ensure して ``ops.discord_channels`` に記録し、配送時はこの表を引く。
 
 必要な環境変数(deploy 時に指定):
   RYZA_DISCORD_TOKEN          直接指定(未指定なら Secret Manager から取得)
@@ -19,7 +21,7 @@ systemd(Restart=always)で常駐し:
   GCP_PROJECT                 Secret Manager のプロジェクト
   RYZA_OWNER_IDS              オーナーの Discord ユーザー ID(カンマ区切り)
   RYZA_GUILD_ID               スラッシュコマンド即時同期先のギルド ID(任意)
-  RYZA_CHANNEL_MORNING/FLASH/APPROVAL/DAILY/AUDIT/MGMT   各論理チャンネルの ID
+  RYZA_DISCORD_CATEGORY_ID    4チャンネルを配置するカテゴリ ID(必須)
   RYZA_DATABASE_URL           DB 接続(既定はローカル)
 """
 
@@ -33,7 +35,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from ryza.bot import CHANNELS, COLOR_FLASH, COLOR_NORMAL, killswitch, outbox
+from ryza.bot import COLOR_FLASH, COLOR_NORMAL, channels, killswitch, outbox
 from ryza.bot import daily as daily_mod
 from ryza.bot.approvals import KINDS, NotOwnerError, record_decision
 from ryza.bot.daily import JST
@@ -54,14 +56,12 @@ def owner_ids() -> list[str]:
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
-def channel_id_map() -> dict[str, int]:
-    """論理チャンネル → Discord チャンネル ID。未設定のものは含めない。"""
-    out: dict[str, int] = {}
-    for name in CHANNELS:
-        env = os.environ.get(f"RYZA_CHANNEL_{name.upper()}")
-        if env and env.strip().isdigit():
-            out[name] = int(env.strip())
-    return out
+def category_id() -> int:
+    """4チャンネルを配置するカテゴリ ID(必須)。"""
+    raw = os.environ.get("RYZA_DISCORD_CATEGORY_ID", "")
+    if not raw.strip().isdigit():
+        raise SystemExit("RYZA_DISCORD_CATEGORY_ID(数値)が未設定です")
+    return int(raw.strip())
 
 
 def load_token() -> str:
@@ -177,7 +177,7 @@ class RyzaBot(commands.Bot):
         intents = discord.Intents.default()
         super().__init__(command_prefix="!", intents=intents)
         self.owner_ids_list = owner_ids()
-        self.channels_map = channel_id_map()
+        self.category_id = category_id()
 
     @property
     def owner_ids(self) -> list[str]:  # type: ignore[override]
@@ -220,13 +220,15 @@ class RyzaBot(commands.Bot):
         loop = self.loop
 
         def send_fn(msg: outbox.OutboxMessage) -> str:
-            channel_id = self.channels_map.get(msg.channel)
+            # 論理チャンネル → 実 ID は ops.discord_channels(起動時 ensure 済み)から解決。
+            with connect() as resolve_conn:
+                channel_id = channels.resolve(resolve_conn, msg.channel)
             if channel_id is None:
-                raise RuntimeError(f"チャンネル未設定: {msg.channel}")
+                raise RuntimeError(f"チャンネル未解決(ensure 前?): {msg.channel}")
             embed = dict_to_embed(msg.embed)
             if msg.urgent:
                 embed.color = discord.Color(COLOR_FLASH)
-            channel = self.get_channel(channel_id)
+            channel = self.get_channel(int(channel_id))
             if channel is None:
                 raise RuntimeError(f"チャンネル取得失敗: {channel_id}")
             # discord の I/O はコルーチン。同期 send_fn からイベントループに投げて待つ。
@@ -241,6 +243,30 @@ class RyzaBot(commands.Bot):
                 outbox.deliver_pending(conn, send_fn)
         except Exception:  # noqa: BLE001 - 配送ループは死なせない
             log.exception("outbox 配送でエラー")
+
+    # ── チャンネル ensure(カテゴリ配下に4チャンネルを確保して DB 記録)──────────
+    async def ensure_channels(self) -> None:
+        """指定カテゴリ配下に4チャンネルを ensure し、結果を ops.discord_channels に記録する。"""
+        category = self.get_channel(self.category_id)
+        if not isinstance(category, discord.CategoryChannel):
+            log.error("カテゴリ %s が見つからない/種別不一致。ensure を中止", self.category_id)
+            return
+        existing_by_name = {ch.name: str(ch.id) for ch in category.text_channels}
+        plans = channels.plan_ensure(existing_by_name)
+        with connect() as conn:
+            for plan in plans:
+                if plan.action == "reuse" and plan.channel_id is not None:
+                    channel_id = plan.channel_id
+                else:
+                    created = await category.guild.create_text_channel(
+                        plan.channel_name, category=category
+                    )
+                    channel_id = str(created.id)
+                    log.info("チャンネル作成: %s (%s)", plan.channel_name, channel_id)
+                channels.record_channel(
+                    conn, plan.logical, plan.channel_name, channel_id, str(self.category_id)
+                )
+            conn.commit()
 
     # ── コマンド登録 ───────────────────────────────────────────────────────
     def _register_commands(self) -> None:
@@ -271,9 +297,13 @@ class RyzaBot(commands.Bot):
                 ephemeral=True,
             )
 
-    # ── 起動通知 ───────────────────────────────────────────────────────────
+    # ── 起動時: チャンネル ensure + 再起動通知 ───────────────────────────────
     async def on_ready(self) -> None:
         log.info("ready as %s (guilds=%d)", self.user, len(self.guilds))
+        try:
+            await self.ensure_channels()
+        except Exception:  # noqa: BLE001 - ensure 失敗でも Bot は生かす
+            log.exception("チャンネル ensure に失敗")
         now = dt.datetime.now(dt.UTC)
         embed = {
             "title": "Ryza Bot 起動",
@@ -283,7 +313,7 @@ class RyzaBot(commands.Bot):
         try:
             with connect() as conn:
                 with start_run("bot.startup", conn=conn) as r:
-                    outbox.enqueue(conn, "mgmt", embed, r.run_id)
+                    outbox.enqueue(conn, "ops", embed, r.run_id)  # #運営 へ
                 conn.commit()
         except Exception:  # noqa: BLE001
             log.exception("起動通知の投入に失敗")

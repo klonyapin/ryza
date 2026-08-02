@@ -6,3 +6,6 @@ __pycache__/
 secrets/
 .DS_Store
 scratch/
+.claude/settings.local.json
+# ローカル証憑ストアの出力(LocalStorage の既定ルート。ingest 実行の残渣)
+_evidence/

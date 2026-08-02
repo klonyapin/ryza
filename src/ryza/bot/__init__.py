@@ -22,8 +22,21 @@ COLOR_APPROVAL = 0x2E7D5B  # 緑(承認)
 # 免責フッター(全投稿・§6)
 DISCLAIMER = "本投稿は自己運用システムの内部記録であり投資助言ではない"
 
-# outbox の論理チャンネル(§7)。deploy 時に環境変数で実 Discord チャンネル ID へ写像する。
-CHANNELS = ("morning", "flash", "approval", "daily", "audit", "mgmt")
+# outbox の論理チャンネル(§1/§7・2026-08-03 で4つに統合)。
+#   press    … #報道(朝刊・速報・号外)
+#   approval … #承認(ボタン操作)
+#   ops      … #運営(日報・経営・監査報告・再起動通知)
+#   dev      … #dev(開発対話)
+# 実 Discord チャンネルは起動時にカテゴリ配下へ ensure し、解決結果を ops.discord_channels に記録。
+CHANNELS = ("press", "approval", "ops", "dev")
+
+# 論理名 → Discord 上の表示名。Bot がこの名前でカテゴリ内を検索・自動作成する。
+CHANNEL_NAMES: dict[str, str] = {
+    "press": "報道",
+    "approval": "承認",
+    "ops": "運営",
+    "dev": "dev",
+}
 
 # ops.flags のキー
 KILL_SWITCH = "kill_switch"
@@ -34,5 +47,6 @@ __all__ = [
     "COLOR_APPROVAL",
     "DISCLAIMER",
     "CHANNELS",
+    "CHANNEL_NAMES",
     "KILL_SWITCH",
 ]

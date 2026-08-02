@@ -19,6 +19,13 @@ dev = [
 ops = [
     "google-cloud-bigquery>=3.0",
 ]
+# Ryza 本体 Discord Bot(T-006)の GCE 常駐時依存。テスト(tests/bot)は純ロジックのみで
+# discord.py を import しないため dev には含めない。VM プロビジョニングで .[bot] を入れる。
+# secret-manager は起動時にトークンを取得する(RYZA_DISCORD_TOKEN 未指定時のみ・遅延 import)。
+bot = [
+    "discord.py>=2.6,<3.0",
+    "google-cloud-secret-manager>=2.20",
+]
 
 [build-system]
 requires = ["hatchling"]

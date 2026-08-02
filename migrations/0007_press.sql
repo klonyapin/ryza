@@ -19,7 +19,7 @@ CREATE SCHEMA IF NOT EXISTS press;
 
 CREATE TABLE press.outbox (
     id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    channel         text NOT NULL,          -- morning|flash|approval|daily|audit|mgmt
+    channel         text NOT NULL,          -- press|approval|ops|dev(2026-08-03 4チャンネル統合)
     embed_json      jsonb NOT NULL,         -- Discord embed(色・免責フッター込み)
     urgent          boolean NOT NULL DEFAULT false,
     created_at      timestamptz NOT NULL DEFAULT now(),
@@ -83,6 +83,17 @@ CREATE TABLE ops.flag_events (
 );
 CREATE INDEX flag_events_name_idx ON ops.flag_events (name, created_at);
 
+-- Discord チャンネル解決(§1 改訂: 4チャンネルをカテゴリ配下に ensure し name→id を記録)。
+-- Bot が起動時に指定カテゴリの子チャンネルを走査し、論理名(press|approval|ops|dev)ごとに
+-- 既存を再利用するか自動作成し、解決結果をここに upsert する(手動リネームに追従)。
+CREATE TABLE ops.discord_channels (
+    logical      text PRIMARY KEY,          -- press|approval|ops|dev
+    channel_name text NOT NULL,             -- 報道|承認|運営|dev(Discord 上の表示名)
+    channel_id   text NOT NULL,             -- 解決/作成した Discord チャンネル ID
+    category_id  text NOT NULL,             -- 所属カテゴリ ID
+    resolved_at  timestamptz NOT NULL DEFAULT now()
+);
+
 -- ────────────────────────────────────────────────────────────────────────────
 -- データカタログ用コメント
 -- ────────────────────────────────────────────────────────────────────────────
@@ -111,3 +122,9 @@ COMMENT ON SCHEMA ops IS '運用フラグと遷移監査。Kill Switch は全発
 COMMENT ON TABLE ops.flags IS '運用フラグの現在値(kill_switch 等)。全発注経路が参照。';
 COMMENT ON COLUMN ops.flags.enabled IS 'true=有効(Kill Switch なら発注停止)。';
 COMMENT ON TABLE ops.flag_events IS 'フラグ遷移の追記オンリー監査証跡。';
+
+COMMENT ON TABLE ops.discord_channels IS 'Discord チャンネルの論理名→ID 解決結果(Bot が起動時 ensure して記録)。';
+COMMENT ON COLUMN ops.discord_channels.logical IS 'outbox.channel の値(press|approval|ops|dev)。';
+COMMENT ON COLUMN ops.discord_channels.channel_name IS 'Discord 上の表示名(報道|承認|運営|dev)。';
+COMMENT ON COLUMN ops.discord_channels.channel_id IS '解決/作成したチャンネル ID。';
+COMMENT ON COLUMN ops.discord_channels.category_id IS '所属カテゴリ ID。';

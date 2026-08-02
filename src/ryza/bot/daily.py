@@ -1,7 +1,7 @@
 """日報骨格(§5「日報」)。
 
-会計・リスクの確定値を 18:00 JST に ``#日報`` へ投稿する。データが揃うまでは**稼働状況のみ**
-(Bot 稼働・未送キュー・当日ジョブ実行・Kill Switch 状態・検証期限到来の予兆件数)。
+会計・リスクの確定値を 18:00 JST に ``#運営``(logical=ops)へ投稿する。データが揃うまでは
+**稼働状況のみ**(Bot 稼働・未送キュー・当日ジョブ実行・Kill Switch 状態・検証期限到来の予兆件数)。
 
 会計/リスクの確定値配線は T-002 以降の会計エンジン・データ層に依存するため本タスクでは骨格に留め、
 ``build_status_report`` が返す embed に「稼働状況」セクションのみを載せる。純ロジック(DB のみ)。
@@ -72,6 +72,6 @@ def build_status_report(conn: psycopg.Connection, now: datetime) -> dict:
 
 
 def enqueue_daily(conn: psycopg.Connection, now: datetime, run_id: int) -> int:
-    """日報を ``press.outbox``(channel=daily)に投入し outbox id を返す。"""
+    """日報を ``press.outbox``(channel=ops → #運営)に投入し outbox id を返す。"""
     embed = build_status_report(conn, now)
-    return enqueue(conn, "daily", embed, run_id)
+    return enqueue(conn, "ops", embed, run_id)
