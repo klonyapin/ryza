@@ -66,8 +66,10 @@ fi
 
 # ── 2. イメージのビルドと push(Cloud Build) ─────────────────────────────────
 echo "-- イメージをビルド: ${IMAGE}"
-gcloud builds submit "${ROOT}" \
-  --config=- <<EOF
+# gcloud builds submit は --config に stdin(-)を受け付けないため一時ファイルを使う
+CB_CONFIG=$(mktemp /tmp/cloudbuild.XXXXXX.yaml)
+trap 'rm -f "${CB_CONFIG}"' EXIT
+cat > "${CB_CONFIG}" <<EOF
 steps:
   - name: gcr.io/cloud-builders/docker
     args: ["build", "-f", "docker/ops/Dockerfile", "-t", "${IMAGE}", "-t", "${IMAGE_LATEST}", "."]
@@ -75,6 +77,7 @@ images:
   - "${IMAGE}"
   - "${IMAGE_LATEST}"
 EOF
+gcloud builds submit "${ROOT}" --config="${CB_CONFIG}"
 
 # ── 3. Secret へのアクセス権(SA に Secret Accessor) ─────────────────────────
 echo "-- Secret Accessor を SA に付与(冪等)"

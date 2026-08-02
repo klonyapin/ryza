@@ -1,5 +1,5 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-02 15:46 JST",
+ "generated_at": "2026-08-03 01:19 JST",
  "phase": "実装フェーズ(T-001 進行中)",
  "milestones": [
   {
@@ -176,7 +176,7 @@ window.RYZA_DATA = {
   {
    "number": 11,
    "title": "GitHub トークンを Secret Manager へ登録(手作業・3分)",
-   "state": "OPEN",
+   "state": "CLOSED",
    "labels": [
     "user-action"
    ]
@@ -184,7 +184,7 @@ window.RYZA_DATA = {
   {
    "number": 12,
    "title": "T-004: 週次運用ジョブ ops-weekly(Cloud Run Job + Scheduler)",
-   "state": "OPEN",
+   "state": "CLOSED",
    "labels": [
     "impl"
    ]
@@ -204,58 +204,74 @@ window.RYZA_DATA = {
    "labels": [
     "impl"
    ]
+  },
+  {
+   "number": 15,
+   "title": "第1回フル実装監査(別ベンダー AI によるコード監査)",
+   "state": "OPEN",
+   "labels": [
+    "design"
+   ]
+  },
+  {
+   "number": 16,
+   "title": "週次ダイジェスト",
+   "state": "OPEN",
+   "labels": [
+    "digest"
+   ]
   }
  ],
  "commits": [
   {
+   "hash": "b09cb20",
+   "date": "08/02 16:14",
+   "subject": "docs: コスト設計機能(FinOps)— ユニットエコノミクス・階層実験・探索の最低保証枠"
+  },
+  {
+   "hash": "85109f3",
+   "date": "08/02 16:10",
+   "subject": "docs: 研究制度 v2 — 探索/確証モード分離・実験台帳・Lakatos 型プログラム評価(調査に基づく全面改訂)"
+  },
+  {
+   "hash": "c58ad02",
+   "date": "08/02 16:02",
+   "subject": "docs: マルチマネージャー制(ポッド制)採用 — FM ペルソナ・固定上限撤廃・中央機能唯一の鉄則"
+  },
+  {
+   "hash": "6b05154",
+   "date": "08/02 16:00",
+   "subject": "docs: 営業期間=1ヶ月制(労働律速/データ律速の2分類)と柔軟な監査(重要性基準・リスクベース・ゼロトレランス)"
+  },
+  {
+   "hash": "b2a3069",
+   "date": "08/02 15:58",
+   "subject": "docs: IPS 複数プロファイル運用(開発フェーズ)と研究評価設計(事前登録・4層指標)を追加"
+  },
+  {
+   "hash": "f0b6f1a",
+   "date": "08/02 15:55",
+   "subject": "docs(governance): 監査項目 A-13〜A-17 とメタ監査(監査部門の更新機構)を追加"
+  },
+  {
+   "hash": "bee98b6",
+   "date": "08/02 15:52",
+   "subject": "docs: 議論規約(追従禁止・反対意見書・盲検レビュー)を追加"
+  },
+  {
+   "hash": "01d7a8b",
+   "date": "08/02 15:51",
+   "subject": "docs(governance): 実装監査(A-11 PR監査/A-12 四半期コード監査、別ベンダーAI)を恒久機能として追加"
+  },
+  {
+   "hash": "28ed7b3",
+   "date": "08/02 15:46",
+   "subject": "chore(site): 進捗更新(T-004/T-005 完了)"
+  },
+  {
    "hash": "78e9cc8",
    "date": "08/02 15:45",
    "subject": "feat(ops): 週次運用ジョブ ops-weekly (T-004)"
-  },
-  {
-   "hash": "d70d2d0",
-   "date": "08/02 15:36",
-   "subject": "feat(ledger): 証憑ストア統合 (T-005)"
-  },
-  {
-   "hash": "679cd4e",
-   "date": "08/02 15:33",
-   "subject": "docs(tasks): T-005(会計×証憑ストア統合)を発行"
-  },
-  {
-   "hash": "e026732",
-   "date": "08/02 15:32",
-   "subject": "chore(site): 進捗更新(T-002/T-003 完了)"
-  },
-  {
-   "hash": "8b79420",
-   "date": "08/02 15:31",
-   "subject": "feat(ledger): 会計エンジン(記帳・日次締め・財務諸表・照合) (T-002)"
-  },
-  {
-   "hash": "6d6fd40",
-   "date": "08/02 15:27",
-   "subject": "wip(T-002): 会計エンジンの記帳・締め・財務諸表・照合モジュール骨子"
-  },
-  {
-   "hash": "ddbc090",
-   "date": "08/02 15:25",
-   "subject": "feat(provenance): 証憑ストアとリネージ記録 (T-003)"
-  },
-  {
-   "hash": "68f6296",
-   "date": "08/02 15:17",
-   "subject": "docs: T-001 レビュー完了(14/14 passed)— 証憑インライン格納の補足と進捗更新"
-  },
-  {
-   "hash": "3eb5b00",
-   "date": "08/02 15:14",
-   "subject": "docs: E9(多重検定補正: DSR/PBO)追加、E8 の方法論的位置づけ明記、ops-weekly(T-004)発行"
-  },
-  {
-   "hash": "e0b0f0a",
-   "date": "08/02 15:13",
-   "subject": "feat(db): 5スキーマのマイグレーション基盤と帳簿制約 (T-001)"
   }
  ]
 };
