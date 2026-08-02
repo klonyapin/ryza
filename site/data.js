@@ -1,5 +1,5 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-02 15:17 JST",
+ "generated_at": "2026-08-02 15:32 JST",
  "phase": "実装フェーズ(T-001 進行中)",
  "milestones": [
   {
@@ -44,13 +44,13 @@ window.RYZA_DATA = {
    "name": "T-002 会計エンジン",
    "detail": "記帳・締め・財務諸表・照合",
    "issue": 2,
-   "status": "todo"
+   "status": "done"
   },
   {
    "name": "T-003 証憑・リネージ",
    "detail": "不変保存・改竄検知・遡及クエリ",
    "issue": 3,
-   "status": "todo"
+   "status": "done"
   },
   {
    "name": "報道部 詳細設計",
@@ -103,7 +103,7 @@ window.RYZA_DATA = {
   {
    "number": 2,
    "title": "T-002: 会計エンジン(記帳・締め・財務諸表)",
-   "state": "OPEN",
+   "state": "CLOSED",
    "labels": [
     "impl"
    ]
@@ -111,7 +111,7 @@ window.RYZA_DATA = {
   {
    "number": 3,
    "title": "T-003: 証憑ストアとリネージ記録",
-   "state": "OPEN",
+   "state": "CLOSED",
    "labels": [
     "impl"
    ]
@@ -188,9 +188,37 @@ window.RYZA_DATA = {
    "labels": [
     "impl"
    ]
+  },
+  {
+   "number": 13,
+   "title": "Discord ブリッジの設定(Webhook 1分 / Bot 10分)",
+   "state": "OPEN",
+   "labels": [
+    "user-action"
+   ]
   }
  ],
  "commits": [
+  {
+   "hash": "8b79420",
+   "date": "08/02 15:31",
+   "subject": "feat(ledger): 会計エンジン(記帳・日次締め・財務諸表・照合) (T-002)"
+  },
+  {
+   "hash": "6d6fd40",
+   "date": "08/02 15:27",
+   "subject": "wip(T-002): 会計エンジンの記帳・締め・財務諸表・照合モジュール骨子"
+  },
+  {
+   "hash": "ddbc090",
+   "date": "08/02 15:25",
+   "subject": "feat(provenance): 証憑ストアとリネージ記録 (T-003)"
+  },
+  {
+   "hash": "68f6296",
+   "date": "08/02 15:17",
+   "subject": "docs: T-001 レビュー完了(14/14 passed)— 証憑インライン格納の補足と進捗更新"
+  },
   {
    "hash": "3eb5b00",
    "date": "08/02 15:14",
@@ -220,26 +248,6 @@ window.RYZA_DATA = {
    "hash": "c550b8f",
    "date": "08/02 15:03",
    "subject": "wip(T-001): migrate runner + meta/market/docs migrations"
-  },
-  {
-   "hash": "9b1897b",
-   "date": "08/02 15:00",
-   "subject": "wip(T-001): scaffold"
-  },
-  {
-   "hash": "4be3a00",
-   "date": "08/02 14:59",
-   "subject": "chore(site): デモ口座を保留に変更(自前シミュレータで代替、IBKRは執行層実装前に)"
-  },
-  {
-   "hash": "62c074f",
-   "date": "08/02 14:57",
-   "subject": "chore(site): デモ口座開設を保留に変更(自前シミュレータで代替、IBKRは執行層実装前に)"
-  },
-  {
-   "hash": "c3f9983",
-   "date": "08/02 14:53",
-   "subject": "chore(site): 進捗データ更新(GCP セットアップ完了)"
   }
  ]
 };
