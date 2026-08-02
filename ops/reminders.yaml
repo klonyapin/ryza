@@ -1,31 +1,58 @@
-# Ryza リマインダー・レジストリ
+# Ryza リマインダー・レジストリ v2(機械可読)
 #
-# 原則(CLAUDE.md 参照): セッション内の「あとで私がやる」という約束は無効。
-# 将来のアクションは必ずここに機械可読で登録する。
+# 原則(CLAUDE.md): セッション内の「あとでやる」は無効。将来アクションは必ずここに登録。
+# 実行主体: GCP 上の週次ジョブ ops-weekly(Cloud Scheduler + Cloud Run Job、T-004)。
+#   ジョブ実装が deploy されるまでの暫定として Claude ローカル定例(ryza-weekly-check)が代行し、
+#   deploy 後にローカル定例は廃止する。
 #
-# 実行主体:
-#   現在: Claude 定例ルーチン `ryza-weekly-check`(週次 cron。~/.claude/scheduled-tasks/)
-#   将来: Ryza 本体の経営管理部ジョブ(Cloud Scheduler + Discord)に移管する
-#     → 移管タスクは「報道部・Discord Bot 実装」マイルストーンに含める
+# conditions は OR 評価。全 type は T-004 実装の条件エバリュエータに対応:
+#   date_after:        指定日以降か
+#   issue_label_open:  指定ラベルの OPEN Issue が存在するか
+#   task_file_glob:    リポジトリ内に glob に合致するファイルが存在するか
+#   bq_table_missing:  BigQuery データセットにテーブルが無いか(逆条件)
+# action:
+#   issue_comment:     指定 Issue にコメント
+#   issue_create:      新規 Issue 作成
+# 発火後はジョブが status: fired(日付付き)に更新してコミットする。
 
+version: 2
 reminders:
   - id: ibkr-account-application
-    what: "IBKR 口座申請をユーザーに促す(審査2〜5営業日のため、必要になる2〜3週間前に)"
-    trigger: >
-      次のいずれか: (a) 執行層アダプタの実装タスク(T-0xx, ブローカーアダプタ)が
-      docs/tasks/ に発行された (b) 戦略・リスク・執行の実装マイルストーンが進行中になった
-    action: "GitHub Issue #8 にコメントし、ユーザーへ申請手順(Issue #8 本文の details 内)を案内する"
+    what: "IBKR 口座申請の案内(審査2〜5営業日。執行層アダプタ実装の前に必要)"
+    conditions:
+      - type: task_file_glob
+        glob: "docs/tasks/*broker*"
+      - type: issue_label_open
+        label: execution-layer
+    action:
+      type: issue_comment
+      issue: 8
+      body: "執行層アダプタの実装が始まります。IBKR 口座の申請をお願いします(手順は本 Issue 本文の details 内。審査2〜5営業日)。"
     status: pending
 
   - id: ips-quarterly-review
-    what: "IPS 四半期レビュー(CIO による IPS 批判レポートの起草と対話)"
-    trigger: "前回レビュー(または IPS 確定日 2026-08-02)から3ヶ月経過"
-    next_due: 2026-11-02
-    action: "docs/design/80-ips.md §2.1 のフローに従い批判レポートを起草しユーザーと対話"
+    what: "IPS 四半期レビュー(CIO による IPS 批判レポート起草)"
+    conditions:
+      - type: date_after
+        date: "2026-11-02"
+    action:
+      type: issue_create
+      title: "IPS 四半期レビュー(2026Q4)"
+      labels: [decision]
+      body: "docs/design/80-ips.md §2.1 のフローに従い、CIO が IPS 批判レポート(遵守実績・バインドした制約の機会費用・IPS 自体への批判)を起草し投資委員会で対話する。発効はユーザー決議のみ。完了時は ops/reminders.yaml に次回分(+3ヶ月)を登録すること。"
     status: pending
 
   - id: billing-export-verify
-    what: "GCP Billing Export のテーブル生成確認(bq ls ryza-main:billing_export にテーブルが出るか)"
-    trigger: "2026-08-03 以降の最初の定例チェック"
-    action: "テーブル生成を確認し、無ければ設定を再点検。確認できたら status: done に更新"
+    what: "GCP Billing Export のテーブル生成確認"
+    conditions:
+      - type: date_after
+        date: "2026-08-03"
+    action:
+      type: issue_comment
+      issue: 7
+      body: "確認: BigQuery ryza-main:billing_export にテーブルが生成されているか(ジョブが bq_table_missing を検査し、欠落時のみこのコメントで警告)。"
+      only_if:
+        type: bq_table_missing
+        project: ryza-main
+        dataset: billing_export
     status: pending
