@@ -21,7 +21,7 @@ MILESTONES = [
     {"name": "データ基盤+会計 詳細設計", "detail": "5スキーマ・3帳簿・証憑・リネージ", "status": "done"},
     {"name": "IPS v1.0", "detail": "DD25%・レバ2.0x・集中度20%・政策ミックス。§7論点の判断待ち", "issue": 4},
     {"name": "GCP セットアップ", "detail": "ryza-fund 作成・API有効化済み。Billing Export のみ手作業", "issue": 7},
-    {"name": "デモ口座開設", "detail": "IBKR / Alpaca / Saxo / Testnet", "issue": 8},
+    {"name": "デモ口座開設(保留)", "detail": "執行層実装の2〜3週間前に IBKR のみ申請。それまで自前シミュレータで代替", "status": "todo"},
     {"name": "T-001 DB基盤", "detail": "マイグレーション+帳簿制約", "issue": 1},
     {"name": "T-002 会計エンジン", "detail": "記帳・締め・財務諸表・照合", "issue": 2},
     {"name": "T-003 証憑・リネージ", "detail": "不変保存・改竄検知・遡及クエリ", "issue": 3},

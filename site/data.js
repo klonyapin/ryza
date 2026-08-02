@@ -1,5 +1,5 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-02 14:53 JST",
+ "generated_at": "2026-08-02 14:57 JST",
  "phase": "実装フェーズ(T-001 進行中)",
  "milestones": [
   {
@@ -30,10 +30,9 @@ window.RYZA_DATA = {
    "status": "done"
   },
   {
-   "name": "デモ口座開設",
-   "detail": "IBKR / Alpaca / Saxo / Testnet",
-   "issue": 8,
-   "status": "user"
+   "name": "デモ口座開設(保留)",
+   "detail": "執行層実装の2〜3週間前に IBKR のみ申請。それまで自前シミュレータで代替",
+   "status": "todo"
   },
   {
    "name": "T-001 DB基盤",
@@ -151,7 +150,7 @@ window.RYZA_DATA = {
   },
   {
    "number": 8,
-   "title": "デモ口座の開設手順(手作業・IBKR は今日申請推奨)",
+   "title": "(保留)デモ口座の開設 — 執行層実装が近づいたら IBKR のみ",
    "state": "OPEN",
    "labels": [
     "user-action"
@@ -176,6 +175,11 @@ window.RYZA_DATA = {
   }
  ],
  "commits": [
+  {
+   "hash": "c3f9983",
+   "date": "08/02 14:53",
+   "subject": "chore(site): 進捗データ更新(GCP セットアップ完了)"
+  },
   {
    "hash": "a5d984b",
    "date": "08/02 14:43",
