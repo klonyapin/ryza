@@ -98,10 +98,24 @@ echo "-- VM 上でプロビジョニング(冪等)"
 "${SSH[@]}" --command "sudo bash -s" <<REMOTE
 set -euo pipefail
 
-# 3.1 システムパッケージ(apt は冪等)。PostgreSQL 同居 + build 依存。
+# 3.1 システムパッケージ(apt は冪等)。PostgreSQL 17 + 拡張(pg_partman/pgvector)は
+#     Debian 標準 repo に無いため PGDG リポジトリから導入(docker/postgres と同構成)。
 export DEBIAN_FRONTEND=noninteractive
+# 過去実行の壊れた pgdg.list が残っていても最初の update が通るよう先に除去(後で書き直す)
+rm -f /etc/apt/sources.list.d/pgdg.list
 apt-get update -qq
-apt-get install -y -qq postgresql postgresql-client curl ca-certificates >/dev/null
+apt-get install -y -qq curl ca-certificates gnupg >/dev/null
+install -d /usr/share/postgresql-common/pgdg
+[ -f /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc ] || \
+  curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+# IMAGE_FAMILY=debian-12 固定のためコード名 bookworm を直書き(heredoc のローカル展開回避)
+echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+  > /etc/apt/sources.list.d/pgdg.list
+apt-get update -qq
+apt-get install -y -qq postgresql-17 postgresql-client-17 \
+  postgresql-17-partman postgresql-17-pgvector >/dev/null
 
 # 3.2 PostgreSQL: ロール ryza と DB ryza を idempotent に用意。
 systemctl enable --now postgresql
@@ -109,6 +123,11 @@ sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='ryza'" | grep 
   || sudo -u postgres psql -c "CREATE ROLE ryza LOGIN PASSWORD 'ryza'"
 sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='ryza'" | grep -q 1 \
   || sudo -u postgres createdb -O ryza ryza
+# 拡張の CREATE は superuser 限定のため、migrations(role ryza)より先に superuser で用意
+# (migrations 側は IF NOT EXISTS のためそのまま通る)
+sudo -u postgres psql -d ryza -c "CREATE SCHEMA IF NOT EXISTS partman AUTHORIZATION ryza" >/dev/null
+sudo -u postgres psql -d ryza -c "CREATE EXTENSION IF NOT EXISTS pg_partman SCHEMA partman" >/dev/null
+sudo -u postgres psql -d ryza -c "CREATE EXTENSION IF NOT EXISTS vector" >/dev/null
 
 # 3.3 ソース展開(既存を消してから新しい tar を展開 = 冪等)。
 install -d -o root -g root /opt/ryza
@@ -122,7 +141,7 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 export PATH="/root/.local/bin:\$PATH"
 cd /opt/ryza
-uv venv --python 3.12 .venv
+[ -d .venv ] || uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -e '.[bot]'
 
 # 3.5 マイグレーション適用(冪等: schema_migrations で未適用のみ実行)。

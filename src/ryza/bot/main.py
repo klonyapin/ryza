@@ -176,12 +176,10 @@ class RyzaBot(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents.default()
         super().__init__(command_prefix="!", intents=intents)
-        self.owner_ids_list = owner_ids()
+        # 親クラス(commands.Bot)が __init__ 内で self.owner_ids に代入するため、
+        # プロパティで上書きせず属性として設定する(is_owner 側は文字列比較で吸収)
+        self.owner_ids = {int(o) for o in owner_ids() if str(o).isdigit()}
         self.category_id = category_id()
-
-    @property
-    def owner_ids(self) -> list[str]:  # type: ignore[override]
-        return self.owner_ids_list
 
     async def setup_hook(self) -> None:
         self._register_commands()
