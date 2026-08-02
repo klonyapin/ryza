@@ -1,5 +1,5 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-02 14:40 JST",
+ "generated_at": "2026-08-02 14:53 JST",
  "phase": "実装フェーズ(T-001 進行中)",
  "milestones": [
   {
@@ -27,7 +27,7 @@ window.RYZA_DATA = {
    "name": "GCP セットアップ",
    "detail": "ryza-fund 作成・API有効化済み。Billing Export のみ手作業",
    "issue": 7,
-   "status": "user"
+   "status": "done"
   },
   {
    "name": "デモ口座開設",
@@ -143,8 +143,8 @@ window.RYZA_DATA = {
   },
   {
    "number": 7,
-   "title": "GCP: Billing Export の有効化(コンソール手作業・5分)",
-   "state": "OPEN",
+   "title": "GCP: アカウント切替の認証(1分)→ Fable が再構築 → Billing Export(5分)",
+   "state": "CLOSED",
    "labels": [
     "user-action"
    ]
@@ -165,9 +165,27 @@ window.RYZA_DATA = {
     "impl",
     "design"
    ]
+  },
+  {
+   "number": 10,
+   "title": "ステータス表示を運用ダッシュボード(Streamlit)に統合",
+   "state": "OPEN",
+   "labels": [
+    "impl"
+   ]
   }
  ],
  "commits": [
+  {
+   "hash": "a5d984b",
+   "date": "08/02 14:43",
+   "subject": "docs: ステータスサイトをローカル配信に変更(Cloud Run 公開版を撤去)"
+  },
+  {
+   "hash": "dd21347",
+   "date": "08/02 14:41",
+   "subject": "feat(site): 開発ステータスサイト(Cloud Run)— ロードマップ・Issues・変更履歴の可視化"
+  },
   {
    "hash": "63a80f6",
    "date": "08/02 14:31",
