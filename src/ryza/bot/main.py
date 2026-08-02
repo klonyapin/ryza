@@ -73,11 +73,25 @@ def load_token() -> str:
     project = os.environ.get("GCP_PROJECT", "")
     if not project:
         raise SystemExit("RYZA_DISCORD_TOKEN も GCP_PROJECT も未設定です")
-    from google.cloud import secretmanager  # 遅延インポート(ローカルでは不要)
+    # google-cloud-secret-manager は proto-plus/protobuf の版差で壊れやすいため、
+    # GCE メタデータトークン + REST(stdlib のみ)で取得する
+    import base64
+    import json as _json
+    import urllib.request
 
-    client = secretmanager.SecretManagerServiceClient()
-    name = f"projects/{project}/secrets/{secret}/versions/latest"
-    return client.access_secret_version(name={"name": name}).payload.data.decode("utf-8")
+    meta = urllib.request.Request(
+        "http://metadata.google.internal/computeMetadata/v1/instance/"
+        "service-accounts/default/token",
+        headers={"Metadata-Flavor": "Google"},
+    )
+    access_token = _json.load(urllib.request.urlopen(meta, timeout=10))["access_token"]
+    req = urllib.request.Request(
+        f"https://secretmanager.googleapis.com/v1/projects/{project}"
+        f"/secrets/{secret}/versions/latest:access",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    payload = _json.load(urllib.request.urlopen(req, timeout=10))
+    return base64.b64decode(payload["payload"]["data"]).decode("utf-8")
 
 
 # ────────────────────────────────────────────────────────────────────────────
