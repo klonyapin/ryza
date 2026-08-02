@@ -324,8 +324,9 @@ class RyzaBot(commands.Bot):
         }
         try:
             with connect() as conn:
-                with start_run("bot.startup", conn=conn) as r:
-                    outbox.enqueue(conn, "ops", embed, r.run_id)  # #運営 へ
+                r = start_run("bot.startup", conn=conn)
+                outbox.enqueue(conn, "ops", embed, r.run_id)  # #運営 へ
+                r.finish("success")
                 conn.commit()
         except Exception:  # noqa: BLE001
             log.exception("起動通知の投入に失敗")
