@@ -1,5 +1,5 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-03 02:21 JST",
+ "generated_at": "2026-08-03 03:19 JST",
  "phase": "実装フェーズ(T-001 進行中)",
  "milestones": [
   {
@@ -224,7 +224,7 @@ window.RYZA_DATA = {
   {
    "number": 17,
    "title": "T-006: Ryza Discord Bot 基盤(GCE 常駐)",
-   "state": "OPEN",
+   "state": "CLOSED",
    "labels": [
     "impl"
    ]
@@ -280,54 +280,54 @@ window.RYZA_DATA = {
  ],
  "commits": [
   {
+   "hash": "5f1a076",
+   "date": "08/03 03:18",
+   "subject": "fix(bot): 配送処理をワーカースレッドへ — イベントループ自己デッドロック(heartbeat blocked)の解消"
+  },
+  {
+   "hash": "1f2ecd2",
+   "date": "08/03 03:11",
+   "subject": "fix(ops): 重複 RestartSec を整理(30秒に統一)"
+  },
+  {
+   "hash": "88c1888",
+   "date": "08/03 03:11",
+   "subject": "fix(ops): Bot の再起動間隔を30秒に(クラッシュループ時のゲートウェイ・ハンマリング防止)"
+  },
+  {
+   "hash": "232f4c5",
+   "date": "08/03 03:07",
+   "subject": "fix(bot): daily ループの Run API 誤用も修正"
+  },
+  {
+   "hash": "b2028b6",
+   "date": "08/03 03:06",
+   "subject": "fix(bot): 起動通知の Run API 誤用を修正(context manager ではなく start_run/finish)"
+  },
+  {
+   "hash": "6d849bc",
+   "date": "08/03 03:03",
+   "subject": "fix(bot): Secret 取得を stdlib REST 化(proto-plus 互換性クラッシュの回避)"
+  },
+  {
+   "hash": "1c01639",
+   "date": "08/03 03:00",
+   "subject": "fix(bot): owner_ids プロパティと discord.py 親クラスの衝突を修正、deploy を PG17/冪等化"
+  },
+  {
+   "hash": "4d9a598",
+   "date": "08/03 02:46",
+   "subject": "feat(bot): Ryza Discord Bot 基盤 (T-006)"
+  },
+  {
+   "hash": "a1ec1fa",
+   "date": "08/03 02:21",
+   "subject": "chore(site): 進捗更新(T-009 受け入れ完了・実API疎通OK)"
+  },
+  {
    "hash": "f3a5f8d",
    "date": "08/03 02:20",
    "subject": "fix(ingest): J-Quants V2 移行(x-api-key 認証・/v2 エンドポイント)"
-  },
-  {
-   "hash": "0574ee8",
-   "date": "08/03 02:10",
-   "subject": "feat(ingest): データ取込パイプライン (T-009)"
-  },
-  {
-   "hash": "e54d8b0",
-   "date": "08/03 02:09",
-   "subject": "docs(tasks): T-010(階層0前処理)・T-011(分析エージェント+市場観)を発行"
-  },
-  {
-   "hash": "e3d99ab",
-   "date": "08/03 02:06",
-   "subject": "docs: 段階的ソース拡張を撤回(ユーザー指摘)— 一括拡張バッチ T-012 発行、真の後回しはパラダイム別のみ"
-  },
-  {
-   "hash": "aff2624",
-   "date": "08/03 02:05",
-   "subject": "wip(ingest): カレンダー・鮮度 SLA + import 整理 (T-009)"
-  },
-  {
-   "hash": "9a7f779",
-   "date": "08/03 02:03",
-   "subject": "wip(ingest): J-Quants/TDnet/EDINET/RSS/FRED ソース (T-009)"
-  },
-  {
-   "hash": "7fb298e",
-   "date": "08/03 01:59",
-   "subject": "wip(ingest): 取込共通基盤とスキーマ (T-009)"
-  },
-  {
-   "hash": "b635215",
-   "date": "08/03 01:58",
-   "subject": "docs: 取込ソース拡充(FRED追加・官公庁RSS確定・第2期ソース正式登録・拡張プロセス制度化)、FM ロースター承認"
-  },
-  {
-   "hash": "54eb076",
-   "date": "08/03 01:56",
-   "subject": "feat(personas): 報道部キャスター玲音の charter・口調ガイド(調査に基づく)"
-  },
-  {
-   "hash": "785caf6",
-   "date": "08/03 01:54",
-   "subject": "docs: T-009(データ取込)発行、初代 FM ロースター案 v0.1(Ben/Jim/Stan/Peter)"
   }
  ]
 };
