@@ -1,0 +1,31 @@
+# Ryza リマインダー・レジストリ
+#
+# 原則(CLAUDE.md 参照): セッション内の「あとで私がやる」という約束は無効。
+# 将来のアクションは必ずここに機械可読で登録する。
+#
+# 実行主体:
+#   現在: Claude 定例ルーチン `ryza-weekly-check`(週次 cron。~/.claude/scheduled-tasks/)
+#   将来: Ryza 本体の経営管理部ジョブ(Cloud Scheduler + Discord)に移管する
+#     → 移管タスクは「報道部・Discord Bot 実装」マイルストーンに含める
+
+reminders:
+  - id: ibkr-account-application
+    what: "IBKR 口座申請をユーザーに促す(審査2〜5営業日のため、必要になる2〜3週間前に)"
+    trigger: >
+      次のいずれか: (a) 執行層アダプタの実装タスク(T-0xx, ブローカーアダプタ)が
+      docs/tasks/ に発行された (b) 戦略・リスク・執行の実装マイルストーンが進行中になった
+    action: "GitHub Issue #8 にコメントし、ユーザーへ申請手順(Issue #8 本文の details 内)を案内する"
+    status: pending
+
+  - id: ips-quarterly-review
+    what: "IPS 四半期レビュー(CIO による IPS 批判レポートの起草と対話)"
+    trigger: "前回レビュー(または IPS 確定日 2026-08-02)から3ヶ月経過"
+    next_due: 2026-11-02
+    action: "docs/design/80-ips.md §2.1 のフローに従い批判レポートを起草しユーザーと対話"
+    status: pending
+
+  - id: billing-export-verify
+    what: "GCP Billing Export のテーブル生成確認(bq ls ryza-main:billing_export にテーブルが出るか)"
+    trigger: "2026-08-03 以降の最初の定例チェック"
+    action: "テーブル生成を確認し、無ければ設定を再点検。確認できたら status: done に更新"
+    status: pending
