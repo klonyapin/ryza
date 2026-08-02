@@ -21,7 +21,8 @@ ops/deploy-bot.sh                -- GCE VM 作成(e2-micro us-west1・無料枠)
 tests/bot/                       -- outbox 冪等・承認記録・killswitch 状態遷移(discord API はモック)
 ```
 
-- チャンネル ID・オーナー ID は環境変数(deploy 時に指定)。ハードコードしない
+- オーナー ID・カテゴリ ID は環境変数(deploy 時に指定。カテゴリは RYZA_DISCORD_CATEGORY_ID=1533512287816782017)。ハードコードしない
+- **チャンネルは4つ(報道/承認/運営/dev)を指定カテゴリ配下に Bot が起動時 ensure(存在確認・自動作成)**し、name→id を DB に記録。outbox.channel は press|approval|ops|dev(設計書 §7 改訂済み)
 - VM 上の DB 接続: 当面 VM 内 PostgreSQL(将来 Cloud SQL 移行を想定し RYZA_DATABASE_URL で切替可能に)。**注意: 本タスクでは VM に PostgreSQL も同居設置し、migrations を適用する**(00-system-design §10 の構成)
 - Bot 停止検知: systemd Restart=always + 起動時に `#経営` へ再起動通知
 

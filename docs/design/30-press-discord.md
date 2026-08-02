@@ -25,7 +25,8 @@ flowchart LR
 **実装順序の設計判断**: Bot 基盤(T-006)は朝刊の素材(データ取込・リサーチ層)に依存しないため**先行実装**する。これにより (a) 承認 UI・Kill Switch・通知が早期に本番化し、(b) 開発ブリッジの単一障害点(Mac)が解消される(昨夜の障害の教訓)。朝刊・速報(T-007/T-008)はデータ取込+リサーチ層実装後。
 
 - 投稿は Bot 経由に一元化(`press.outbox` テーブルをキューとし、Bot が配送・既送管理)。ジョブが直接 Discord API を叩かない(トークンの配置を Bot 1箇所に限定)
-- チャンネル構成: `#朝刊` `#速報` `#承認`(ボタン操作)`#日報`(NAV・リスク)`#監査` `#経営`(予実・ダイジェスト)`#dev`(開発対話 — 現行ブリッジの後継)
+- チャンネル構成(2026-08-03 ユーザー指示で統合): **4チャンネル** — `#報道`(朝刊・速報・号外)/ `#承認`(ボタン操作)/ `#運営`(日報・経営・監査報告)/ `#dev`(開発対話 — 現行ブリッジの後継)
+- **全チャンネルはカテゴリ `1533512287816782017` 配下に設置**。Bot が起動時に存在確認し、無ければ自動作成(ensure)。name→channel_id の解決結果は DB に記録(手動リネームに追従)
 
 ## 2. 朝刊パイプライン(毎朝 10:00 JST 投稿)
 
@@ -96,7 +97,7 @@ flowchart LR
 ## 6. マスコット・表現仕様
 
 - embed 色: 通常 `#5B54C7`(紫)/ 速報 `#C24E3A`(赤)/ 承認 `#2E7D5B`(緑)
-- **マスコット画像**: `assets/mascot/` に権利クリアなアニメ調生成画像を8枚程度用意しローテーション(生成手順と権利メモを assets/README に記録)。速報時は専用の1枚
+- **マスコット画像(2026-08-03 ユーザー指示で変更)**: 事前アセットではなく**外部 API から毎回取得**する。第一候補: nekos.best(レスポンスにアーティスト名・出典 URL が付く)、予備: waifu.pics 等。実装規則: ①画像は再アップロードせず **URL を embed に参照**(再配布を避ける)②アーティストクレジットを embed footer に表示 ③API 障害時は画像なしで投稿(画像取得は投稿をブロックしない)④完全非公開サーバー限定の運用が前提(公開範囲フラグと連動して無効化)。権利面は生成アセットより弱い旨は設計リードとして注記済み(ユーザー決定)
 - 免責フッター(全投稿): 「本投稿は自己運用システムの内部記録であり投資助言ではない」+ 完全非公開サーバー前提のため個別銘柄推奨は許可(00-system-design §7)
 - 文体: 執筆規格(70-writing-standard.md)準拠。週次で Fable が文体レビュー(サンプル添削 → プロンプト資産更新提案)
 
@@ -105,7 +106,7 @@ flowchart LR
 ```sql
 CREATE TABLE press.outbox (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  channel text NOT NULL,             -- morning|flash|approval|daily|audit|mgmt
+  channel text NOT NULL,             -- press|approval|ops|dev(2026-08-03 統合)
   embed_json jsonb NOT NULL,
   urgent boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL,
