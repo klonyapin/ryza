@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ryza 開発ステータス</title>
+<style>
+  :root {
+    --bg:#F6F6F9; --panel:#fff; --ink:#23232E; --muted:#6C6B7A; --line:#E2E2EC;
+    --info:#5B54C7; --info-soft:#EEEDFB; --ok:#2E7D5B; --ok-soft:#E8F3EE;
+    --warn:#B7791F; --warn-soft:#FBF3E4; --todo:#8A8A98; --todo-soft:#EFEFF3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#14151D; --panel:#1C1E29; --ink:#E9E9F1; --muted:#9A99AC; --line:#2C2E3C;
+      --info:#968FE8; --info-soft:#26243D; --ok:#5AB78C; --ok-soft:#1D3229;
+      --warn:#D9A441; --warn-soft:#33290F; --todo:#7C7C8C; --todo-soft:#23242E;
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); line-height:1.7;
+    font-family:"Hiragino Sans","Yu Gothic UI","Noto Sans JP",sans-serif; font-size:15px; }
+  .wrap { max-width:960px; margin:0 auto; padding:40px 20px 80px; }
+  header { border-bottom:1px solid var(--line); padding-bottom:20px; margin-bottom:28px; }
+  .eyebrow { font-family:ui-monospace,Menlo,monospace; font-size:11px; letter-spacing:.15em;
+    color:var(--info); text-transform:uppercase; }
+  h1 { font-family:"Hiragino Mincho ProN","Yu Mincho",serif; font-size:26px; margin:8px 0 4px; }
+  .sub { color:var(--muted); font-size:13px; }
+  h2 { font-size:17px; margin:36px 0 12px; border-bottom:1px solid var(--line); padding-bottom:8px;
+    font-family:"Hiragino Mincho ProN","Yu Mincho",serif; }
+  .bar-outer { background:var(--todo-soft); border-radius:6px; height:14px; overflow:hidden; margin:6px 0 2px; }
+  .bar-inner { background:var(--info); height:100%; border-radius:6px; transition:width .6s; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; }
+  .card h3 { margin:0 0 6px; font-size:14px; display:flex; align-items:center; gap:8px; }
+  .card p { margin:0; font-size:12.5px; color:var(--muted); }
+  .chip { font-family:ui-monospace,Menlo,monospace; font-size:10px; padding:2px 8px; border-radius:10px; white-space:nowrap; }
+  .chip.done { background:var(--ok-soft); color:var(--ok); }
+  .chip.doing { background:var(--warn-soft); color:var(--warn); }
+  .chip.todo { background:var(--todo-soft); color:var(--todo); }
+  .chip.user { background:var(--info-soft); color:var(--info); }
+  ul.plain { list-style:none; padding:0; margin:0; }
+  ul.plain li { padding:8px 4px; border-bottom:1px solid var(--line); display:flex; gap:10px; align-items:baseline; font-size:13.5px; }
+  ul.plain li:last-child { border-bottom:none; }
+  .num { font-family:ui-monospace,Menlo,monospace; color:var(--muted); font-size:11px; min-width:34px; }
+  .mut { color:var(--muted); font-size:12px; }
+  a { color:var(--info); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .flow { display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:12px; margin:10px 0; }
+  .flow .step { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:4px 10px; }
+  .flow .step.done { border-color:var(--ok); }
+  .flow .step.doing { border-color:var(--warn); font-weight:600; }
+  .flow .arrow { color:var(--muted); }
+  footer { margin-top:48px; color:var(--muted); font-size:12px; border-top:1px solid var(--line); padding-top:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="eyebrow">Ryza / Development Status</div>
+  <h1>マルチアセット自動運用システム — 開発ステータス</h1>
+  <div class="sub" id="generated"></div>
+</header>
+
+<h2>全体進捗</h2>
+<div id="overall"></div>
+
+<h2>ロードマップ</h2>
+<div class="flow" id="flow"></div>
+<div class="grid" id="milestones"></div>
+
+<h2>タスク(GitHub Issues)</h2>
+<ul class="plain" id="issues"></ul>
+
+<h2>最近の変更(git log)</h2>
+<ul class="plain" id="commits"></ul>
+
+<footer>
+  データは GitHub Issues / git ログから自動生成(スナップショット)。設計文書の正は
+  リポジトリ <span class="mut">github.com/klonyapin/ryza</span>(private)の docs/ 配下。
+  このページに認証情報・口座番号等の機微情報は載せない運用。
+</footer>
+</div>
+<script src="data.js"></script>
+<script>
+const D = window.RYZA_DATA;
+document.getElementById('generated').textContent =
+  '最終更新: ' + D.generated_at + ' / フェーズ: ' + D.phase;
+
+// 全体進捗バー
+const done = D.milestones.filter(m=>m.status==='done').length;
+const total = D.milestones.length;
+const pct = Math.round(done/total*100);
+document.getElementById('overall').innerHTML =
+  `<div class="bar-outer"><div class="bar-inner" style="width:${pct}%"></div></div>
+   <div class="mut">${done} / ${total} マイルストーン完了(${pct}%)</div>`;
+
+// ロードマップ・フロー
+document.getElementById('flow').innerHTML = D.milestones.map(m =>
+  `<span class="step ${m.status}">${m.name}</span>`).join('<span class="arrow">→</span>');
+
+// マイルストーンカード
+const label = {done:'完了', doing:'進行中', todo:'未着手', user:'あなた待ち'};
+document.getElementById('milestones').innerHTML = D.milestones.map(m => `
+  <div class="card">
+    <h3><span class="chip ${m.status}">${label[m.status]}</span>${m.name}</h3>
+    <p>${m.detail}${m.issue ? ` — <a href="https://github.com/klonyapin/ryza/issues/${m.issue}">#${m.issue}</a>` : ''}</p>
+  </div>`).join('');
+
+// Issues
+document.getElementById('issues').innerHTML = D.issues.map(i => `
+  <li><span class="num">#${i.number}</span>
+      <span class="chip ${i.state==='CLOSED'?'done':(i.labels.includes('user-action')?'user':'doing')}">${i.state==='CLOSED'?'完了':(i.labels.includes('user-action')?'あなた待ち':'OPEN')}</span>
+      <a href="https://github.com/klonyapin/ryza/issues/${i.number}">${i.title}</a>
+      <span class="mut">${i.labels.join(', ')}</span></li>`).join('');
+
+// Commits
+document.getElementById('commits').innerHTML = D.commits.map(c => `
+  <li><span class="num">${c.hash}</span><span>${c.subject}</span><span class="mut">${c.date}</span></li>`).join('');
+</script>
+</body>
+</html>
