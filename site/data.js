@@ -1,5 +1,5 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-02 15:32 JST",
+ "generated_at": "2026-08-02 15:46 JST",
  "phase": "実装フェーズ(T-001 進行中)",
  "milestones": [
   {
@@ -196,9 +196,37 @@ window.RYZA_DATA = {
    "labels": [
     "user-action"
    ]
+  },
+  {
+   "number": 14,
+   "title": "T-005: 会計エンジンと証憑ストアの統合",
+   "state": "CLOSED",
+   "labels": [
+    "impl"
+   ]
   }
  ],
  "commits": [
+  {
+   "hash": "78e9cc8",
+   "date": "08/02 15:45",
+   "subject": "feat(ops): 週次運用ジョブ ops-weekly (T-004)"
+  },
+  {
+   "hash": "d70d2d0",
+   "date": "08/02 15:36",
+   "subject": "feat(ledger): 証憑ストア統合 (T-005)"
+  },
+  {
+   "hash": "679cd4e",
+   "date": "08/02 15:33",
+   "subject": "docs(tasks): T-005(会計×証憑ストア統合)を発行"
+  },
+  {
+   "hash": "e026732",
+   "date": "08/02 15:32",
+   "subject": "chore(site): 進捗更新(T-002/T-003 完了)"
+  },
   {
    "hash": "8b79420",
    "date": "08/02 15:31",
@@ -228,26 +256,6 @@ window.RYZA_DATA = {
    "hash": "e0b0f0a",
    "date": "08/02 15:13",
    "subject": "feat(db): 5スキーマのマイグレーション基盤と帳簿制約 (T-001)"
-  },
-  {
-   "hash": "9a37dc3",
-   "date": "08/02 15:10",
-   "subject": "docs: 評価プロトコルに E8(資本スケール&開始時点スイープ)を追加"
-  },
-  {
-   "hash": "4191230",
-   "date": "08/02 15:07",
-   "subject": "feat(ops): リマインダー・レジストリと週次定例ルーチンの制度化"
-  },
-  {
-   "hash": "0297811",
-   "date": "08/02 15:05",
-   "subject": "wip(T-001): trade + ledger migrations with integrity triggers"
-  },
-  {
-   "hash": "c550b8f",
-   "date": "08/02 15:03",
-   "subject": "wip(T-001): migrate runner + meta/market/docs migrations"
   }
  ]
 };
