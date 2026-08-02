@@ -1,5 +1,5 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-03 01:40 JST",
+ "generated_at": "2026-08-03 02:21 JST",
  "phase": "実装フェーズ(T-001 進行中)",
  "milestones": [
   {
@@ -228,58 +228,106 @@ window.RYZA_DATA = {
    "labels": [
     "impl"
    ]
+  },
+  {
+   "number": 18,
+   "title": "T-009: データ取込パイプライン(J-Quants/TDnet/EDINET/RSS/カレンダー)",
+   "state": "CLOSED",
+   "labels": [
+    "impl"
+   ]
+  },
+  {
+   "number": 19,
+   "title": "(残: FRED のみ)データ資格情報の登録",
+   "state": "CLOSED",
+   "labels": [
+    "user-action"
+   ]
+  },
+  {
+   "number": 20,
+   "title": "T-012: 取込ソース一括拡張(EDGAR・e-Stat・海外中銀・国際機関)",
+   "state": "OPEN",
+   "labels": [
+    "impl"
+   ]
+  },
+  {
+   "number": 21,
+   "title": "T-010: 階層0前処理パイプライン",
+   "state": "OPEN",
+   "labels": [
+    "impl"
+   ]
+  },
+  {
+   "number": 22,
+   "title": "T-011: 分析エージェント+市場観ステート",
+   "state": "OPEN",
+   "labels": [
+    "impl"
+   ]
+  },
+  {
+   "number": 23,
+   "title": "テスト隔離の改善: ingest テストが共有 DB の残留データで壊れる",
+   "state": "OPEN",
+   "labels": [
+    "impl"
+   ]
   }
  ],
  "commits": [
   {
-   "hash": "8bdbbcd",
-   "date": "08/03 01:39",
-   "subject": "docs: リサーチ層+情報分析 詳細設計 v1.0(常時稼働・階層0前処理・市場観更新規約・反証拠テスト)"
+   "hash": "f3a5f8d",
+   "date": "08/03 02:20",
+   "subject": "fix(ingest): J-Quants V2 移行(x-api-key 認証・/v2 エンドポイント)"
   },
   {
-   "hash": "d82b44c",
-   "date": "08/03 01:32",
-   "subject": "docs: 報道部設計のチャンネル名残存参照を統合後の構成に整理"
+   "hash": "0574ee8",
+   "date": "08/03 02:10",
+   "subject": "feat(ingest): データ取込パイプライン (T-009)"
   },
   {
-   "hash": "ad761b2",
-   "date": "08/03 01:31",
-   "subject": "wip(bot): press スキーマ+outbox/approvals/killswitch/daily/main 骨格 (T-006)"
+   "hash": "e54d8b0",
+   "date": "08/03 02:09",
+   "subject": "docs(tasks): T-010(階層0前処理)・T-011(分析エージェント+市場観)を発行"
   },
   {
-   "hash": "088950f",
-   "date": "08/03 01:31",
-   "subject": "docs: 報道部設計改訂 — マスコットは外部API取得、チャンネル4統合+指定カテゴリ配下に自動設置"
+   "hash": "e3d99ab",
+   "date": "08/03 02:06",
+   "subject": "docs: 段階的ソース拡張を撤回(ユーザー指摘)— 一括拡張バッチ T-012 発行、真の後回しはパラダイム別のみ"
   },
   {
-   "hash": "4573a6c",
-   "date": "08/03 01:25",
-   "subject": "docs: 報道部+Discord Bot 詳細設計 v1.0、T-006(Bot 基盤)発行"
+   "hash": "aff2624",
+   "date": "08/03 02:05",
+   "subject": "wip(ingest): カレンダー・鮮度 SLA + import 整理 (T-009)"
   },
   {
-   "hash": "f6b72f0",
-   "date": "08/03 01:19",
-   "subject": "fix(ops): デプロイスクリプトの Cloud Build 設定を一時ファイル渡しに修正+進捗更新"
+   "hash": "9a7f779",
+   "date": "08/03 02:03",
+   "subject": "wip(ingest): J-Quants/TDnet/EDINET/RSS/FRED ソース (T-009)"
   },
   {
-   "hash": "b09cb20",
-   "date": "08/02 16:14",
-   "subject": "docs: コスト設計機能(FinOps)— ユニットエコノミクス・階層実験・探索の最低保証枠"
+   "hash": "7fb298e",
+   "date": "08/03 01:59",
+   "subject": "wip(ingest): 取込共通基盤とスキーマ (T-009)"
   },
   {
-   "hash": "85109f3",
-   "date": "08/02 16:10",
-   "subject": "docs: 研究制度 v2 — 探索/確証モード分離・実験台帳・Lakatos 型プログラム評価(調査に基づく全面改訂)"
+   "hash": "b635215",
+   "date": "08/03 01:58",
+   "subject": "docs: 取込ソース拡充(FRED追加・官公庁RSS確定・第2期ソース正式登録・拡張プロセス制度化)、FM ロースター承認"
   },
   {
-   "hash": "c58ad02",
-   "date": "08/02 16:02",
-   "subject": "docs: マルチマネージャー制(ポッド制)採用 — FM ペルソナ・固定上限撤廃・中央機能唯一の鉄則"
+   "hash": "54eb076",
+   "date": "08/03 01:56",
+   "subject": "feat(personas): 報道部キャスター玲音の charter・口調ガイド(調査に基づく)"
   },
   {
-   "hash": "6b05154",
-   "date": "08/02 16:00",
-   "subject": "docs: 営業期間=1ヶ月制(労働律速/データ律速の2分類)と柔軟な監査(重要性基準・リスクベース・ゼロトレランス)"
+   "hash": "785caf6",
+   "date": "08/03 01:54",
+   "subject": "docs: T-009(データ取込)発行、初代 FM ロースター案 v0.1(Ben/Jim/Stan/Peter)"
   }
  ]
 };
