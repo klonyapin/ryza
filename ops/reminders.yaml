@@ -395,6 +395,18 @@ reminders:
       body: "config/governance.yaml の protected_areas に列挙されたパスが実在するかは、現状どこでも検証されていない。ファイルを改名・削除すると保護領域の登録は残るが実体を指さなくなり、A-18-1 は『そのパスに触れたコミット』を永久に見つけられないまま静かに無力化する(Issue #48 の改番で ops/deploy-a13.sh → ops/deploy-a18.sh、src/ryza/audit/a13.py → a18.py を改名した際に現実の危険として顕在化した。今回は同一 PR 内で登録も更新したが、機械的な検知は無い)。実装内容: ①tests/test_ips.py に、protected_areas のうち **glob メタ文字(`*`・`?`)を含まないパス**がリポジトリに実在することを検査するテストを追加する、②glob を含むパスは少なくとも1件にマッチすることを検査する(`ops/lib/**` のように並行ラインで新設されるパスは、実体が入るまで既知の未充足として明示的に許容リストへ入れるか、実体の追加後にテストを有効化するかを判断して記録すること)、③失敗メッセージには『保護領域の登録が実体を失っている』ことと governance.yaml の該当行を出す。**tests/test_ips.py は protected_areas に area: invariant_tests として登録済みの保護領域であり、変更には独立役員審査+承認手続を要する。** 出典: 改番 PR の独立審査 C-5。"
     status: pending
 
+  - id: a18-review-opinion-file-check
+    what: "A-18 の審査なし統合検出(07-development §3-1 の執行点)に docs/reviews の意見書ファイル実在検査を含める(PR #66 意見書喪失の再発防止)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "A-18 拡張(§3-1 審査なし統合の検出)に意見書ファイルの実在検査を含める"
+      labels: [governance]
+      body: "PR #66(保護領域拡充+A-18 改番)の独立役員審査は行われたが、意見書が docs/reviews に保存されないまま起草セッションの終了で失われた(07-development.md §3-1 違反。事後復元: docs/reviews/g-a18-protect-independent-review.md)。07-development §5 の執行点対応表は『§3-1 独立審査 | 審査なし統合を A-18 拡張で検出(要実装 — 宣言)』としているが、素朴な実装(PR 本文の審査言及の有無を見る)では本件のような『審査はあったが意見書ファイルがない』型を検出できない。実装時の要件: ①保護領域・新規モジュールに触れる PR の統合に対し、docs/reviews 配下に対応する意見書ファイルが存在する(同一 PR か先行 PR で追加されている)ことを検査する、②PR 本文の審査言及だけでは合格としない、③事後復元の意見書は『復元』であることの明示を必須とする(原本と偽装させない)。実装対象 src/ryza/audit/** は保護領域のため、実装 PR は独立役員審査+L1 手続を経ること。出典: PR #66 意見書の事後復元(2026-08-03)。"
+    status: pending
+
   - id: icon-rehost-storage
     what: "キャラクターアイコンを保存時に自前で再ホストする(独立役員審査 0020 C-6/C-7 の恒久是正)"
     conditions:
