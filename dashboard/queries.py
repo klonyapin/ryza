@@ -62,12 +62,13 @@ def connect_readonly() -> psycopg.Connection:
 
 
 def connect_boardroom() -> psycopg.Connection:
-    """役員室専用の**書込可**接続(autocommit)。
+    """役員室・開発室の**書込可**接続(autocommit)。
 
     Cloud Run では ``RYZA_BOARDROOM_DATABASE_URL``(Secret ``ryza-boardroom-db-url``)が
     最小権限ロール ``ryza_boardroom`` を指す。このロールが書けるのは
     ``governance.minutes`` / ``governance.minute_resolutions`` / ``governance.stances``
-    の INSERT と ``meta.runs`` の INSERT/UPDATE だけで、帳簿・取引状態・監査対象への
+    の INSERT、``meta.runs`` の INSERT/UPDATE、``ops.org_icon_overrides``(0020)、
+    ``ops.dev_chat``(0024・SELECT/INSERT のみ)だけで、帳簿・取引状態・監査対象への
     経路を持たない(``ops/deploy-dashboard.sh``)。
 
     autocommit なのは実ジョブの Run と同じ流儀(即時永続化)。書込先は追記オンリーの

@@ -1,7 +1,9 @@
 """Ryza Discord Bot 常駐エントリポイント(discord.py 2.6 / GCE 常駐)。
 
 systemd(Restart=always)で常駐し:
-- 5秒間隔で ``press.outbox`` を配送(``outbox.deliver_pending``)
+- 5秒間隔で ``press.outbox`` を配送し(``outbox.deliver_pending``)、続けて開発室
+  (``ops.dev_chat``・0024)の未中継発言を #dev へ中継(``devchat.relay_pending``)。
+  順序は固定で、非緊急の中継を Kill Switch 通報の配送より前に置かない
 - 18:00 JST に日報を投入(``daily.enqueue_daily``)
 - ``#承認`` のボタン押下を ``governance.decisions`` に記録(オーナー検証)
 - ``/kill``(凍結)``/winddown``(計画的現金化)``/flatten``(緊急清算・2段階)
@@ -43,6 +45,7 @@ from ryza.bot import daily as daily_mod
 from ryza.bot.approvals import KINDS, NotOwnerError, parse_proposal, record_decision
 from ryza.bot.daily import JST
 from ryza.db.conn import connect
+from ryza.governance import devchat
 from ryza.provenance import start_run
 
 log = logging.getLogger("ryza.bot")
@@ -270,7 +273,14 @@ class RyzaBot(commands.Bot):
         # _deliver_once は同期 DB I/O と run_coroutine_threadsafe(...).result() を含むため、
         # イベントループ上で直接実行するとハートビートを塞ぎ自己デッドロックする。
         # 必ずワーカースレッドへ逃がす。
+        #
+        # **配送が先、開発室(0024)の中継は後**(独立役員審査 重大-2)。中継は非緊急の
+        # 開発連絡であり、Kill Switch 通報・速報を含む press.outbox の配送より前に
+        # 置いてはならない。中継が DB で詰まると(connect() に timeout が無いため)
+        # 同ティックの配送ごと待たされ、緊急通報の到達が遅れる。順序を入れ替えても
+        # 中継が Discord に出るのは次ティック(最大 5 秒後)で、失うものは無い。
         await asyncio.to_thread(self._deliver_sync)
+        await asyncio.to_thread(self._relay_dev_chat_sync)
 
     @poll_outbox.before_loop
     async def _before_poll(self) -> None:
@@ -288,6 +298,40 @@ class RyzaBot(commands.Bot):
     @daily_report.before_loop
     async def _before_daily(self) -> None:
         await self.wait_until_ready()
+
+    def _relay_dev_chat_sync(self) -> None:
+        """開発室(``ops.dev_chat``・0024)の未中継の発言を #dev へ中継する。
+
+        代表がダッシュボードから書いた連絡と、設計リードが CLI から返した回答の双方を、
+        Discord のブリッジチャンネルへ流す経路。中継の実体は ``press.outbox`` への
+        enqueue で、Discord API は叩かない(配送の冪等・リトライは既存経路に委ねる)。
+
+        未中継が無いときは ``meta.runs`` に行を作らない — 5 秒ごとの空振りで実行記録を
+        埋めないため(``devchat.has_pending``)。
+
+        **部分失敗は Run に反映する**(独立役員審査 中-7)。1 件でも中継できなければ
+        status=failed とし、占有・成功・失敗の件数を ``params.runtime`` に残す。
+        全滅しても success が並ぶと、ダッシュボードの「ジョブ」ページからは障害が
+        見えない(UI 側は滞留そのものも警告する)。
+        """
+        try:
+            with connect() as conn:
+                if not devchat.has_pending(conn):
+                    return
+                r = start_run("bot.devchat.relay", conn=conn)
+                result = devchat.relay_pending(conn, r.run_id)
+                r.record_runtime(result.as_runtime())
+                r.finish("success" if result.ok else "failed")
+                conn.commit()
+            if result.relayed:
+                log.info("開発室を %d 件中継した: %s", len(result.relayed), result.relayed)
+            if result.failed:
+                log.error(
+                    "開発室の中継に失敗した %d/%d 件(未中継のまま次回リトライ): %s",
+                    len(result.failed), result.claimed, result.failed,
+                )
+        except Exception:  # noqa: BLE001 - 中継の失敗で配送ループを死なせない
+            log.exception("開発室の中継でエラー")
 
     def _deliver_sync(self) -> None:
         loop = self.loop
