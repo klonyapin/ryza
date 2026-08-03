@@ -1,0 +1,45 @@
+# config/importance.yaml — 階層0前処理の一次重要度スコアのルール定義。
+#
+# ryza.preprocess.importance がこれを読み、分類ラベル・銘柄タグ・保有/ウォッチ状況・
+# 統計的異常の併発から 0-1 のスコアと重要度ティア（low|mid|high）を決定論的に算出する
+# （設計 20-research §3）。ルールをコード外に置くことで、改訂→再処理（冪等）を容易にする。
+#
+# スコア式（決定論）:
+#   score = clamp( category_weights[category] + Σ(適用された bonuses), 0.0, 1.0 )
+# ティア:
+#   score >= tiers.high            -> high （重要開示・保有関連・異常併発。直接 中位分析）
+#   tiers.mid <= score < tiers.high -> mid  （軽量 LLM トリアージへ）
+#   score < tiers.mid              -> low  （保存のみ）
+#
+# 判定根拠（どのルールで加点したか）は meta.importance.reasons に保存し、監査 A-13 の
+# サンプル検査対象にする。ルール改訂時は version を上げて再処理する。
+
+version: "1"
+
+tiers:
+  high: 0.66
+  mid: 0.33
+
+# 分類カテゴリ別の基礎重み（0-1）。classify のカテゴリ名に対応。
+category_weights:
+  filing_guidance_revision: 0.80   # 業績予想の修正 — 最も材料性が高い
+  filing_mna: 0.85                 # M&A・TOB・MBO
+  filing_earnings: 0.60            # 決算短信
+  filing_large_holding: 0.60       # 大量保有報告
+  filing_buyback: 0.55             # 自己株式取得
+  filing_dividend: 0.50            # 配当予想の修正
+  filing_stock_split: 0.40         # 株式分割
+  filing_other: 0.30
+  news_monetary_policy: 0.60       # 金融政策・中銀
+  news_mna: 0.55
+  news_fx: 0.40
+  news_earnings: 0.40
+  news_other: 0.20
+  unknown: 0.15
+
+# 加点（重複適用可・合算後にクランプ）。
+bonuses:
+  held_instrument: 0.30            # 保有銘柄に関連
+  watchlist_instrument: 0.20       # ウォッチリスト銘柄に関連
+  statistical_anomaly: 0.20        # 価格・出来高等の統計的異常が併発
+  multiple_instruments: 0.05       # 複数銘柄に言及（波及の可能性）
