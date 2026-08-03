@@ -20,7 +20,13 @@
 
 ## アクション
 
-- [ ] 制度調査レポート(docs/research/governance-references.md)— 調査エージェント実行中
-- [ ] 06-constitution.md ドラフト+config/governance.yaml — CIO 起草
-- [ ] 独立役員盲検レビュー → 代表批准(発効は代表のみ)
-- [ ] A-13 実装タスクの発行(批准後)
+- [x] 制度調査レポート(docs/research/governance-references.md)
+- [x] 06-constitution.md ドラフト+config/governance.yaml — CIO 起草(v0.1)
+- [x] 独立役員盲検レビュー(条件付き承認・C-1〜C-5 → v0.2 で反映)
+- [x] 代表指示「承認手続きは最小に」→ v0.3(明示承認3専決+みなし承認 48h/7日)
+- [x] **代表批准: 2026-08-03、PR #32 マージ(c7af81e)により発効**
+- [ ] A-13 実装(ops/reminders.yaml: a13-implementation-checkpoint 2026-08-24)
+
+## 追記(2026-08-03 発効時)
+
+v0.3 で承認モデルを変更(代表指示): 明示承認は 定款改廃・実弾マネー・Kill Switch 復帰 の3専決のみ。それ以外は独立役員審査+#承認 通知+異議期間(48h、IPS 7日)のみなし承認(deemed として監査記録)。IPS の起票専権は月次レビュー起案(CIO)に改められた。

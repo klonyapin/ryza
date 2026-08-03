@@ -58,16 +58,16 @@ reminders:
     status: pending
 
   - id: constitution-ratification-followup
-    what: "定款 v0.2 の批准状況確認。批准済みなら附則の実行(CLAUDE.md 保護領域リストの定款参照化)、未批准なら代表へ再打診"
+    what: "定款の批准状況確認(v0.3 として 2026-08-03 批准済み — PR #32 マージ。附則の CLAUDE.md 置換も同 PR で実行済み)"
     conditions:
       - type: date_after
         date: "2026-08-10"
     action:
       type: issue_create
-      title: "定款 v0.2 批准フォローアップ"
+      title: "定款批准フォローアップ(完了済み)"
       labels: [decision]
-      body: "docs/design/06-constitution.md v0.2(独立役員条件付き承認・C-1〜C-5 反映済み)の批准状況を確認。批准済みであれば附則に従い CLAUDE.md の保護領域リストを定款第5条への参照に置換し、governance.yaml の status を active にする。未批准なら代表に判断材料の不足を確認する。"
-    status: pending
+      body: "(発火不要)v0.3 が 2026-08-03 に PR #32 マージで批准・発効済み。"
+    status: done # 2026-08-03 PR #32 マージにより完了
 
   - id: a13-implementation-checkpoint
     what: "監査 A-13(規則⇔実装トレーサビリティ)の実装チェックポイント。批准後の最優先統制"
