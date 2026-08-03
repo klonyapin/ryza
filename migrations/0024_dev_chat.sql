@@ -41,7 +41,7 @@
 --   * **トリガ**… 所有ロールで動くコード(Bot・ジョブ・手動 psql)の**事故**と、
 --     非所有ロールからの迂回を防ぐ。悪意ある所有者は止められない
 --   * **inserted_by**(重大-1)… 上記をすり抜けた捏造を**事後に検出可能**にする
---     監査列。sender と inserted_by の矛盾は A-13 の照合対象になる
+--     監査列。sender と inserted_by の矛盾は A-18 の照合対象になる
 
 CREATE TABLE ops.dev_chat (
     id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
