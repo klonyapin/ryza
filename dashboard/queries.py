@@ -214,6 +214,9 @@ def fetch_nav_data(
             "flow_eop": p.flow_eop,
             "flow_bop": p.flow_bop,
             "net_flow": p.net_flow,
+            # 再締めの訂正で照合結論が無効化された日(status が confirmed でも
+            # 「照合済み」を意味しない — 独立審査 再-2 の裁定)。UI が注記する。
+            "recon_invalidated": p.recon_invalidated,
         }
         for p in data.points
     ]

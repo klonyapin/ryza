@@ -47,8 +47,13 @@ def _record_event(
         )
 
 
-def state_metrics(state: RiskState) -> dict:
-    """イベント台帳・レポートに残す測定値スナップショット(監査再現性)。"""
+def state_metrics(state: RiskState, extra: dict | None = None) -> dict:
+    """イベント台帳・レポートに残す測定値スナップショット(監査再現性)。
+
+    ``extra`` は測定の**前提**に関する追加キー(例: 測定窓に含まれた照合無効日の数)。
+    フラグがどんな系列の上で立ったかを後から再現できるようにするためのもので
+    (不変原則3)、判定そのものには使わない。
+    """
     return {
         "as_of_day": state.as_of_day.isoformat(),
         "nav": str(state.nav),
@@ -63,6 +68,7 @@ def state_metrics(state: RiskState) -> dict:
         "es95_n_obs": state.es95.n_obs,
         "measured_dd_hard": state.dd_hard,
         "notes": list(state.notes),
+        **(extra or {}),
     }
 
 
@@ -74,6 +80,7 @@ def upsert_limits_state(
     as_of: datetime,
     run_id: int,
     actor: str = "risk.daily",
+    extra_metrics: dict | None = None,
 ) -> dict[str, bool]:
     """エンジン測定値で ``risk.limits_state`` を更新し、実効フラグを返す(冪等)。
 
@@ -112,7 +119,7 @@ def upsert_limits_state(
         book_id=book_id,
         event="engine_update",
         flags=flags,
-        metrics=state_metrics(state),
+        metrics=state_metrics(state, extra_metrics),
         actor=actor,
         reason=None,
         as_of=as_of,

@@ -527,6 +527,28 @@ def test_performance_flags_external_flow_days_under_the_chart(app):
     assert "損益ではない" in flow_note
 
 
+def test_performance_flags_recon_invalidated_days(conn, run, monkeypatch):
+    """再締めで照合結論が無効化された日を成績ページで名指しする(独立審査 再-2)。"""
+    _seed(conn, run, sufficient=True)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ledger.nav_snapshots
+            SET detail = detail || '{"recon_invalidated": true}'::jsonb
+            WHERE book_id = 'DEMO_FUND' AND snap_date = %s
+            """,
+            (date(2026, 8, 2),),
+        )
+    try:
+        captions = [str(c.value) for c in _app_factory(conn, monkeypatch)("performance").caption]
+    finally:
+        st.cache_data.clear()
+        st.cache_resource.clear()
+    note = next((c for c in captions if "照合結論が無効化された日" in c), None)
+    assert note is not None, captions
+    assert "2026-08-02" in note and "confirmed" in note
+
+
 # ── リスク ────────────────────────────────────────────────────────────────────
 def test_risk_lists_bullets_sorted_by_usage(app):
     at = app("risk")

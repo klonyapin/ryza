@@ -262,6 +262,88 @@ def test_run_risk_daily_pending_same_day_material_is_urgent(conn, run_id):
     assert urgent is True
 
 
+def _flag_recon_invalidated(conn, day, by_run):
+    """``ledger.closing.reclose_stale`` が立てたのと同じ状態を作る。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ledger.nav_snapshots
+            SET status = 'confirmed',
+                detail = detail
+                    || jsonb_build_object('recon_invalidated', true,
+                                          'recon_invalidated_by_run', %s::bigint)
+            WHERE book_id = 'DEMO_FUND' AND snap_date = %s
+            """,
+            (by_run, day),
+        )
+
+
+def test_run_risk_daily_flags_new_recon_invalidated_days(conn, run_id):
+    """当該再締めで新たに立った照合無効日は breaks 相当で urgent(独立審査 再-2)。"""
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_000_000})
+    _flag_recon_invalidated(conn, date(2030, 1, 2), run_id)  # 同じ run の締めが立てた
+
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF)
+    assert detail["DEMO_FUND"]["recon_invalidated_new"] == 1
+    embed, urgent = _reports(conn)[0]
+    assert urgent is True  # 照合が無効な日を「照合済み NAV」として黙認しない
+    field = [f for f in embed["fields"] if f["name"] == "照合無効"]
+    assert field and "2030-01-02" in field[0]["value"]
+
+
+def test_run_risk_daily_does_not_re_alert_known_recon_invalidation(conn, run_id):
+    """翌日以降(別 run)は既知のフラグで urgent にしない(新-2 — 中-5 と同じ規律)。
+
+    ``detail.recon_invalidated`` は証憑として不可逆だが、通知まで不可逆にすると
+    「一度でも遅延約定が起きたら日次レポートが永久に赤」になる。
+    """
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_000_000})
+    _flag_recon_invalidated(conn, date(2030, 1, 2), run_id - 1)  # 前日の締めが立てた
+
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF)
+    assert detail["DEMO_FUND"]["recon_invalidated_new"] == 0
+    assert detail["DEMO_FUND"]["recon_invalidated_total"] == 1  # 記録は消えない
+    embed, urgent = _reports(conn)[0]
+    assert urgent is False
+    assert not [f for f in embed["fields"] if f["name"] == "照合無効"]
+    notes = [f for f in embed["fields"] if f["name"] == "注記"][0]["value"]
+    assert "既知" in notes  # 件数だけは毎日残す
+
+
+def test_run_risk_daily_records_recon_invalidation_in_state_metrics(conn, run_id):
+    """測定窓に照合無効日が何日入ったかを metrics に残す(不変原則3 — 事後監査)。"""
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_000_000})
+    _flag_recon_invalidated(conn, date(2030, 1, 2), run_id)
+
+    run_risk_daily(conn, _run(run_id), as_of=_AS_OF)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT metrics FROM risk.limits_state_events
+            WHERE book_id = 'DEMO_FUND' AND event = 'engine_update'
+            ORDER BY id DESC LIMIT 1
+            """
+        )
+        metrics = cur.fetchone()[0]
+    assert metrics["recon_invalidated_days_in_window"] == 1
+    assert metrics["recon_invalidated_days_total"] == 1
+
+
+def test_run_risk_daily_without_recon_invalidation_is_quiet(conn, run_id):
+    """通常の系列では照合無効フィールドを出さない(毎日赤にしない)。"""
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_000_000})
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF)
+    assert detail["DEMO_FUND"]["recon_invalidated_new"] == 0
+    assert detail["DEMO_FUND"]["recon_invalidated_total"] == 0
+    embed, urgent = _reports(conn)[0]
+    assert urgent is False
+    assert not [f for f in embed["fields"] if f["name"] == "照合無効"]
+
+
 def test_build_risk_embed_pending_note_survives_note_truncation():
     """注記欄が 1024 字で切られても未反映フローの理由は消えない(重要-4)。"""
     state = SimpleNamespace(
