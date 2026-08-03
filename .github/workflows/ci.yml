@@ -1,0 +1,103 @@
+# CI: 全 PR と main への push でテスト+lint を強制する。
+#
+# ブランチ保護の required status check は「test」(このファイルの jobs.test)を指定する。
+# check 名を安定させるため、ジョブ id/name はみだりに変更しないこと。
+#
+# PostgreSQL は GitHub Actions の services: ではなくリポジトリ同梱の
+# docker/postgres/Dockerfile をビルドして起動する。migrations が
+# pgvector(0003)に加えて pg_partman(0002)を要求し、両方を含む公開イメージが
+# 存在しないため(pgvector/pgvector:pg17 では不足)。user/pass/db は compose.yaml
+# のローカル構成(ryza/ryza/ryza)に合わせる。テスト自体は tests/conftest.py が
+# CREATE DATABASE ryza_test して隔離 DB で走る(POSTGRES_USER はスーパーユーザー
+# なので権限は足りる)。
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# 同一 PR(ref)の古い実行は打ち切る。main への push は打ち切らない。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RYZA_DATABASE_URL: postgresql://ryza:ryza@localhost:5432/ryza
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── PostgreSQL(pgvector + pg_partman)をローカル構成と同一イメージで起動 ──
+      - name: Build postgres image (pgvector + pg_partman)
+        run: docker build -t ryza-postgres:17 -f docker/postgres/Dockerfile .
+
+      - name: Start postgres
+        run: |
+          docker run -d --name ryza-db \
+            -e POSTGRES_USER=ryza \
+            -e POSTGRES_PASSWORD=ryza \
+            -e POSTGRES_DB=ryza \
+            -p 5432:5432 \
+            ryza-postgres:17
+
+      # ── Python / 依存関係(uv.lock 固定) ──
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --locked --extra dev
+
+      # ── lint(DB 不要のチェックを先に落とす) ──
+      - name: Ruff
+        run: uv run ruff check .
+
+      - name: Validate YAML (config/, ops/reminders.yaml)
+        run: |
+          uv run python - <<'EOF'
+          import glob
+          import sys
+
+          import yaml
+
+          paths = sorted(glob.glob("config/**/*.yaml", recursive=True))
+          paths.append("ops/reminders.yaml")
+          bad = 0
+          for p in paths:
+              with open(p, encoding="utf-8") as f:
+                  try:
+                      list(yaml.safe_load_all(f))
+                      print(f"OK {p}")
+                  except yaml.YAMLError as e:
+                      print(f"NG {p}: {e}")
+                      bad = 1
+          sys.exit(bad)
+          EOF
+
+      # ── テスト ──
+      - name: Wait for postgres
+        run: |
+          for i in $(seq 1 60); do
+            if docker exec ryza-db pg_isready -U ryza -d ryza >/dev/null 2>&1; then
+              echo "postgres is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "postgres did not become ready" >&2
+          docker logs ryza-db >&2
+          exit 1
+
+      - name: Run tests
+        run: uv run pytest tests/ -q
+
+      - name: Postgres logs on failure
+        if: failure()
+        run: docker logs ryza-db || true
