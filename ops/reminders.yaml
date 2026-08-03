@@ -380,3 +380,39 @@ reminders:
       labels: [impl]
       body: "ダッシュボードの NAV 系列(dashboard/queries.py fetch_nav_series)は ledger.journal_lines × journal_entries × accounts を全走査して出資フローを日次集計し、コスト集計(fetch_cost_daily / fetch_cost_summary)は meta.runs を started_at で全走査する。どちらも支える索引が無い(journal_lines の PK は (entry_id, line_no)、meta.runs の PK は run_id のみ)。現在は行数が小さく問題にならないが、仕訳と実行記録は単調増加するため放置すると再実行のたびに全表走査が効く。暫定対応として app.py 側に @st.cache_data(ttl=60) を入れてある(独立役員審査 中-10 の部分対応)。是正: (1) ledger.journal_lines (book_id, account_id) の索引、(2) ledger.journal_entries (book_id, entry_date) の索引、(3) meta.runs (started_at DESC) の索引、(4) meta.runs (job_name, run_id DESC) の索引を migrations で追加し、EXPLAIN で効いていることを確認する。**migrations は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 中-10。"
     status: pending
+
+  - id: governance-protect-deploy-dashboard
+    what: "ops/deploy-dashboard.sh を config/governance.yaml の protected_areas へ登録(独立役員審査 0020 C-4)"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "protected_areas に ops/deploy-dashboard.sh を登録する"
+      labels: [governance]
+      body: "ops/deploy-dashboard.sh は DB ロールの権限定義・IAP 許可リスト・稼働コードの検証を持つ実質的なデプロイ経路だが、config/governance.yaml の protected_areas には bot/daily/ops-weekly のデプロイのみが登録されており、本スクリプトは対象外になっている(独立役員審査 0020 C-4)。そのため監査 A-13-1(無承認変更検出)が本ファイルの変更を検出せず、権限定義が承認記録なしに書き換わっても気付けない。是正: config/governance.yaml の protected_areas に ops/deploy-dashboard.sh(および deploy 経路のスクリプト群)を追加する。governance.yaml 自体が保護領域のため、独立役員審査 → #承認 通知 → 48h みなし承認の手続を経ること。0020 の PR とは別 PR にするのは、承認の単位を『スキーマ』と『統制対象の定義変更』で混ぜないため(設計リード裁定 2026-08-03)。"
+    status: pending
+
+  - id: icon-rehost-storage
+    what: "キャラクターアイコンを保存時に自前で再ホストする(独立役員審査 0020 C-6/C-7 の恒久是正)"
+    conditions:
+      - type: date_after
+        date: "2026-08-31"
+    action:
+      type: issue_create
+      title: "アイコン上書きを外部ホットリンクから自前再ホストへ移行する"
+      labels: [impl]
+      body: "現行の ops.org_icon_overrides(0020)は外部 URL のホットリンクを保存し、保存時に単発の HEAD/GET で検証するだけである。これには2つの構造的な限界がある。(1) 検証は保存時点のスナップショットでしかなく、URL 先の画像が後から差し替えられても検知できない(C-7)。(2) 実アクセスを伴う検証はそれ自体が SSRF の入口で、現行の緩和(https 限定・リダイレクト追従なし・解決先 IP が公開アドレスであることの確認)は DNS rebinding には無力である(C-6・src/ryza/org.py の _reject_internal_host に明記)。恒久是正は、保存時に画像を1度だけ取得して自前ストレージ(GCS 等)へ複製し、以後は自前 URL を配信すること。取得はサイズ上限(現行 5MB)とタイムアウト付きの1回に限定し、以後の外部アクセスを無くす。**着手前に再配布の法的懸念を整理すること**: config/org.yaml 冒頭の判断(『public リポジトリへの画像コミットは再配布にあたるため行わず icon_url のホットリンクで参照する』)は、非公開の自前ストレージへの複製が同じ問題になるかを検討していない。非公開・単一利用者・認証必須(IAP)の配信であれば私的複製の範囲と整理できる可能性があるが、結論を出してから実装すること。整理の結果『再ホストしない』となった場合は、代わりに定期的な再検証ジョブ(保存済み URL の Content-Type/サイズを週次で HEAD 確認し、変化を #運営 へ通知)を実装する。"
+    status: pending
+
+  - id: outbox-internal-key-separation
+    what: "embed author の内部キー member_id を構造的に分離する(独立役員審査 0020 C-10)"
+    conditions:
+      - type: date_after
+        date: "2026-08-31"
+    action:
+      type: issue_create
+      title: "outbox の内部キー(author.member_id)を embed_json の外へ出す"
+      labels: [impl]
+      body: "0020 は配送時にアイコン上書きを解決するため、embed_json の author に内部キー member_id を載せる方式を採った(src/ryza/org.py embed_author / AUTHOR_MEMBER_KEY)。これは press.outbox の全行に Discord API のフィールドではない値が永続化されることを意味し、除去は送信直前の1関数(org.resolve_author)だけに依存している(独立役員審査 0020 C-10)。将来 embed_json を別経路(新しい配送先・再送ツール・エクスポート)へ流す実装が resolve_author を通し忘れると、未知フィールドが Discord へ送られる。是正: press.outbox に author_member_id 列を追加する(あるいは embed_json と並ぶ meta 列を設ける)か、outbox.OutboxMessage のデータ構造として embed とは別に持ち、embed_json には Discord のフィールドだけを入れる。press.outbox はスキーマ変更のため保護領域の手続を経ること。現行方式でも実害が出ていないのは、Discord が未知フィールドを無視するためであり(0020 時点で確認)、緊急性は低い。"
+    status: pending
