@@ -39,6 +39,7 @@ if str(_HERE) not in sys.path:
 import github_api  # noqa: E402
 import queries  # noqa: E402
 
+from ryza import org  # noqa: E402
 from ryza.governance import boardroom, personas  # noqa: E402
 from ryza.provenance.runs import run as run_ctx  # noqa: E402
 from ryza.research.llm import StructuredLLM  # noqa: E402
@@ -68,6 +69,9 @@ def _df(rows: list[dict[str, Any]]) -> pd.DataFrame:
 def _render_embed(embed: dict[str, Any]) -> None:
     """Discord embed(dict)の簡易プレビュー。"""
     with st.container(border=True):
+        author = embed.get("author") or {}
+        if author.get("name"):
+            st.caption(author["name"])  # 発信者キャラクター(org.yaml 由来)
         if embed.get("title"):
             st.markdown(f"**{embed['title']}**")
         if embed.get("description"):
@@ -795,6 +799,49 @@ def _boardroom_llm(run, tier: str) -> StructuredLLM:
         _provider_for(tier), run, dept_tag="governance",
         price_per_1k=_llm_config().price_map(),
     )
+
+
+def _role_member(role: str) -> org.Member | None:
+    """役職キー → 台帳メンバー(config/org.yaml)。未登録の役職は None(既定表示で継続)。"""
+    try:
+        return org.member_for_role(role)
+    except KeyError:
+        return None
+
+
+def _role_display(role: str) -> str:
+    """役職の表示は「名前(役職)」(代表指示 2026-08-03)。台帳に無ければ従来ラベル。"""
+    member = _role_member(role)
+    return member.display_name if member else boardroom.BOARDROOM_ROLES.get(role, role)
+
+
+def _role_avatar(role: str) -> str | None:
+    """チャット吹き出しのアバター。ローカル SVG(Streamlit は表示可)→ 台帳の
+    icon_url(リモート)→ 既定アイコンの順でフォールバックする。"""
+    member = _role_member(role)
+    if member is None:
+        return None
+    path = member.icon_repo_path
+    if path.exists():
+        return str(path)
+    return member.icon_url or None
+
+
+def _render_chat_turn(turn: boardroom.ChatTurn) -> None:
+    """1 発言を吹き出し表示する。役職側は名前(役職)+キャラクター色+アバター。"""
+    if turn.speaker == "representative":
+        with st.chat_message("user"):
+            st.markdown(turn.text)
+        return
+    member = _role_member(turn.speaker)
+    with st.chat_message("assistant", avatar=_role_avatar(turn.speaker)):
+        if member is not None:
+            st.markdown(
+                f'<span style="color:{member.color};font-weight:600">'
+                f"{member.display_name}</span>",
+                unsafe_allow_html=True,
+            )
+        st.markdown(turn.text)
 
 
 def page_boardroom() -> None:

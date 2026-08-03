@@ -240,6 +240,17 @@ SELECT format(
   FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema';
 \gexec
 
+-- 秘密を保持するテーブルは一括 GRANT の対象から**明示的に外す**。
+--   ops.discord_webhooks.webhook_url は「URL を知る者が誰でも当該チャンネルへ投稿できる」
+--   秘密(migrations/0017 冒頭)。ダッシュボードは表示に一切使わないので読ませない。
+-- 注意: ALTER DEFAULT PRIVILEGES により**将来作られるテーブルにも SELECT が付く**。
+--   秘密を持つテーブルを新設したら、この除外リストに追加すること
+--   (恒久策は ops/reminders.yaml db-role-separation-webhook-url のロール分離)。
+SELECT format('REVOKE ALL ON %s FROM %I', t.rel, '__DASH_ROLE__')
+  FROM (VALUES ('ops.discord_webhooks')) AS t(rel)
+ WHERE to_regclass(t.rel) IS NOT NULL;
+\gexec
+
 -- ── 2) __BR_ROLE__: 役員室の書込専用(最小権限)─────────────────────────────
 -- 書込先は追記オンリーの3テーブル+実行記録のみ。帳簿(ledger)・取引状態(ops)・
 -- 監査対象への経路を持たない。
@@ -273,6 +284,11 @@ SELECT r.rolname, r.rolcanlogin, r.rolsuper, r.rolinherit,
 SELECT count(*) AS dashboard_write_grants
   FROM information_schema.role_table_grants
  WHERE grantee = '__DASH_ROLE__' AND privilege_type <> 'SELECT';
+\echo '-- 読取専用ロールの秘密テーブルへの権限(0 であること)'
+SELECT count(*) AS dashboard_secret_grants
+  FROM information_schema.role_table_grants
+ WHERE grantee = '__DASH_ROLE__'
+   AND table_schema || '.' || table_name IN ('ops.discord_webhooks');
 """
 
 sql = (

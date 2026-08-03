@@ -411,6 +411,14 @@ def test_embed_clean_when_no_findings():
     assert any(f["name"] == "A-13-4 全変更 PR 化" for f in embed["fields"])
 
 
+def test_embed_author_is_audit_character():
+    """監査報告の発信者は監査部門のキャラクター(config/org.yaml — 代表指示 2026-08-03)。"""
+    from ryza import org
+
+    embed = a13.build_alert_embed(_result([], []))
+    assert embed["author"] == org.author_for_role("audit")
+
+
 def test_embed_alert_on_direct_push_only():
     """直 push のみでも要対応(has_findings)になり、A-13-4 節に載る。"""
     d = {"commit": "beef00beef00", "subject": "s", "files": ["README.md"], "reason": "r"}

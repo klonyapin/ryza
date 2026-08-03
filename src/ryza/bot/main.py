@@ -37,7 +37,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from ryza.bot import COLOR_FLASH, COLOR_NORMAL, channels, killswitch, outbox
+from ryza.bot import CHANNELS, COLOR_FLASH, COLOR_NORMAL, channels, killswitch, outbox, webhooks
 from ryza.bot import daily as daily_mod
 from ryza.bot.approvals import KINDS, NotOwnerError, parse_proposal, record_decision
 from ryza.bot.daily import JST
@@ -106,6 +106,11 @@ def dict_to_embed(data: dict) -> discord.Embed:
         description=data.get("description"),
         color=data.get("color", COLOR_NORMAL),
     )
+    # 発信者キャラクター(config/org.yaml — 生成側が embed_json に author を入れる)。
+    # icon_url が 404 でも Discord は名前だけで表示するため配送は失敗しない。
+    author = data.get("author")
+    if author and author.get("name"):
+        embed.set_author(name=author["name"], icon_url=author.get("icon_url"))
     for f in data.get("fields", []):
         embed.add_field(
             name=f.get("name", ""), value=f.get("value", ""), inline=f.get("inline", False)
@@ -287,24 +292,29 @@ class RyzaBot(commands.Bot):
         loop = self.loop
 
         def send_fn(msg: outbox.OutboxMessage) -> str:
-            # 論理チャンネル → 実 ID は ops.discord_channels(起動時 ensure 済み)から解決。
+            # 論理チャンネル → 実 ID / webhook は起動時 ensure の記録(ops.*)から解決。
             with connect() as resolve_conn:
                 channel_id = channels.resolve(resolve_conn, msg.channel)
+                webhook_url = webhooks.resolve_webhook(resolve_conn, msg.channel)
             if channel_id is None:
                 raise RuntimeError(f"チャンネル未解決(ensure 前?): {msg.channel}")
+            # #承認 向けで proposal footer を持つ embed には承認ボタンを付ける
+            # (凍結中の例外的取引などを1件ずつオーナー承認する経路)。
+            parsed = parse_proposal(msg.embed) if msg.channel == "approval" else None
+            # webhook 方式(代表指示 2026-08-03): author キャラクターを username /
+            # avatar_url へ昇格して投稿(webhooks.py)。承認ボタン付きは webhook に
+            # コンポーネントを付けられないため従来の Bot 投稿のまま。
+            if webhook_url is not None and parsed is None:
+                return webhooks.post(webhook_url, msg.embed, urgent=msg.urgent)
             embed = dict_to_embed(msg.embed)
             if msg.urgent:
                 embed.color = discord.Color(COLOR_FLASH)
             channel = self.get_channel(int(channel_id))
             if channel is None:
                 raise RuntimeError(f"チャンネル取得失敗: {channel_id}")
-            # #承認 向けで proposal footer を持つ embed には承認ボタンを付ける
-            # (凍結中の例外的取引などを1件ずつオーナー承認する経路)。
             send_kwargs: dict = {"embed": embed}
-            if msg.channel == "approval":
-                parsed = parse_proposal(msg.embed)
-                if parsed is not None:
-                    send_kwargs["view"] = ApprovalView(self, parsed[0], kind=parsed[1])
+            if parsed is not None:
+                send_kwargs["view"] = ApprovalView(self, parsed[0], kind=parsed[1])
             # discord の I/O はコルーチン。ワーカースレッドからイベントループに投げて待つ。
             fut = asyncio.run_coroutine_threadsafe(channel.send(**send_kwargs), loop)
             sent = fut.result(timeout=15)
@@ -338,6 +348,46 @@ class RyzaBot(commands.Bot):
                 channels.record_channel(
                     conn, plan.logical, plan.channel_name, channel_id, str(self.category_id)
                 )
+            conn.commit()
+
+    # ── webhook ensure(webhook 方式配送 — webhooks.py・代表指示 2026-08-03)────
+    async def ensure_webhooks(self) -> None:
+        """各チャンネルの webhook ``ryza-org`` を ensure し ``ops.discord_webhooks`` へ記録。
+
+        Manage Webhooks 権限が無いチャンネルはスキップして Bot 投稿(embed author 方式)へ
+        自動フォールバックし、#運営 へ起動時に一度だけ案内する。
+        """
+        missing: list[str] = []
+        with connect() as conn:
+            for logical in CHANNELS:
+                channel_id = channels.resolve(conn, logical)
+                channel = self.get_channel(int(channel_id)) if channel_id else None
+                if channel is None:
+                    continue
+                try:
+                    hooks = await channel.webhooks()
+                    hook = next(
+                        (h for h in hooks if h.name == webhooks.WEBHOOK_NAME), None
+                    )
+                    if hook is None:
+                        hook = await channel.create_webhook(name=webhooks.WEBHOOK_NAME)
+                    webhooks.record_webhook(conn, logical, str(hook.id), hook.url)
+                except discord.Forbidden:
+                    missing.append(logical)
+            if missing:
+                notice = {
+                    "title": "Webhook 権限の案内",
+                    "description": (
+                        f"チャンネル {', '.join(missing)} で webhook を確保できませんでした。"
+                        "Bot に Manage Webhooks 権限を付与すると、投稿がキャラクターの"
+                        "名前(役職)とアイコンで完全に表示されるようになります"
+                        "(それまでは embed author 表示で代替)。"
+                    ),
+                    "color": COLOR_NORMAL,
+                }
+                r = start_run("bot.webhook_notice", conn=conn)
+                outbox.enqueue(conn, "ops", notice, r.run_id)
+                r.finish("success")
             conn.commit()
 
     # ── コマンド登録 ───────────────────────────────────────────────────────
@@ -447,6 +497,10 @@ class RyzaBot(commands.Bot):
             await self.ensure_channels()
         except Exception:  # noqa: BLE001 - ensure 失敗でも Bot は生かす
             log.exception("チャンネル ensure に失敗")
+        try:
+            await self.ensure_webhooks()
+        except Exception:  # noqa: BLE001 - webhook 無しでも Bot 投稿で配送は続く
+            log.exception("webhook ensure に失敗")
         now = dt.datetime.now(dt.UTC)
         embed = {
             "title": "Ryza Bot 起動",
