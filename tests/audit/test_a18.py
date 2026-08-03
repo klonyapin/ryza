@@ -852,7 +852,13 @@ def test_run_a18_with_conn_marks_refs_verified(repo, conn):
 
 
 def test_real_repo_trailers_resolve_without_conn():
-    """実リポジトリの履歴で A-18-1 が壊れていない(conn 無しの従来経路)。"""
+    """実リポジトリの履歴で A-18-1 が壊れていない(conn 無しの従来経路)。
+
+    #78 は浅い clone(fetch-depth 1)で ValueError になる本テストを skip で回避していたが、
+    本ラインが ci.yml に ``fetch-depth: 0`` を入れて根本原因を消したため skip を外す
+    (skip のままだと CI が浅くなったとき実リポジトリ検査が黙って行われなくなる —
+    「沈黙を作らない」原則。tests/test_ips.py が fetch-depth: 0 の存在自体を固定している)。
+    """
     root = Path(__file__).resolve().parents[2]
     gov = a18.load_governance(root)
     violations, inherited, checked, findings = a18.check_protected_commits(root, gov)
