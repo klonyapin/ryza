@@ -381,3 +381,16 @@ gcloud artifacts repositories describe ryza --location=us-west1 --project ryza-m
 - バックアップ: 実施前後の get-iam-policy JSON をセッション記録に保存(scratchpad)。ロールバックは §9.5
 - 残る監視点: 次回 ops-weekly(月曜)の BQ 経路はデータセット ACL READER 経由の初回実走 —
   §8.4 のとおり起票内容(誤った「テーブル欠落」起票が無いこと)まで確認する(reminders: `ops-weekly-bq-acl-verify`)
+
+## 12. 追補(2026-08-04・設計リード): Cloud Build 経路の権限欠落と是正
+
+R-1(editor 剥離)の陽性確認4系統に **Cloud Build によるダッシュボードデプロイが含まれておらず**、
+次回デプロイ時に `storage.objects.get` 拒否で顕在化した(ソース tarball の読取)。最小のリソース
+レベル3付与で是正済み:
+
+- `gs://ryza-main_cloudbuild` に `roles/storage.objectViewer`(ビルドソース読取)
+- AR リポジトリ `ryza` に `roles/artifactregistry.writer`(イメージ push)
+- プロジェクトに `roles/logging.logWriter`(ビルドログ — リソースレベル指定不可のため project。書込のみ)
+
+教訓: 陽性確認は「定常ジョブ」だけでなく**デプロイ経路そのもの**を含めること。deploy-dashboard.sh の
+実行が検証を兼ねる。付与の宣言化は deploy-dashboard.sh 側に追記済みか次回 PR で行う。
