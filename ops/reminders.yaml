@@ -1111,3 +1111,15 @@ reminders:
       labels: [governance]
       body: "クエリ書き換え審査(査-1): tests/ledger/test_stale_query_rewrite.py と tests/risk/test_navflow_query_rewrite.py は会計・リスクの同値性を固定する対照だが protected_areas 外のため、意味変更時に凍結 SQL を審査なしで書き換えて対照を無効化できる。tests/test_ips.py の先例どおり area: invariant_tests で登録する(governance.yaml は L1 — 次回 L1 バッチ)。"
     status: pending
+
+  - id: ips-line10-draft-rights-consistency
+    what: "80-ips.md L10「ユーザーのみ起票可」と定款第4条(L2=CIO 起票可)の矛盾解消"
+    conditions:
+      - type: date_after
+        date: "2026-08-28"
+    action:
+      type: issue_create
+      title: "IPS 月次レビュー(9/2)で起票権記述を定款 v0.4 に整合させる"
+      labels: [decision, ips]
+      body: "L2 レビュー(2026-08-04・risk-observability-independent-review.md 末尾)の条件。80-ips.md L10 の「ユーザーのみ起票可」は旧承認モデルの残骸で、定款第4条(L2 起票=代表・CIO)と矛盾(定款が上位のため実務は定款優先)。9/2 の IPS 月次レビューで本文を整合させる。あわせて ops/reminders.yaml 内の同旨の古い記述(ips.yaml 変更はユーザー起票が必要)も是正する。"
+    status: pending
