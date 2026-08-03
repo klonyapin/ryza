@@ -259,7 +259,8 @@ CREATE TABLE ledger.budgets (
 ### 勘定科目表(初期セット)
 
 **ファンド帳簿(DEMO_FUND / LIVE_FUND 共通)**
-- 資産: `cash` 現金 / `securities` 有価証券(資産クラス別サブ勘定)/ `receivable_unsettled` 未収入金 / `accrued_income` 未収配当・利息 / `margin_deposit` 差入証拠金
+- 資産: `cash` 現金 / `securities` 有価証券(**取得原価のみ**。資産クラス別サブ勘定)/ `securities_mtm` 有価証券評価調整(評価替えの累計。migrations/0034)/ `receivable_unsettled` 未収入金 / `accrued_income` 未収配当・利息 / `margin_deposit` 差入証拠金
+  - 建玉の帳簿価額(時価)は `securities + securities_mtm`。原価と評価調整を別勘定に置くことで「`securities` 残高 = 建玉イベント再生の取得原価」という恒等式が締めで機械検査できる(判断の全文は `docs/design/11-mtm-account-separation.md`)
 - 負債: `payable_unsettled` 未払金 / `borrowings` 借入金(信用)/ `short_positions` 空売り有価証券 / `accrued_expense` 未払費用
 - 資本: `capital` 出資金 / `retained` 累積損益
 - 収益: `realized_pnl` 実現損益 / `unrealized_pnl` 未実現評価損益 / `dividend_income` 配当 / `interest_income` 利息

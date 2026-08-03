@@ -193,6 +193,9 @@ def run_daily_close(
     戻り値: {nav, status, marked, fills_recorded, recon, zero_qty_writeoffs,
     unexplained_residue}。``unexplained_residue`` が空でない日は呼び出し側が通知すること
     (会計の説明不能な残高であり、放置すると偽リターンになる — 独立審査 新-15)。
+    その中身は**原価恒等式の破れ**である: 各銘柄について「原価勘定 ``securities`` の残高」と
+    「建玉イベントの再生が返す取得原価」が一致しない状態であり、``reason`` は数量ゼロなら
+    ``zero_qty_residue``、建玉が残っているなら ``cost_identity_broken``。
     """
     bt = _util.book_type(conn, book_id)
 
@@ -209,7 +212,7 @@ def run_daily_close(
             # 数量も帳簿価額も同じ as_of で切る(独立審査 新-13)。数量だけ全期間再生に
             # すると、将来日付の売りが先に記帳されている日の締めが「数量ゼロ ⇒ 残渣」と
             # 誤判定して実在の建玉を消す(実測: returns [-0.0196] ← 真値 [0.0])。
-            qty, _cost = _util.replay_position(conn, book_id, iid, as_of=date)
+            qty, cost = _util.replay_position(conn, book_id, iid, as_of=date)
             # 全売却済みの銘柄も評価替えの対象にする(独立審査 新-10)。売りは取得原価
             # ぶんしか securities を取り崩さないため、評価替えで積んだ「時価 − 取得原価」が
             # 残渣として資産に残り、NAV が**恒久的に過大**になる(審査実測: 残高 200,000 /
@@ -231,14 +234,27 @@ def run_daily_close(
             )
             if entry_id is not None:
                 marked.append(entry_id)
+            # 原価恒等式(0034 の勘定分離が可能にした検査 — docs/design/11 §3.2):
+            # 評価調整を別勘定へ出したので、原価勘定の残高は「建玉イベント(約定・現物
+            # 拠出)が積んだ原価」だけになった。したがって再生した原価と一致すべきであり、
+            # 破れは**評価替えの経路を一切参照せずに**検出できる。破る側に落ちるのは
+            # 数量つき証憑を伴わない直接記帳(評価替えを騙る手仕訳・逆仕訳のオペミス・
+            # 未対応の株式分割など)であり、まさに独立審査 新-14 / 新-15 が挙げた事象である。
+            # 分離前は同じ式が書けなかった(原価と評価調整が同居し、差し引きに推定が要った)。
+            cost_balance = _util.securities_cost_value(conn, book_id, iid, as_of=date)
+            if cost_balance != cost:
+                unexplained[str(iid)] = {
+                    "book_value": str(cost_balance),
+                    "replay_cost": str(cost),
+                    "qty": str(qty),
+                    "reason": (
+                        "zero_qty_residue" if qty == 0 else "cost_identity_broken"
+                    ),
+                }
             if price is None:
                 # 残渣が無ければ仕訳は立たない(entry_id None)= 記録することも無い。
                 if entry_id is not None:
                     writeoffs[str(iid)] = _zero_qty_writeoff_row(written_off, entry_id)
-                # 洗い替えても消えない数量ゼロの残高は「説明不能」として名指しで残す。
-                residue = _util.securities_book_value(conn, book_id, iid, as_of=date)
-                if residue != 0:
-                    unexplained[str(iid)] = {"book_value": str(residue)}
                 continue
             positions_detail[str(iid)] = {
                 "qty": str(qty),
@@ -247,8 +263,9 @@ def run_daily_close(
             }
     if unexplained:
         _log.warning(
-            "%s %s: 数量ゼロなのに securities が残る銘柄がある(説明不能な残渣 — "
-            "逆仕訳のオペミスや評価替えを騙る手仕訳を疑う): %s",
+            "%s %s: 原価勘定の残高が建玉再生の取得原価と一致しない銘柄がある"
+            "(説明不能な残渣 — 数量つき証憑を伴わない直接記帳、逆仕訳のオペミス、"
+            "未対応のコーポレートアクションを疑う): %s",
             book_id, date.isoformat(), unexplained,
         )
 

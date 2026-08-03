@@ -12,9 +12,10 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+import psycopg
 import pytest
 
-from ryza.ledger import posting, statements
+from ryza.ledger import _util, posting, statements
 
 D = Decimal
 DAY = date(2026, 8, 3)
@@ -35,6 +36,17 @@ def _balance(conn, book_id, account_id, as_of=DAY, instrument_id=None):
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return cur.fetchone()[0]
+
+
+def _carrying(conn, book_id, as_of=DAY, instrument_id=None):
+    """帳簿価額 = 原価勘定 + 評価調整勘定(0034 の分離前に ``securities`` が持っていた値)。
+
+    分離の**等価性**はこの合計で見る: 分離前後で NAV・帳簿価額・未実現損益は 1 円も
+    変わらず、変わるのは内訳が 2 勘定に分かれたことだけである
+    (docs/design/11-mtm-account-separation.md §2.2)。
+    """
+    return (_balance(conn, book_id, "securities", as_of, instrument_id)
+            + _balance(conn, book_id, "securities_mtm", as_of, instrument_id))
 
 
 # ── 例外系 ─────────────────────────────────────────────────────────────────
@@ -114,16 +126,22 @@ def test_moving_average_realized_and_unrealized(conn, run_id):
     posting.post_mark_to_market(conn, book_id="DEMO_FUND", instrument_id=iid,
                                 price=620, entry_date=DAY, run_id=run_id)
     assert _balance(conn, "DEMO_FUND", "unrealized_pnl") == D(-7200)
-    # securities の帳簿価額 = 残 60 の時価 = 60*620 = 37200
-    assert _balance(conn, "DEMO_FUND", "securities", instrument_id=iid) == D(37200)
+    # 帳簿価額 = 残 60 の時価 = 60*620 = 37200(分離前の securities 残高と同値 — 等価性)。
+    assert _carrying(conn, "DEMO_FUND", instrument_id=iid) == D(37200)
+    # 内訳: 原価勘定は取得原価 60*500 = 30000、評価調整勘定が未実現 7200 を持つ(0034)。
+    assert _balance(conn, "DEMO_FUND", "securities", instrument_id=iid) == D(30000)
+    assert _balance(conn, "DEMO_FUND", "securities_mtm", instrument_id=iid) == D(7200)
 
 
 def test_mark_to_market_writes_off_residue_without_a_price(conn, run_id):
     """``price=None`` は数量ゼロ専用の洗い替え経路(独立審査 新-10)。
 
-    全売却後の securities には評価益ぶんの残渣が残る(売りは取得原価ぶんしか取り崩さない)。
+    全売却後の帳簿価額には評価益ぶんの残渣が残る(売りは取得原価ぶんしか取り崩さない)。
     時価は価格に依らずゼロなので終値を引かずに戻せる — 建玉の無い銘柄の終値を要求すると
     上場廃止・バー欠測で締めごと落ちるため、この経路が必要になる。
+
+    0034 の分離後、残渣は**評価調整勘定にだけ**現れる(原価勘定は売りで正確にゼロになる)。
+    洗い替えが原価勘定に触れられないことが構造で保証される。
     """
     iid = 1003
     posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
@@ -133,12 +151,15 @@ def test_mark_to_market_writes_off_residue_without_a_price(conn, run_id):
     posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="sell",
                       qty=100, price=600, entry_date=DAY, run_id=run_id)
     # 売却直後: 取得原価 50,000 だけが取り崩され、評価益 10,000 が残渣として残る。
-    assert _balance(conn, "DEMO_FUND", "securities", instrument_id=iid) == D(10000)
+    assert _carrying(conn, "DEMO_FUND", instrument_id=iid) == D(10000)
+    assert _balance(conn, "DEMO_FUND", "securities", instrument_id=iid) == D(0)
+    assert _balance(conn, "DEMO_FUND", "securities_mtm", instrument_id=iid) == D(10000)
 
     entry_id = posting.post_mark_to_market(conn, book_id="DEMO_FUND", instrument_id=iid,
                                            price=None, entry_date=DAY, run_id=run_id)
     assert entry_id is not None
-    assert _balance(conn, "DEMO_FUND", "securities", instrument_id=iid) == D(0)
+    assert _carrying(conn, "DEMO_FUND", instrument_id=iid) == D(0)
+    assert _balance(conn, "DEMO_FUND", "securities_mtm", instrument_id=iid) == D(0)
     assert _balance(conn, "DEMO_FUND", "unrealized_pnl") == D(0)  # 未実現は全額戻る
     assert _balance(conn, "DEMO_FUND", "realized_pnl") == D(-10000)  # 実現益だけが残る
     # 残渣が無くなれば何も書かない(冪等)。
@@ -149,8 +170,9 @@ def test_mark_to_market_writes_off_residue_without_a_price(conn, run_id):
 def test_mark_to_market_rejects_a_posted_by_outside_the_predicate(conn, run_id):
     """評価替えの ``posted_by`` は ``MTM_POSTED_BY`` に限る(独立審査 新-14)。
 
-    後で「評価替えが作った残高」を同定する判定子がこの列なので、別の値で書くと自分が
-    書いた評価替えを自分で認識できず、残渣が説明不能な残高として残り続ける。
+    0034 の勘定分離後、これは読み取り時の判定子ではなく**書き込み時のガード**である
+    (残渣の同定は評価調整勘定の残高が行う)。分離は新-14 の攻撃を塞がず宛先を移すだけ
+    なので、このガードを外すと防御が純減する(docs/design/11 §5.2-1)。
     """
     iid = 1006
     posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
@@ -177,7 +199,7 @@ def test_mark_to_market_uses_the_same_as_of_for_qty_and_book_value(conn, run_id)
     posting.post_mark_to_market(conn, book_id="DEMO_FUND", instrument_id=iid,
                                 price=600, entry_date=d0, run_id=run_id)
     # d0 時点は 100 株保有 → 時価 60,000。将来の売りに引きずられてゼロにしない。
-    assert _balance(conn, "DEMO_FUND", "securities", as_of=d0, instrument_id=iid) == D(60000)
+    assert _carrying(conn, "DEMO_FUND", as_of=d0, instrument_id=iid) == D(60000)
 
 
 def test_mark_to_market_rejects_missing_price_while_holding(conn, run_id):
@@ -237,3 +259,83 @@ def test_all_writes_have_run_id(conn, run_id):
         # run_id を持たない(NULL)エントリは存在し得ない(NOT NULL 制約)。
         cur.execute("SELECT count(*) FROM ledger.journal_entries WHERE run_id IS NULL")
         assert cur.fetchone()[0] == 0
+
+
+# ── 現物拠出(独立審査 新-17)────────────────────────────────────────────────
+def test_in_kind_contribution_books_cost_and_replays_quantity(conn, run_id):
+    """拠出は原価勘定に ``qty × price`` を立て、数量つき証憑で建玉を再生可能にする。"""
+    iid = 1020
+    entry_id = posting.post_in_kind_contribution(
+        conn, book_id="DEMO_FUND", instrument_id=iid, qty=200, price=750,
+        entry_date=DAY, run_id=run_id, reference="出資契約 2026-08",
+    )
+    assert entry_id > 0
+    assert _balance(conn, "DEMO_FUND", "securities", instrument_id=iid) == D(150_000)
+    assert _balance(conn, "DEMO_FUND", "securities_mtm", instrument_id=iid) == D(0)
+    # 建玉が再生でき、原価恒等式(原価勘定 = 再生原価)が成立する。
+    assert _util.replay_position(conn, "DEMO_FUND", iid, as_of=DAY) == (D(200), D(150_000))
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT e.kind FROM ledger.journal_entries je
+               JOIN ledger.evidence e ON e.evidence_id = je.evidence_id
+               WHERE je.entry_id = %s""",
+            (entry_id,),
+        )
+        assert cur.fetchone()[0] == "in_kind_contribution"
+
+
+def test_in_kind_contribution_rejects_non_positive_quantity_or_price(conn, run_id):
+    """数量・単価は正。ゼロ単価の拠出は原価ゼロの建玉を作り、恒等式の意味を壊す。"""
+    for kwargs in ({"qty": 0, "price": 100}, {"qty": 10, "price": 0}):
+        with pytest.raises(ValueError, match="は正"):
+            posting.post_in_kind_contribution(
+                conn, book_id="DEMO_FUND", instrument_id=1021,
+                entry_date=DAY, run_id=run_id, **kwargs,
+            )
+
+
+# ── 評価調整勘定の書き込みガード(migrations/0034)──────────────────────────
+def test_mtm_account_rejects_writes_outside_the_closing_job(conn, run_id):
+    """``securities_mtm`` へ書けるのは締めジョブか逆仕訳だけ(DB トリガ)。
+
+    読み取り時の述語を書き込み時の拒否に移したもの。**防御であって境界ではない** —
+    posted_by は呼び出し側が決める列なので、値を騙る記帳は依然として可能である
+    (docs/design/11-mtm-account-separation.md §7)。
+    """
+    lines = [
+        {"account_id": "securities_mtm", "debit": D(100), "currency": "JPY",
+         "instrument_id": 1022},
+        {"account_id": "capital", "credit": D(100), "currency": "JPY"},
+    ]
+    evidence = {"kind": "price_snapshot", "payload": {"forged": True}, "source": "test"}
+    with pytest.raises(psycopg.errors.RaiseException, match="締めジョブ"):
+        with conn.transaction():
+            posting.post_entry(
+                conn, book_id="DEMO_FUND", entry_date=DAY, description="偽装",
+                lines=lines, evidence=evidence, run_id=run_id, posted_by="test.ledger",
+            )
+
+    # 銘柄の無い評価調整は「どの建玉の調整か」が失われ、洗い替えから永久に漏れる。
+    with pytest.raises(psycopg.errors.RaiseException, match="instrument_id"):
+        with conn.transaction():
+            posting.post_entry(
+                conn, book_id="DEMO_FUND", entry_date=DAY, description="銘柄なし評価替え",
+                lines=[
+                    {"account_id": "securities_mtm", "debit": D(100), "currency": "JPY"},
+                    {"account_id": "unrealized_pnl", "credit": D(100), "currency": "JPY"},
+                ],
+                evidence=evidence, run_id=run_id, posted_by="ledger.closing",
+            )
+
+
+def test_mtm_account_allows_the_reversal_of_a_revaluation(conn, run_id):
+    """評価替えの逆仕訳は通す — 逆仕訳を塞ぐと訂正の唯一の手段が消える(0005)。"""
+    iid = 1023
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                      qty=10, price=100, entry_date=DAY, run_id=run_id)
+    mtm_entry = posting.post_mark_to_market(conn, book_id="DEMO_FUND", instrument_id=iid,
+                                            price=120, entry_date=DAY, run_id=run_id)
+    assert _balance(conn, "DEMO_FUND", "securities_mtm", instrument_id=iid) == D(200)
+    posting.reverse_entry(conn, entry_id=mtm_entry, reason="評価替えの取消(テスト)",
+                          run_id=run_id)
+    assert _balance(conn, "DEMO_FUND", "securities_mtm", instrument_id=iid) == D(0)

@@ -114,6 +114,7 @@ def test_ledger_integrity_triggers_exist(conn):
         "journal_lines_balanced",
         "journal_entries_no_mutation",
         "journal_lines_no_mutation",
+        "journal_lines_mtm_guard",  # 0034: 評価調整勘定の書き込みガード
     ):
         assert name in triggers, f"トリガ {name} が存在しない"
 
@@ -293,9 +294,17 @@ def test_seed_books_and_accounts(conn):
         cur.execute(
             "SELECT count(*) FROM ledger.accounts WHERE book_id = 'DEMO_FUND'"
         )
-        assert cur.fetchone()[0] == 18  # ファンド帳簿の科目数
+        # 18(0006 の初期セット)+ 1(0034 の評価調整勘定 securities_mtm)。
+        assert cur.fetchone()[0] == 19  # ファンド帳簿の科目数
         cur.execute("SELECT count(*) FROM ledger.accounts WHERE book_id = 'OPS'")
         assert cur.fetchone()[0] == 13  # 運営帳簿の科目数
+
+        # 0034: 評価調整勘定はファンド帳簿にだけ置く(運営帳簿に建玉は無い)。
+        cur.execute(
+            "SELECT book_id, category FROM ledger.accounts "
+            "WHERE account_id = 'securities_mtm' ORDER BY book_id"
+        )
+        assert cur.fetchall() == [("DEMO_FUND", "asset")]
 
 
 # ── 0027: 実クエリ向けの索引 ──────────────────────────────────────────────────

@@ -594,14 +594,22 @@ def test_close_records_mtm_via_ledger_api(conn, run_id, passed_order, insert_bar
             """
         )
         assert Decimal(cur.fetchone()[0]) == Decimal("64.00")
-        # 証券勘定は時価に一致。
+        # 建玉の帳簿価額(原価勘定 + 評価調整勘定)は時価に一致する。0034 の勘定分離後、
+        # 原価 100,064 は securities に残り、評価差 −64 は securities_mtm に立つ。
         cur.execute(
             """
-            SELECT COALESCE(sum(debit - credit), 0) FROM ledger.journal_lines
-            WHERE book_id = 'DEMO_FUND' AND account_id = 'securities'
+            SELECT jl.account_id, COALESCE(sum(jl.debit - jl.credit), 0)
+            FROM ledger.journal_lines jl
+            WHERE jl.book_id = 'DEMO_FUND'
+              AND jl.account_id IN ('securities', 'securities_mtm')
+            GROUP BY jl.account_id
             """
         )
-        assert Decimal(cur.fetchone()[0]) == Decimal("100000.00")
+        by_account = {a: Decimal(v) for a, v in cur.fetchall()}
+        assert by_account == {
+            "securities": Decimal("100064.00"), "securities_mtm": Decimal("-64.00")
+        }
+        assert sum(by_account.values()) == Decimal("100000.00")
 
 
 def test_close_uses_utc_now_not_needed(conn, run_id, today_jst):

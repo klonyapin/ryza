@@ -521,14 +521,18 @@ def test_restatement_embed_surfaces_unsynced_nav_daily():
 def test_residue_embed_names_the_instruments():
     """説明不能な残渣は専用 embed で名指しする(実行サマリに埋もれさせない — 新-15)。"""
     embed = daily._build_residue_embed(
-        {"1001": {"book_value": "-1000000"}},
+        {"1001": {"book_value": "-1000000", "replay_cost": "0", "qty": "0",
+                  "reason": "zero_qty_residue"}},
         book_id="DEMO_FUND", day="2026-08-03",
         as_of=datetime(2026, 8, 4, 10, 0, tzinfo=UTC),
     )
     assert embed["color"] == COLOR_FLASH
     assert "1 件" in embed["description"]
+    # 0034 以降の残渣は原価恒等式の破れなので、両辺(原価勘定と再生原価)を並べて出す。
     assert embed["fields"][0] == {
-        "name": "銘柄 1001", "value": "帳簿価額 -1000000", "inline": True
+        "name": "銘柄 1001",
+        "value": "原価勘定 -1000000 / 再生原価 0(zero_qty_residue)",
+        "inline": True,
     }
 
 

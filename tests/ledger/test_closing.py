@@ -648,7 +648,12 @@ def test_close_remarks_after_repurchase(conn, run_id):
 
 
 def _post_in_kind(conn, run_id, day: date, instrument_id: int, amount: Decimal) -> int:
-    """現物拠出(Dr securities / Cr capital)。約定を経ないので replay_position は数量ゼロ。"""
+    """**数量つき証憑を伴わない**直接記帳(Dr securities / Cr capital)。
+
+    正規の現物拠出 API(``posting.post_in_kind_contribution``)と違い数量が証憑に無いので、
+    ``replay_position`` は数量ゼロを返す。評価替えの対象から外れる代わりに、締めの原価
+    恒等式を破って ``unexplained_residue`` に名指しで出る(0034 以降)。
+    """
     return posting.post_entry(
         conn,
         book_id="DEMO_FUND",
@@ -682,6 +687,8 @@ def test_close_does_not_write_off_positions_built_outside_fills(conn, run_id):
     assert _util.securities_book_value(conn, "DEMO_FUND", 1005, as_of=DAY) == D(1_000_000)
     assert _snapshot(conn, DAY)[0] == D(11_000_000)
     assert "zero_qty_writeoffs" not in _snapshot(conn, DAY)[2]
+    # 触らないが黙ってもいない: 数量つき証憑が無い建玉は原価恒等式を破るので名指しされる。
+    assert result["unexplained_residue"]["1005"]["reason"] == "zero_qty_residue"
 
 
 def test_close_writes_off_only_the_mtm_share_when_both_coexist(conn, run_id):
@@ -804,8 +811,13 @@ def test_close_ignores_forged_price_snapshot_entries(conn, run_id):
     assert _snapshot(conn, DAY)[0] == D(13_000_000)
 
     # 黙って残すのでもなく、説明不能な残渣として名指しで記録する(新-15)。
+    # 0034 以降の判定は**原価恒等式の破れ**(原価勘定の残高 ≠ 建玉再生の取得原価)であり、
+    # 評価替えの経路(kind / posted_by)を一切参照しない。
     assert result["unexplained_residue"] == {
-        "1006": {"book_value": "3000000"}, "1007": {"book_value": "-500000"}
+        "1006": {"book_value": "3000000", "replay_cost": "0", "qty": "0",
+                 "reason": "zero_qty_residue"},
+        "1007": {"book_value": "-500000", "replay_cost": "0", "qty": "0",
+                 "reason": "zero_qty_residue"},
     }
     assert _snapshot(conn, DAY)[2]["unexplained_residue"]["1006"]["book_value"] == "3000000"
 
@@ -835,7 +847,10 @@ def test_close_reports_residue_left_by_a_reversal_mistake(conn, run_id):
     result = closing.run_daily_close(
         conn, book_id="DEMO_FUND", date=d2, price_source={}, run_id=run_id
     )
-    assert result["unexplained_residue"] == {"1001": {"book_value": "-1000000"}}
+    assert result["unexplained_residue"] == {
+        "1001": {"book_value": "-1000000", "replay_cost": "0", "qty": "0",
+                 "reason": "zero_qty_residue"}
+    }
     tb = statements.trial_balance(conn, "DEMO_FUND", d2)  # 試算表は通る = 気づけない
     assert tb[tb["account_id"] == "_TOTAL"].iloc[0]["balance"] == D(0)
 
@@ -878,3 +893,131 @@ def _mk_evidence(cur) -> int:
            RETURNING evidence_id"""
     )
     return cur.fetchone()[0]
+
+
+# ── 勘定分離(0034)と現物拠出の評価替え(独立審査 新-14 / 新-17)─────────────
+#
+# 0034 は評価替えを ``securities`` から ``securities_mtm`` へ分離した。分離の**等価性**
+# (NAV・帳簿価額・日次リターンが 1 円も変わらないこと)は既存の新-10 / 新-13 / 新-16 の
+# 回帰テスト群がそのまま対照になっている — それらは NAV とリターンを直接固定しており、
+# 分離後も無改変で通る。以下は分離が**新たに可能にした検査**と、現物拠出の評価替えを見る。
+
+
+def test_in_kind_contribution_is_marked_to_market(conn, run_id):
+    """現物拠出した建玉が時価評価される(独立審査 新-17 の是正)。
+
+    是正前は ``replay_position`` が ``broker_fill`` しか再生しなかったため、拠出建玉は
+    数量ゼロに見え**一度も評価替えされなかった**(審査実測: 終値 1500/2000/500 を渡しても
+    残高は拠出額 1,000,000 のまま、``detail.positions`` にも現れない)。建玉数量の真実を
+    拠出証憑(``in_kind_contribution``)に持たせ、再生対象に含めることで解消する。
+    """
+    d0, d1 = DAY, DAY + timedelta(days=1)
+    posting.post_in_kind_contribution(
+        conn, book_id="DEMO_FUND", instrument_id=1010, qty=1000, price=1000,
+        entry_date=d0, run_id=run_id,
+    )
+    # 拠出日: 時価 = 拠出価額なので評価替えの仕訳は立たない(delta 0)。
+    r0 = closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d0, price_source={1010: 1000}, run_id=run_id
+    )
+    assert r0["marked"] == [] and r0["unexplained_residue"] == {}
+    assert _snapshot(conn, d0)[0] == D(11_000_000)
+    assert _snapshot(conn, d0)[2]["positions"]["1010"]["qty"] == "1000"
+
+    # 翌日 1500 円: 是正前はここが動かなかった。
+    r1 = closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d1, price_source={1010: 1500}, run_id=run_id
+    )
+    assert len(r1["marked"]) == 1
+    assert _snapshot(conn, d1)[2]["positions"]["1010"] == {
+        "qty": "1000", "price": "1500", "market_value": "1500000"
+    }
+    assert _snapshot(conn, d1)[0] == D(11_500_000)
+    # 内訳: 原価勘定は拠出価額のまま、評価差額は評価調整勘定に乗る(0034)。
+    assert _util.securities_cost_value(conn, "DEMO_FUND", 1010, as_of=d1) == D(1_000_000)
+    assert _util.mtm_book_value(conn, "DEMO_FUND", 1010, as_of=d1) == D(500_000)
+    assert r1["unexplained_residue"] == {}
+
+
+def test_in_kind_and_fills_share_one_moving_average(conn, run_id):
+    """拠出建玉と約定建玉が同じ銘柄に同居しても移動平均法が一貫する(混在ケース)。
+
+    拠出 1000@1000 → 買い 1000@2000(平均原価 1500)→ 500 株を 2500 で売却。実現損益は
+    500×(2500−1500)=500,000 でなければならない。拠出を再生に含めないと平均原価が 2000 に
+    なり、実現損益・原価恒等式の双方が狂う。
+    """
+    iid = 1011
+    posting.post_in_kind_contribution(
+        conn, book_id="DEMO_FUND", instrument_id=iid, qty=1000, price=1000,
+        entry_date=DAY, run_id=run_id,
+    )
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                      qty=1000, price=2000, entry_date=DAY, run_id=run_id)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="sell",
+                      qty=500, price=2500, entry_date=DAY, run_id=run_id)
+
+    qty, cost = _util.replay_position(conn, "DEMO_FUND", iid, as_of=DAY)
+    assert (qty, cost) == (D(1500), D(2_250_000))  # 平均原価 1500
+    # 原価恒等式: 原価勘定の残高 = 再生した取得原価。
+    assert _util.securities_cost_value(conn, "DEMO_FUND", iid, as_of=DAY) == cost
+
+    result = closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=DAY, price_source={iid: 2400}, run_id=run_id
+    )
+    assert result["unexplained_residue"] == {}
+    # 実現益 500,000 + 未実現 1,350,000(= 1500×2400 − 2,250,000)+ 拠出 1,000,000。
+    t = statements.book_totals(conn, "DEMO_FUND", DAY)
+    assert t["nav"] == D(12_850_000) == result["nav"]
+    assert _util.mtm_book_value(conn, "DEMO_FUND", iid, as_of=DAY) == D(1_350_000)
+
+
+def test_reversing_an_in_kind_contribution_unwinds_the_position(conn, run_id):
+    """拠出の逆仕訳で建玉が消え、評価替えの残渣も洗い替えられる(訂正経路)。
+
+    逆仕訳は ``journal_entries`` の唯一の訂正手段(0005 は UPDATE/DELETE を禁じる)なので、
+    拠出を再生対象に加える以上、取り消しも再生から落ちなければならない。
+    """
+    d0, d1 = DAY, DAY + timedelta(days=1)
+    entry_id = posting.post_in_kind_contribution(
+        conn, book_id="DEMO_FUND", instrument_id=1012, qty=1000, price=1000,
+        entry_date=d0, run_id=run_id,
+    )
+    closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d0, price_source={1012: 1500}, run_id=run_id
+    )
+    assert _snapshot(conn, d0)[0] == D(11_500_000)
+
+    posting.reverse_entry(conn, entry_id=entry_id, reason="拠出の取消(テスト)",
+                          run_id=run_id, entry_date=d1)
+    # 建玉ゼロなので終値は要らない(価格ソースは空でよい)。
+    result = closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d1, price_source={}, run_id=run_id
+    )
+    assert _util.replay_position(conn, "DEMO_FUND", 1012, as_of=d1) == (D(0), D(0))
+    assert result["zero_qty_writeoffs"]["1012"]["book_value"] == "500000"
+    assert _util.securities_book_value(conn, "DEMO_FUND", 1012, as_of=d1) == D(0)
+    assert result["unexplained_residue"] == {}  # 原価恒等式は保たれる
+    assert _snapshot(conn, d1)[0] == D(10_000_000)
+
+
+def test_close_names_a_cost_identity_break_on_a_live_position(conn, run_id):
+    """建玉が残っていても、証憑の無い直接記帳は原価恒等式の破れとして名指しされる。
+
+    分離前はこの検査が書けなかった(``securities`` に原価と評価調整が同居しており、
+    突合には評価調整ぶんを推定で差し引く必要があった — その推定子こそ新-14 が騙した
+    ものである)。分離後の判定は評価替えの経路を一切参照しない。
+    """
+    iid = 1013
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                      qty=100, price=500, entry_date=DAY, run_id=run_id)
+    _post_in_kind(conn, run_id, DAY, iid, D(300_000))  # 数量つき証憑の無い手仕訳
+
+    result = closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=DAY, price_source={iid: 500}, run_id=run_id
+    )
+    assert result["unexplained_residue"] == {
+        str(iid): {"book_value": "350000", "replay_cost": "50000", "qty": "100",
+                   "reason": "cost_identity_broken"},
+    }
+    # 数量ゼロの残渣ではないので洗い替えは起きない(建玉のある銘柄には触れない)。
+    assert result["zero_qty_writeoffs"] == {}
