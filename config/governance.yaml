@@ -180,8 +180,3 @@ controls:
     enforcement: declaration # 役員室実装時に決議フローで強制
     kind: 予防
     verification: 同上
-  - rule: 開発管理(全変更 PR 化 — 2026-08-03 代表指示。保護領域に限らず全変更を PR 経由とする)
-    risk: レビューを経ない直 push で main が変更される(保護領域外の変更もレビュー対象)
-    enforcement: audit # GitHub 無料プラン(私有リポ)はブランチ保護が使えないため本監査が執行点
-    kind: 発見
-    verification: 基準コミット(a13.PR_RULE_BASELINE_COMMIT = ルール採用日の main HEAD)以降の main first-parent 履歴で、マージコミットでないコミット(= 直 push)を列挙(A-13-4)。例外なし — Approved トレーラ付き直 push も違反。基準以前は対象外

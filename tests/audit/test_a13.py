@@ -3,7 +3,7 @@
 一時 git リポジトリを作り、保護領域突合(A-13-1)を承認あり/なし/PR マージ/発効日前の
 4 象限で検証する。バージョン整合(A-13-2)・宣言棚卸し(A-13-3)はフィクスチャファイルで、
 outbox 投入はテスト専用 DB で検証する。全変更 PR 化(A-13-4)は PR マージのみ/直 push/
-基準以前の3象限+例外なし(Approved トレーラ付き直 push も違反)を検証する。
+非 PR マージ/基準以前の4象限+例外なし(Approved トレーラ付き直 push も違反)を検証する。
 
 一時リポジトリでは実リポジトリの基準コミット(``PR_RULE_BASELINE_COMMIT``)が存在しない
 ため、``run_a13`` には ``pr_since_commit`` を明示的に渡す。
@@ -248,6 +248,20 @@ def test_a134_approved_trailer_is_still_violation(repo):
     )
     violations, _ = a13.check_direct_pushes(r, since_commit=since)
     assert len(violations) == 1
+
+
+def test_a134_non_pr_merge_is_violation(repo):
+    """親数>1 でも件名が PR マージ形式でないマージは違反(A-13-1 と同じ件名検査を併用)。"""
+    r, since = repo
+    _git(r, "checkout", "-q", "-b", "f1")
+    _commit(r, "README.md", "a\n", "feat: ブランチ作業")
+    _git(r, "checkout", "-q", "main")
+    _git(r, "merge", "--no-ff", "-q", "f1", "-m", "ローカルマージ(PR でない)")
+    violations, checked = a13.check_direct_pushes(r, since_commit=since)
+    assert checked == 1
+    assert len(violations) == 1
+    assert "非 PR マージ" in violations[0]["reason"]
+    assert violations[0]["files"] == ["README.md"]  # マージが main に持ち込んだ first-parent 差分
 
 
 def test_a134_pre_baseline_commits_are_excluded(repo):

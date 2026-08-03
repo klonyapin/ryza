@@ -10,9 +10,10 @@
   A-13-3 宣言棚卸し     … controls のうち ``enforcement: declaration`` を列挙する(検査ではなく
                           可視化 — 四半期ごとの執行点実装可否の再評価対象)
   A-13-4 全変更 PR 化   … 基準コミット(``PR_RULE_BASELINE_COMMIT``)以降の first-parent 履歴で、
-                          マージコミットでないコミット(= main への直 push)を保護領域か否かに
-                          かかわらず違反として列挙する。例外なし(``Approved:`` トレーラ付き
-                          直 push も違反 — 2026-08-03 代表指示)
+                          (a) マージコミットでないコミット(= main への直 push)
+                          (b) 件名が PR マージ形式(``Merge pull request``)でないマージコミット
+                          を保護領域か否かにかかわらず違反として列挙する。例外なし
+                          (``Approved:`` トレーラ付き直 push も違反 — 2026-08-03 代表指示)
 
 **read-only 原則**: 本モジュールは検査と警告(``press.outbox`` の ops チャンネルへの embed 投入)
 のみを行い、修正・巻き戻し・コミットは一切行わない。
@@ -75,8 +76,8 @@ STANDARD_DISCLOSURES: tuple[str, ...] = (
     "Approved トレーラの参照先(Issue / governance.decisions)の実在は未照合",
     "マージのコンフリクト解消差分(evil merge)は --cc で検査し、保護パスに触れる場合は"
     "マージ自身の Approved トレーラを要求",
-    "A-13-4 はコミットの親数のみで直 push を判定 — ローカルで作った非 PR マージの直 push は"
-    "検出できない(保護パスに触れる場合は A-13-1 が PR 件名で検出)",
+    "A-13-4 のマージ判定は親数+PR 件名(A-13-1 と同一の検査)— 件名は自己申告で"
+    "GitHub API 未照合の限界を共有する",
 )
 
 # 文書⇔config のバージョン突合ペア(A-13-2)。(文書, config, config 内の version キー)
@@ -349,12 +350,14 @@ def check_direct_pushes(
     *,
     since_commit: str | None = PR_RULE_BASELINE_COMMIT,
 ) -> tuple[list[dict[str, Any]], int]:
-    """A-13-4: main への直 push の一覧と、検査した first-parent コミット数を返す。
+    """A-13-4: main への直 push・非 PR マージの一覧と、検査した first-parent コミット数を返す。
 
     基準コミット(全変更 PR 化ルール採用日の main HEAD)以降の first-parent 履歴で、
-    マージコミットでないコミット = 直 push を違反とする。保護領域か否かは問わず、
-    例外も設けない(``Approved:`` トレーラ付き直 push も違反 — 全 PR 化ルールに例外なし)。
-    基準コミット以前は ``rev-list since..HEAD`` により対象外。
+    (a) マージコミットでないコミット = 直 push、(b) 件名が PR マージ形式
+    (``_PR_MERGE_RE``、A-13-1 と同一の検査)でないマージコミット = 非 PR マージ、
+    を違反とする。保護領域か否かは問わず、例外も設けない(``Approved:`` トレーラ付き
+    直 push も違反 — 全 PR 化ルールに例外なし)。基準コミット以前は
+    ``rev-list since..HEAD`` により対象外。
     """
     repo = str(repo_path)
     if since_commit and not _git_ok(repo, "cat-file", "-e", f"{since_commit}^{{commit}}"):
@@ -365,20 +368,23 @@ def check_direct_pushes(
     for sha in fp_commits:
         parents = _git(repo, "log", "-1", "--format=%P", sha).split()
         if len(parents) > 1:
-            continue  # マージコミット = PR マージ経由(件名検査は A-13-1 の責務)
-        files = [
-            ln
-            for ln in _git(
-                repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha
-            ).splitlines()
-            if ln
-        ]
+            if _PR_MERGE_RE.match(_git(repo, "log", "-1", "--format=%s", sha)):
+                continue  # PR マージコミット(件名は自己申告 — 開示のとおり API 未照合)
+            reason = "main への非 PR マージ(全変更 PR 化ルール違反 — 例外なし)"
+            # マージが main に持ち込んだ内容 = first parent との差分を列挙する。
+            diff_args = (
+                "diff-tree", "--no-commit-id", "--name-only", "-r", "-m", "--first-parent", sha
+            )
+        else:
+            reason = "main への直 push(全変更 PR 化ルール違反 — 例外なし)"
+            diff_args = ("diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha)
+        files = [ln for ln in _git(repo, *diff_args).splitlines() if ln]
         violations.append(
             {
                 "commit": sha[:12],
                 "subject": _git(repo, "log", "-1", "--format=%s", sha).strip(),
                 "files": files,
-                "reason": "main への直 push(全変更 PR 化ルール違反 — 例外なし)",
+                "reason": reason,
             }
         )
     return violations, len(fp_commits)
@@ -481,7 +487,7 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
         ]
         fields.append(
             {
-                "name": "⚠️ A-13-4 main への直 push(全変更 PR 化ルール違反)",
+                "name": "⚠️ A-13-4 全変更 PR 化違反(直 push・非 PR マージ)",
                 "value": "\n".join(lines)[:1024],
                 "inline": False,
             }
@@ -490,7 +496,9 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
         fields.append(
             {
                 "name": "A-13-4 全変更 PR 化",
-                "value": f"✅ 直 push なし(検査 {result['checked_first_parent']} コミット)",
+                "value": (
+                    f"✅ 直 push・非 PR マージなし(検査 {result['checked_first_parent']} コミット)"
+                ),
                 "inline": False,
             }
         )
