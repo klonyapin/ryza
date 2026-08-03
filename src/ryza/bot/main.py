@@ -5,7 +5,11 @@ systemd(Restart=always)で常駐し:
   (``ops.dev_chat``・0024)の未中継発言を #dev へ中継(``devchat.relay_pending``)。
   順序は固定で、非緊急の中継を Kill Switch 通報の配送より前に置かない
 - 18:00 JST に日報を投入(``daily.enqueue_daily``)
-- ``#承認`` のボタン押下を ``governance.decisions`` に記録(オーナー検証)
+- ``#承認`` のボタン押下を ``governance.decisions`` に記録(オーナー検証)。みなし承認の
+  発効通知には**否認ボタン**を付け、押下 → 理由入力(モーダル)→ ``governance.notices``
+  経由で否認記録+``#運営`` への取消義務リマインドを1トランザクションで書く。同じ配線を
+  ``/veto``(ボタン View は再起動をまたがないため)と ``/unveto``(誤った否認の撤回・
+  0021 の ``withdrawal``)にも持たせる(定款第3条2号「代表はいつでも否認できる」)
 - ``/kill``(凍結)``/winddown``(計画的現金化)``/flatten``(緊急清算・2段階)
   ``/resume``(復帰・2段階)で Kill Switch 状態機械を操作(killswitch.py・保護領域)
 - 起動時に4チャンネル(報道/承認/運営/dev)を指定カテゴリ配下へ ensure し、``#運営`` へ再起動通知
@@ -45,7 +49,7 @@ from ryza.bot import daily as daily_mod
 from ryza.bot.approvals import KINDS, NotOwnerError, parse_proposal, record_decision
 from ryza.bot.daily import JST
 from ryza.db.conn import connect
-from ryza.governance import devchat
+from ryza.governance import devchat, notices
 from ryza.provenance import start_run
 
 log = logging.getLogger("ryza.bot")
@@ -171,6 +175,111 @@ class ApprovalView(discord.ui.View):
     @discord.ui.button(label="質問", style=discord.ButtonStyle.secondary)
     async def question(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self._record(interaction, "question")
+
+
+def _veto_sync(bot: RyzaBot, proposal_ref: str, reason: str, user_id: str) -> None:
+    """否認の記録+``#運営`` 通知(同期・DB I/O)。イベントループから ``to_thread`` で呼ぶ。"""
+    with connect() as conn:
+        r = start_run("bot.governance.veto", conn=conn)
+        notices.apply_veto(
+            conn, proposal_ref, reason,
+            vetoed_by=user_id, owner_ids=bot.owner_ids, run_id=r.run_id,
+        )
+        r.finish("success")
+        conn.commit()
+
+
+def _withdraw_veto_sync(bot: RyzaBot, proposal_ref: str, reason: str, user_id: str) -> None:
+    """否認の撤回(同期・DB I/O)。"""
+    with connect() as conn:
+        r = start_run("bot.governance.veto_withdrawal", conn=conn)
+        notices.withdraw_veto(
+            conn, proposal_ref, reason,
+            vetoed_by=user_id, owner_ids=bot.owner_ids, run_id=r.run_id,
+        )
+        r.finish("success")
+        conn.commit()
+
+
+async def _run_governance_action(
+    interaction: discord.Interaction, action, ok_message: str, fail_prefix: str
+) -> None:
+    """defer → ワーカースレッドで DB 操作 → followup の共通形。
+
+    **なぜ defer が要るか**(独立役員審査 中-8): Discord の初回応答は 3 秒以内に返す必要が
+    あり、同期 DB I/O をイベントループ上で待つとハートビートも塞ぐ。3 秒を超えると
+    Discord 側が失敗表示にするため、**記録は成功しているのに代表には失敗に見える** —
+    定款第3条の否認において最悪の食い違いになる。先に defer(ephemeral)で応答枠を確保し、
+    DB 操作は ``asyncio.to_thread`` へ逃がす(配送ループが ``_deliver_sync`` でしている扱いと同じ)。
+    """
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await asyncio.to_thread(action)
+    except NotOwnerError:
+        await interaction.followup.send("権限がありません。", ephemeral=True)
+        return
+    except Exception as exc:  # noqa: BLE001 - 対象不明・二重否認などは利用者に通知
+        await interaction.followup.send(f"{fail_prefix}: {exc}", ephemeral=True)
+        return
+    await interaction.followup.send(ok_message, ephemeral=True)
+
+
+class VetoModal(discord.ui.Modal, title="否認(定款第3条)"):
+    """否認理由を受け取り、否認記録+``#運営`` への取消義務リマインドを書く。
+
+    **なぜモーダルか**: ``governance.decision_vetoes.reason`` は NOT NULL(空文字も CHECK で
+    拒否)である。理由の無い否認は、執行側が何を巻き戻すべきか判断できず、定款第3条が課す
+    取消義務を実行できないためである。ボタン単独では理由を集められないので、押下 → モーダルの
+    2段にする(``/flatten`` ``/resume`` の2段階確認と同じ流儀 — 不可逆な操作は1クリックで
+    確定させない)。
+
+    記録と通知の原子性・オーナー検証・対象取り違えの検出は ``governance.notices`` 側にある
+    (main は保護領域なので配線のみを置く)。
+    """
+
+    reason = discord.ui.TextInput(
+        label="否認理由(必須)",
+        style=discord.TextStyle.paragraph,
+        placeholder="何が問題で否認するのか。執行側はこれを起点に取消範囲を決める",
+        required=True,
+        max_length=500,
+    )
+
+    def __init__(self, bot: RyzaBot, proposal_ref: str) -> None:
+        super().__init__()
+        self.bot = bot
+        self.proposal_ref = proposal_ref
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        user_id = str(interaction.user.id)
+        reason = str(self.reason)
+        await _run_governance_action(
+            interaction,
+            lambda: _veto_sync(self.bot, self.proposal_ref, reason, user_id),
+            ok_message=(
+                f"⛔ 否認を記録しました({self.proposal_ref})。"
+                "#運営 に取消義務のリマインドを投稿します。誤操作なら `/unveto` で撤回できます。"
+            ),
+            fail_prefix="否認できませんでした",
+        )
+
+
+class VetoView(discord.ui.View):
+    """みなし承認の発効通知に付く否認ボタン(定款第3条2号「いつでも否認できる」)。
+
+    承認/却下ボタン(``ApprovalView``)は付けない。みなし承認は通知の時点で発効済みであり、
+    そこで「承認」を押させると1提案=1決定の UNIQUE に当たって失敗するだけで、代表に
+    残された選択肢(否認)を隠してしまう。
+    """
+
+    def __init__(self, bot: RyzaBot, proposal_ref: str) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.proposal_ref = proposal_ref
+
+    @discord.ui.button(label="否認", style=discord.ButtonStyle.danger)
+    async def veto(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(VetoModal(self.bot, self.proposal_ref))
 
 
 class ResumeConfirmView(discord.ui.View):
@@ -341,9 +450,17 @@ class RyzaBot(commands.Bot):
             # アイコン上書き(0020)も同じ接続で読む。**投入時ではなく配送時**に解決する
             # ことで、代表がダッシュボードで差し替えた直後の投稿から新アイコンになる
             # (キャッシュしない — org.icon_overrides)。
+            deemed_target = notices.DeemedViewTarget(None)
             with connect() as resolve_conn:
                 channel_id = channels.resolve(resolve_conn, msg.channel)
                 webhook_url = webhooks.resolve_webhook(resolve_conn, msg.channel)
+                if msg.channel == "approval":
+                    # 否認ボタンは「実在する deemed 決定」の通知にだけ付ける(審査 重要-4)。
+                    # フッターは誰でも書ける自己申告であり、偽の通知に本物の決定を指す
+                    # ボタンを付けると代表が別提案の否認を押させられる。
+                    deemed_target = notices.resolve_deemed_view(resolve_conn, msg.embed)
+                    if deemed_target.warning:
+                        log.warning("否認ボタンを付与しない: %s", deemed_target.warning)
                 try:
                     overrides = org.icon_overrides(resolve_conn)
                 except Exception:  # noqa: BLE001 - フェイルオープン(独立役員審査 0020 C-2)
@@ -359,12 +476,21 @@ class RyzaBot(commands.Bot):
                 raise RuntimeError(f"チャンネル未解決(ensure 前?): {msg.channel}")
             # #承認 向けで proposal footer を持つ embed には承認ボタンを付ける
             # (凍結中の例外的取引などを1件ずつオーナー承認する経路)。
-            parsed = parse_proposal(msg.embed) if msg.channel == "approval" else None
+            # みなし承認の発効通知(deemed footer)は既に発効済みなので、承認ボタンではなく
+            # 否認ボタンを付ける(定款第3条2号)。両者は排他で、**deemed が優先**(軽微-9)—
+            # マーカーが両方読める embed に承認ボタンを出すと、発効済みの提案をもう一度
+            # 承認させることになり、押下は UNIQUE 違反で失敗するだけになる。
+            deemed_ref = deemed_target.ref
+            parsed = (
+                parse_proposal(msg.embed)
+                if msg.channel == "approval" and deemed_ref is None
+                else None
+            )
             embed_json = org.apply_icon_overrides(msg.embed, overrides)
             # webhook 方式(代表指示 2026-08-03): author キャラクターを username /
             # avatar_url へ昇格して投稿(webhooks.py)。承認ボタン付きは webhook に
-            # コンポーネントを付けられないため従来の Bot 投稿のまま。
-            if webhook_url is not None and parsed is None:
+            # コンポーネントを付けられないため従来の Bot 投稿のまま(否認ボタンも同じ)。
+            if webhook_url is not None and parsed is None and deemed_ref is None:
                 return webhooks.post(webhook_url, embed_json, urgent=msg.urgent)
             embed = dict_to_embed(embed_json)
             if msg.urgent:
@@ -373,7 +499,9 @@ class RyzaBot(commands.Bot):
             if channel is None:
                 raise RuntimeError(f"チャンネル取得失敗: {channel_id}")
             send_kwargs: dict = {"embed": embed}
-            if parsed is not None:
+            if deemed_ref is not None:
+                send_kwargs["view"] = VetoView(self, deemed_ref)
+            elif parsed is not None:
                 send_kwargs["view"] = ApprovalView(self, parsed[0], kind=parsed[1])
             # discord の I/O はコルーチン。ワーカースレッドからイベントループに投げて待つ。
             fut = asyncio.run_coroutine_threadsafe(channel.send(**send_kwargs), loop)
@@ -532,6 +660,47 @@ class RyzaBot(commands.Bot):
                 "コスト・スリッページを受け入れる緊急用です。下のボタンで確定してください。",
                 view=FlattenConfirmView(self, reason),
                 ephemeral=True,
+            )
+
+        @self.tree.command(name="veto", description="否認: 発効中の承認決定を取り消す(定款第3条)")
+        @app_commands.describe(
+            proposal_ref="提案参照(通知の「提案参照」フィールドの値・PR URL 等)",
+            reason="否認理由(必須。執行側はこれを起点に取消範囲を決める)",
+        )
+        async def veto(interaction: discord.Interaction, proposal_ref: str, reason: str) -> None:
+            # ボタン経路(VetoView)と同じ配線をコマンドでも用意する。ボタン View は
+            # Bot 再起動をまたいで復元されない(既存 ApprovalView と同じ制約)ため、
+            # ボタンだけだと「代表はいつでも否認できる」(第3条2号)が再起動で切れる。
+            user_id = str(interaction.user.id)
+            await _run_governance_action(
+                interaction,
+                lambda: _veto_sync(self, proposal_ref, reason, user_id),
+                ok_message=(
+                    f"⛔ 否認を記録しました({proposal_ref})。"
+                    "#運営 に取消義務のリマインドを投稿します。"
+                    "誤操作なら `/unveto` で撤回できます。"
+                ),
+                fail_prefix="否認できません",
+            )
+
+        @self.tree.command(
+            name="unveto", description="否認の撤回: 誤って押した否認を取り消す(定款第3条)"
+        )
+        @app_commands.describe(
+            proposal_ref="提案参照(否認通知の「提案参照」フィールドの値)",
+            reason="撤回理由(必須。誤操作の是正か方針変更かが残らないと否認統計が壊れる)",
+        )
+        async def unveto(
+            interaction: discord.Interaction, proposal_ref: str, reason: str
+        ) -> None:
+            # 否認がボタン1つで押せる以上、復旧経路も同じ強度で用意する(0021 審査 C-3:
+            # UNIQUE(proposal_ref) により提案の再記録ができず、撤回が唯一の復旧手段)。
+            user_id = str(interaction.user.id)
+            await _run_governance_action(
+                interaction,
+                lambda: _withdraw_veto_sync(self, proposal_ref, reason, user_id),
+                ok_message=f"否認を撤回しました({proposal_ref})。#運営 に通知します。",
+                fail_prefix="撤回できません",
             )
 
         @self.tree.command(name="resume", description="復帰: Kill Switch を解除(2段階確認)")
