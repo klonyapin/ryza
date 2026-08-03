@@ -479,6 +479,30 @@ reminders:
       body: "ダッシュボードの NAV 系列(dashboard/queries.py fetch_nav_series)は ledger.journal_lines × journal_entries × accounts を全走査して出資フローを日次集計し、コスト集計(fetch_cost_daily / fetch_cost_summary)は meta.runs を started_at で全走査する。どちらも支える索引が無い(journal_lines の PK は (entry_id, line_no)、meta.runs の PK は run_id のみ)。現在は行数が小さく問題にならないが、仕訳と実行記録は単調増加するため放置すると再実行のたびに全表走査が効く。暫定対応として app.py 側に @st.cache_data(ttl=60) を入れてある(独立役員審査 中-10 の部分対応)。是正: (1) ledger.journal_lines (book_id, account_id) の索引、(2) ledger.journal_entries (book_id, entry_date) の索引、(3) meta.runs (started_at DESC) の索引、(4) meta.runs (job_name, run_id DESC) の索引を migrations で追加し、EXPLAIN で効いていることを確認する。**migrations は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 中-10。"
     status: pending
 
+  - id: streamlit-upgrade-dads-visual-check
+    what: "【恒常運用ルール】Streamlit を更新したら DADS の CSS 層(44px・行間・フォーカスリング)を実ブラウザで目視・実測する"
+    conditions:
+      - type: date_after
+        date: "2026-11-01"
+    action:
+      type: issue_create
+      title: "棚卸し: Streamlit 更新時の DADS 目視確認ルールが守られているか"
+      labels: [decision]
+      body: "**これは日付で発火する一回限りの作業ではなく、恒常的な運用ルールの棚卸しである。** ルール本体: `dashboard/dads.py` の CSS 注入層は Streamlit の内部 DOM(data-testid・生成クラス名)に依存する非公式手段であり、Streamlit を更新するとセレクタが一致しなくなって**例外も警告も出さずに無効化する**(docs/research/dads-streamlit-application.md §6-7)。AppTest は DOM もレンダラも持たないため CI では検知できず(検査できるのは『CSS ブロックが注入されていること』まで)、唯一の緩和策が人間による実ブラウザでの確認である。**pyproject.toml の streamlit を上げる PR では、必ず以下を実施し結果を PR 本文に記載すること**: (1) `.venv/bin/streamlit run dashboard/app.py` をリポジトリルートから起動、(2) DevTools コンソールで `Array.from(document.querySelectorAll('[data-testid=\"stSidebarNavLink\"]')).map(a=>a.getBoundingClientRect().height)` を実行し**全 14 本が 44 以上**であることを確認、(3) Tab キーでナビを移動しフォーカスリング(2px・Blue-900・角丸の変形なし)が見えることを確認、(4) 本文段落の computed style が font-size 16px / line-height 24px であることを確認。壊れていたら dashboard/dads.py のセレクタを更新する。この Issue では『前回の Streamlit 更新以降、この手順が実施されたか』を git 履歴と PR 本文で確認し、実施漏れがあれば即座に上記を実行する。棚卸し後は次回分(+3ヶ月)を ops/reminders.yaml に登録すること。出典: docs/reviews/dads-design-independent-review.md 重要-1。"
+    status: pending
+
+  - id: l1-protect-docker-streamlit
+    what: "dashboard/Dockerfile と .streamlit/config.toml を保護領域(deploy_path)に登録する(L1 バッチ)"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "governance: dashboard/Dockerfile・.streamlit/config.toml を protected_areas へ登録(L1)"
+      labels: [impl, governance]
+      body: "CLAUDE.md 不変原則6は『デプロイ経路』を保護領域に挙げるが、config/governance.yaml の protected_areas には `dashboard/Dockerfile` と(2026-08-03 新規の)`.streamlit/config.toml` が入っておらず、A-18-1 の検出対象外になっている(独立役員審査 dads-design 中-4)。両ファイルとも稼働イメージの中身を直接決める: Dockerfile は COPY 対象と CMD を、config.toml は `server.enableStaticServing=true`(本番で静的配信を開く設定)を持つ。是正: `area: deploy_path` に2パスを追加し、A-18-1 が git 履歴と突合できるようにする。**config/governance.yaml 自体が保護領域のため、独立役員審査+みなし承認の手続を経ること。** 他に同じ理由で漏れているパス(ops/fetch-fonts.sh は生成物がリポジトリに入るが稼働経路ではない = 対象外、等)がないか同時に棚卸しする。出典: docs/reviews/dads-design-independent-review.md 中-4・設計リード裁定。"
+    status: pending
+
   - id: dashboard-framework-evaluation
     what: "ダッシュボードのフレームワーク移行を比較調査する(Streamlit 継続 vs Next.js 系等。Phase 5 判断)"
     conditions:

@@ -163,7 +163,10 @@ def _overview_nav(conn) -> None:
     st.markdown(f"**NAV**: {viz.fmt_jpy(latest['nav'])}({latest['status']})")
     st.markdown(
         f"前日比 {viz.fmt_delta_md(d1)} / 設定来 {viz.fmt_delta_md(itd)}"
-        "  \n<span style='opacity:.6;font-size:.8em'>外部フロー調整済み(TWR)</span>",
+        # 注記なので小さくするが DADS の下限(14px)は割らない(重要-2 と同じ理由)。
+        # opacity:.6 の実効色は #767676 相当で 4.54:1 = テキスト下限ちょうど。
+        f"  \n<span style='opacity:.6;font-size:{dads.MIN_FONT_REM}rem'>"
+        "外部フロー調整済み(TWR)</span>",
         unsafe_allow_html=True,
     )
     st.caption(f"評価日 {latest['day']} / {len(series)} 営業日分")
@@ -780,52 +783,64 @@ def page_dev_status() -> None:
 # ── 組織(組織サイト化 — 2026-08-03 代表指示)──────────────────────────────────
 _TIER_LABELS = {"fable": "Fable(最上位)", "mid": "中位モデル", "light": "軽量/非LLM"}
 
-#: 投資委員会・コンプラゲートの強調(DADS semantic warning-yellow-2。白背景 4.54:1)。
-#: 「注意して見るべき節点」であって異常ではないので error(赤)は使わない。
-_ORG_ACCENT = "#927200"
+#: 代表(人間)のカード色。台帳に載らない唯一のカードなので、ここで色を持つ。
+#: 中性的なスレートで、キャラクター色の並びから浮かずに人間だと分かる程度に外す。
+_REPRESENTATIVE_COLOR = "#64748B"
 
 # 組織図・メンバーカードは Streamlit の部品では組めないため自前の HTML/CSS で描く。
 # 2026-08-03 のデザイン改修で DADS トークンへ寄せた: 罫線は Solid Gray-420
 # (#949494 = 白背景で 3:1 ちょうど。非テキスト要素の下限)、角丸は 6/8/12px、
 # 余白は 8px グリッド。半透明の灰(rgba(128,128,128,.35) 等)は背景次第で 3:1 を
-# 割るため実値のトークンに置き換えた。投資委員会の強調は warning-yellow-2
-# (#927200 = 4.54:1)で、旧値 #d9a441 は白背景で 2:1 前後しか出ていなかった。
+# 割るため実値のトークンに置き換えた。投資委員会の強調は dads.ACCENT
+# (warning-yellow-2 = 4.54:1)で、旧値 #d9a441 は白背景で 2:1 前後しか出ていなかった。
+#
+# **font-size の下限**(独立役員審査 重要-2): 全 11 箇所を dads.MIN_FONT_REM
+# (0.875rem = 14px)以上にした。改修前は 0.65〜0.85rem(10.4〜13.6px)で、
+# config.toml 側が「DADS: 14px 未満は不許可」と宣言している一方この CSS だけが
+# 例外になっていた —— 同じ改修で line-height と境界色は DADS へ寄せながら
+# font-size を据え置いたための不整合である。密度は下がるが、読めない文字を
+# 並べる方がダッシュボードとしては損。値をリテラルで書かず定数から埋めるのは、
+# 下限を1箇所で動かせるようにするため(テストも同じ定数を見る)。
 _ORG_CSS = f"""
 <style>
 .oc-apex {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:8px; }}
 .oc-node {{ border:1px solid {dads.BORDER}; border-radius:8px; padding:8px 16px;
-  font-size:.85rem; }}
+  font-size:{dads.MIN_FONT_REM}rem; }}
 .oc-node b {{ display:block; }}
 .oc-node small {{ opacity:.7; }}
-.oc-ic {{ border-color:{_ORG_ACCENT}; border-width:2px; }}
+.oc-ic {{ border-color:{dads.ACCENT}; border-width:2px; }}
 .oc-aud {{ border-style:dashed; }}
 .oc-vline {{ width:2px; height:16px; background:{dads.BORDER}; margin:0 0 8px 40px; }}
-.oc-offices {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+.oc-offices {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
   gap:8px; }}
 .oc-office {{ border:1px solid {dads.BORDER}; border-radius:12px; padding:8px 12px; }}
-.oc-office h4 {{ margin:0 0 8px; font-size:.75rem; opacity:.7; letter-spacing:.06em; }}
+.oc-office h4 {{ margin:0 0 8px; font-size:{dads.MIN_FONT_REM}rem; opacity:.7;
+  letter-spacing:.06em; }}
 .oc-office ul {{ list-style:none; margin:0; padding:0; }}
-.oc-office li {{ font-size:.8rem; padding:4px 8px; margin:4px 0; border-radius:6px;
-  border:1px solid {dads.BORDER}; line-height:1.3; }}
-.oc-office li small {{ display:block; opacity:.65; font-size:.68rem; }}
-.oc-flow {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:.78rem;
-  margin-top:8px; }}
+.oc-office li {{ font-size:{dads.MIN_FONT_REM}rem; padding:4px 8px; margin:4px 0;
+  border-radius:6px; border:1px solid {dads.BORDER}; line-height:1.3; }}
+.oc-office li small {{ display:block; opacity:.65; font-size:{dads.MIN_FONT_REM}rem; }}
+.oc-flow {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center;
+  font-size:{dads.MIN_FONT_REM}rem; margin-top:8px; }}
 .oc-flow span.s {{ border:1px solid {dads.BORDER}; border-radius:6px; padding:2px 8px; }}
-.oc-flow span.g {{ border-color:{_ORG_ACCENT}; color:{_ORG_ACCENT}; }}
+.oc-flow span.g {{ border-color:{dads.ACCENT}; color:{dads.ACCENT}; }}
 .oc-flow span.a {{ opacity:.6; }}
 .oc-members {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr));
   gap:12px; margin-top:8px; }}
 .oc-card {{ border:1px solid {dads.BORDER}; border-radius:12px; padding:16px;
   display:flex; gap:12px; border-top:3px solid var(--mc,{dads.BORDER}); }}
 .oc-avatar {{ width:64px; height:64px; border-radius:50%; flex:none; object-fit:cover; }}
-.oc-fallback {{ display:flex; align-items:center; justify-content:center; color:#fff;
+/* 文字色は背景の輝度で黒/白を選ぶ(_avatar_html が style で個別に与える)。
+   白固定だと淡いキャラクター色で 4.5:1 を割る(#a78bfa で 2.72:1)。 */
+.oc-fallback {{ display:flex; align-items:center; justify-content:center;
   font-size:1.6rem; font-weight:600; }}
 .oc-card .nm {{ font-size:1.05rem; font-weight:600; line-height:1.4; }}
-.oc-card .src {{ font-size:.7rem; opacity:.65; }}
-.oc-card .ttl {{ font-size:.8rem; margin:2px 0 4px; line-height:1.5; }}
-.oc-card .tg {{ font-size:.75rem; opacity:.75; margin-top:4px; line-height:1.5; }}
-.oc-chip {{ font-size:.65rem; border:1px solid {dads.BORDER}; border-radius:10px;
-  padding:1px 8px; margin-right:4px; white-space:nowrap; }}
+.oc-card .src {{ font-size:{dads.MIN_FONT_REM}rem; opacity:.65; }}
+.oc-card .ttl {{ font-size:{dads.MIN_FONT_REM}rem; margin:2px 0 4px; line-height:1.5; }}
+.oc-card .tg {{ font-size:{dads.MIN_FONT_REM}rem; opacity:.75; margin-top:4px;
+  line-height:1.5; }}
+.oc-chip {{ font-size:{dads.MIN_FONT_REM}rem; border:1px solid {dads.BORDER};
+  border-radius:10px; padding:1px 8px; margin-right:4px; white-space:nowrap; }}
 </style>
 """
 
@@ -894,10 +909,23 @@ def _org_chart_html() -> str:
 
 
 def _avatar_html(name: str, color: str, icon_url: str | None) -> str:
+    """アイコン画像、無ければキャラクター色の円に頭文字。
+
+    **文字色は背景の輝度で黒/白を選ぶ**(独立役員審査 重要-2)。白固定だった旧実装は
+    淡いキャラクター色でコントラストを割っていた(``#a78bfa`` で 2.72:1、``#059669``
+    で 3.77:1)。台帳(config/org.yaml)は色を自由に決めてよい設計なので、可読性は
+    描画側が機械的に担保する。
+
+    ``color`` は ``dads.safe_color`` を通してから ``style`` に埋める(低-9)。
+    ``html.escape`` は引用符を潰すだけで、``red;position:fixed`` のような**同じ
+    style 属性内への CSS 宣言追記**は防げない。
+    """
     if icon_url:
         return f"<img class='oc-avatar' src='{_esc(icon_url)}' alt='{_esc(name)}'>"
+    background = dads.safe_color(color)
     return (
-        f"<div class='oc-avatar oc-fallback' style='background:{_esc(color)}'>"
+        f"<div class='oc-avatar oc-fallback' "
+        f"style='background:{background};color:{dads.text_on(background)}'>"
         f"{_esc(name[0])}</div>"
     )
 
@@ -910,9 +938,12 @@ def _member_card_html(m: dict[str, Any]) -> str:
     src = (
         f"<div class='src'>出典: {_esc(m['source'])}</div>" if m.get("source") else ""
     )
+    # 台帳・DB 由来の色は #RRGGBB 以外を受け付けない(低-9)。旧既定 '#888' は3桁形で
+    # 検証を通らないため、既定も 6 桁のトークン(dads.FALLBACK_COLOR)へ揃えた。
+    color = dads.safe_color(m.get("color"))
     return (
-        f"<div class='oc-card' style='--mc:{_esc(m.get('color', '#888'))}'>"
-        + _avatar_html(m.get("name", "?"), m.get("color", "#888"), m.get("icon_url"))
+        f"<div class='oc-card' style='--mc:{color}'>"
+        + _avatar_html(m.get("name", "?"), color, m.get("icon_url"))
         + f"<div><div class='nm'>{_esc(m.get('name', ''))}</div>{src}"
         + f"<div class='ttl'>{_esc(m.get('title', ''))}</div>"
         + f"<div>{chips}</div>"
@@ -1013,9 +1044,14 @@ def page_org(conn=None) -> None:
 
     st.subheader("メンバー(config/org.yaml が正・アイコンは DB 上書きを優先)")
     rep = org_yaml.get("representative", {})
+    # 代表は台帳の members に載らない(人間なので model_tier を持たない)ため、
+    # カードをここで組む。色は他のメンバーと同じ経路(safe_color → text_on)を通し、
+    # 文字色を白に固定しない — 検査対象から外れる例外を作らないため。
+    rep_color = dads.safe_color(_REPRESENTATIVE_COLOR)
     rep_card = (
-        "<div class='oc-card' style='--mc:#64748b'>"
-        "<div class='oc-avatar oc-fallback' style='background:#64748b'>代</div>"
+        f"<div class='oc-card' style='--mc:{rep_color}'>"
+        f"<div class='oc-avatar oc-fallback' "
+        f"style='background:{rep_color};color:{dads.text_on(rep_color)}'>代</div>"
         "<div><div class='nm'>代表</div>"
         f"<div class='ttl'>{_esc(rep.get('note', 'ユーザー'))}</div>"
         "<div><span class='oc-chip'>人間</span>"
@@ -1759,12 +1795,31 @@ NAV_SECTIONS: dict[str, list[tuple[str, str, str, Any]]] = {
 DEFAULT_URL_PATH = "overview"
 
 
+def _with_dads_css(page_fn):
+    """ページ描画の**先頭で** DADS の CSS 層を注入するラッパ。
+
+    ``main()`` で1回注入するのでは効かない —— ``page.run()`` がメインコンテナを
+    リセットするため、それより前に書いた ``st.html`` はブラウザに届かない
+    (2026-08-03 の実ブラウザ検証で判明。AppTest では緑のまま検出できなかった)。
+    ページ自身の描画パスの中で書く必要があるので、全ページに一律で被せる。
+    詳細と代替案(サイドバーへ逃がす案が失敗する理由)は ``dads.inject`` の docstring。
+    """
+
+    def _run() -> None:
+        dads.inject()
+        page_fn()
+
+    _run.__name__ = page_fn.__name__
+    _run.__doc__ = page_fn.__doc__
+    return _run
+
+
 def _build_pages() -> dict[str, list[Any]]:
     """``NAV_SECTIONS`` を ``st.navigation`` が取る ``{セクション: [st.Page]}`` にする。"""
     return {
         section: [
             st.Page(
-                fn,
+                _with_dads_css(fn),
                 title=title,
                 icon=icon,
                 url_path=url_path,
@@ -1779,7 +1834,8 @@ def _build_pages() -> dict[str, list[Any]]:
 def main() -> None:
     # CSS 層(44px タップターゲット・行間・フォーカスリング)は再実行のたびに要る。
     # ナビゲーションより先に注入して、初回描画で小さいリンクが一瞬見える状態を避ける。
-    dads.inject()
+    # CSS 層(dads.inject)はここで呼ばない。page.run() がメインコンテナをリセットする
+    # ため、ここで書いても**ブラウザには届かない**(_with_dads_css の docstring)。
     # expanded=True。既定(False)は 13 ページ以上で 10 件に折り畳み「View 4 more」を
     # 出すが、監視面は**全ページが常に見えている**ことが要件(どこに何があるかを
     # 探させない)。折り畳みボタン自体もタップターゲットを1つ増やす。

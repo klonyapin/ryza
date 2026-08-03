@@ -40,7 +40,8 @@ import streamlit as st  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
 from streamlit.util import calc_hash  # noqa: E402
 
-_APP = Path(__file__).resolve().parents[2] / "dashboard" / "app.py"
+_ROOT = Path(__file__).resolve().parents[2]
+_APP = _ROOT / "dashboard" / "app.py"
 
 #: ナビゲーションの宣言(セクション → [(タイトル, url_path, ページ見出し)])。
 #: ``dashboard/app.py`` の ``NAV_SECTIONS`` と一致していることを
@@ -265,17 +266,106 @@ def test_every_page_is_reachable_by_its_url_path(app, page):
 def test_every_page_receives_the_dads_css_block(app, page):
     """DADS の CSS 層(44px タップターゲット・行間・フォーカスリング)が全ページに届く。
 
-    **限界を明示する**: 確認できるのは「CSS ブロックが注入されている」ことだけで、
+    **限界を明示する**: 確認できるのは「CSS ブロックが送出されている」ことだけで、
     実際に 44px で描画されているかは検査できない(AppTest は DOM もレンダラも持た
     ない)。Streamlit の更新でセレクタが一致しなくなってもこのテストは通る —
     実寸は人間が実ブラウザで見るしかない。根拠と割り切りは dashboard/dads.py。
 
-    それでも意味があるのは、CSS の注入自体を落とす回帰(``main()`` の
-    ``dads.inject()`` を消す、再実行のたびの注入を忘れる)は捕まえられるため。
+    **この限界は机上の話ではなく実際に踏んだ**: 2026-08-03 の実ブラウザ検証で、
+    このテストが緑のまま CSS がブラウザに 1 バイトも届いていないことが判明した
+    (原因は下の ``test_dads_css_is_injected_inside_the_page_not_the_entrypoint``
+    と ``dads.inject`` の docstring)。「送出されている」と「効いている」の差を、
+    テストの緑では埋められない。
     """
-    blocks = [str(el.body) for el in app(page).get("html")]
+    blocks = [str(el.value) for el in app(page).markdown]
     assert sum(dads.CSS_MARKER in b for b in blocks) == 1, page
     assert any(f"min-height: {dads.TARGET_SIZE_PX}px" in b for b in blocks), page
+
+
+def test_dads_css_is_injected_inside_the_page_not_the_entrypoint():
+    """CSS 注入が**ページ側**で呼ばれていること(``main()`` では効かない)。
+
+    ``st.navigation`` の ``page.run()`` はメインコンテナをリセットするため、
+    ``main()`` が ``page.run()`` より前に書いた要素はブラウザに届かない。当初の実装は
+    まさにそれで、AppTest は緑・実ブラウザではタップターゲット 28px のままだった。
+
+    実効性そのものは AppTest で検査できないので、**その原因になった構造**を固定する。
+    ソースを AST で読み、``dads.inject()`` の呼び出しが ``_with_dads_css``(全ページに
+    被せるラッパ)の中だけにあり、``main()`` の中には無いことを確認する。
+    """
+    tree = ast.parse(_APP.read_text(encoding="utf-8"))
+    callers = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for call in ast.walk(node):
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "inject"
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "dads"
+            ):
+                callers.setdefault(node.name, 0)
+                callers[node.name] += 1
+    # ``ast.walk`` は入れ子の関数も辿るので、``_with_dads_css`` とその内側の ``_run``
+    # の両方が挙がる(同じ1つの呼び出し)。数えたいのは「どの関数の中にあるか」。
+    assert "main" not in callers, "main() で注入しても page.run() のリセットで消える"
+    assert "_with_dads_css" in callers, callers
+    assert set(callers) == {"_with_dads_css", "_run"}, callers
+
+
+def test_dads_css_is_not_sent_through_st_html():
+    """style だけの ``st.html`` は**イベントコンテナ**へ送られ、本アプリでは表示されない。
+
+    Streamlit の仕様(``st.html`` の docstring): 内容が style タグだけの場合、場所を
+    取らないようイベントコンテナへ送る。``st.navigation`` 構成ではそのコンテナが DOM に
+    現れず、CSS が一切適用されなかった。``st.markdown(unsafe_allow_html=True)`` は
+    通常のコンテナへ出すため実測で効くことを確認済み。
+    """
+    source = (_ROOT / "dashboard" / "dads.py").read_text(encoding="utf-8")
+    body = source.split("def inject", 1)[1].split("def ", 1)[0]
+    assert "st.markdown(_CSS, unsafe_allow_html=True)" in body
+    assert "st.html(" not in body
+
+
+def _rendered_css(at) -> str:
+    """描画結果に含まれる CSS 全文(st.html + unsafe_allow_html の markdown)。"""
+    parts = [str(el.body) for el in at.get("html")]
+    parts += [str(el.value) for el in at.markdown]
+    return "\n".join(p for p in parts if "font-size" in p or "<style" in p)
+
+
+@pytest.mark.parametrize("page", ALL_PAGES)
+def test_rendered_css_has_no_font_size_below_the_dads_minimum(app, page):
+    """重要-2: **実際に描画された** CSS の font-size が全て 14px 以上であること。
+
+    ソース走査(``test_dads_theme``)は ``font-size:{dads.MIN_FONT_REM}rem`` のような
+    補間を見られない —— 数字がソースに現れないため、是正した 9 箇所がまさに検査から
+    漏れる。宣言と実装の食い違いを潰すのが目的なのに、是正後の値だけ素通りするのでは
+    本末転倒なので、ブラウザへ送られる文字列そのものを見る。
+
+    ``rem`` は ``baseFontSize = 16`` に対する倍率、``em`` は親要素に対する倍率で、
+    親が既定サイズなら同じく 16px 基準になる。
+    """
+    sizes = re.findall(r"font-size:\s*([0-9.]+)(rem|em|px)", _rendered_css(app(page)))
+    for value, unit in sizes:
+        px = float(value) * (1 if unit == "px" else 16)
+        assert px >= 14, f"{page}: {value}{unit} = {px}px"
+
+
+def test_rendered_css_scan_actually_sees_the_org_chart_declarations():
+    """走査が空振りしていないこと。組織ページは font-size 宣言が最も多い画面。"""
+    assert dads.MIN_FONT_REM == 0.875  # 0.875rem = 14px
+
+
+@pytest.mark.parametrize("page", ["org", "overview"])
+def test_rendered_css_is_not_vacuous(app, page):
+    css = _rendered_css(app(page))
+    sizes = re.findall(r"font-size:\s*([0-9.]+)(rem|em|px)", css)
+    assert sizes, f"{page}: font-size 宣言を1つも拾えていない(走査が壊れている)"
+    # 是正した値(0.875rem)が実際に出ていること。
+    assert any(v == "0.875" for v, _ in sizes), sizes
 
 
 def test_navigation_sections_match_the_declared_structure():
