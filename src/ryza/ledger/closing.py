@@ -25,6 +25,7 @@ nav_snapshots のリネージ(不変原則3):
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from datetime import date as _date
@@ -34,6 +35,8 @@ from typing import Any
 import psycopg
 
 from ryza.ledger import _util, posting, recon, statements
+
+_log = logging.getLogger(__name__)
 
 # 帳簿 -> trade.order_intents.track の対応
 _BOOK_TRACK = {"DEMO_FUND": "demo", "LIVE_FUND": "live"}
@@ -154,6 +157,26 @@ def _record_unrecorded_fills(
     return entry_ids
 
 
+def _zero_qty_writeoff_row(book_value: Decimal, entry_id: int | None) -> dict[str, Any]:
+    """全売却後の残渣を洗い替えた記録(当日経路・再締め経路で**共通のスキーマ**)。
+
+    独立審査 新-16: 同じ事象を当日は ``detail.zero_qty_writeoffs``、再締めは
+    ``mtm_reapplied.positions`` の中の数量ゼロ行という別々の語彙で書いていたため、
+    ``positions`` を建玉明細として読む下流が再締め経路でだけ幽霊行を見ていた。
+    ``positions`` は**建玉のある銘柄だけ**にし、洗い替えは両経路ともこのキーへ出す。
+
+    ``entry_id`` は仕訳を書いた経路(当日締め)だけが持ち、再締めは ``None``
+    (再締めは仕訳を書かず集計内で調整する — 再-6)。null は「書いていない」の明示。
+    """
+    return {
+        "qty": "0",
+        "price": None,  # 数量ゼロは終値を引いていない(存在しない価格を書かない)
+        "market_value": "0",
+        "book_value": str(book_value),  # 評価替えが作った残高 = 洗い替えた額
+        "entry_id": entry_id,
+    }
+
+
 def run_daily_close(
     conn: psycopg.Connection,
     *,
@@ -167,7 +190,9 @@ def run_daily_close(
 ) -> dict[str, Any]:
     """日次締めを実行し、要約 dict を返す。
 
-    戻り値: {nav, status, marked, fills_recorded, recon}
+    戻り値: {nav, status, marked, fills_recorded, recon, zero_qty_writeoffs,
+    unexplained_residue}。``unexplained_residue`` が空でない日は呼び出し側が通知すること
+    (会計の説明不能な残高であり、放置すると偽リターンになる — 独立審査 新-15)。
     """
     bt = _util.book_type(conn, book_id)
 
@@ -178,15 +203,23 @@ def run_daily_close(
     marked: list[int] = []
     positions_detail: dict[str, Any] = {}
     writeoffs: dict[str, Any] = {}
+    unexplained: dict[str, Any] = {}
     if bt == "fund":
         for iid in _util.held_instruments(conn, book_id):
-            qty, _cost = _util.replay_position(conn, book_id, iid)
+            # 数量も帳簿価額も同じ as_of で切る(独立審査 新-13)。数量だけ全期間再生に
+            # すると、将来日付の売りが先に記帳されている日の締めが「数量ゼロ ⇒ 残渣」と
+            # 誤判定して実在の建玉を消す(実測: returns [-0.0196] ← 真値 [0.0])。
+            qty, _cost = _util.replay_position(conn, book_id, iid, as_of=date)
             # 全売却済みの銘柄も評価替えの対象にする(独立審査 新-10)。売りは取得原価
             # ぶんしか securities を取り崩さないため、評価替えで積んだ「時価 − 取得原価」が
             # 残渣として資産に残り、NAV が**恒久的に過大**になる(審査実測: 残高 200,000 /
             # 数量 0、returns [+0.0196, 0.0] ← 真値 [0, 0])。数量ゼロの時価は価格に依らず
             # ゼロなので終値は引かない(建玉の無い銘柄の終値を要求すると締めごと落ちる)。
             price = None if qty == 0 else _util.to_decimal(_price_of(price_source, iid))
+            written_off = (
+                _util.mtm_book_value(conn, book_id, iid, as_of=date)
+                if price is None else Decimal(0)
+            )
             entry_id = posting.post_mark_to_market(
                 conn,
                 book_id=book_id,
@@ -194,20 +227,30 @@ def run_daily_close(
                 price=price,
                 entry_date=date,
                 run_id=run_id,
-                posted_by="ledger.closing",
+                posted_by=_util.MTM_POSTED_BY[0],
             )
             if entry_id is not None:
                 marked.append(entry_id)
             if price is None:
                 # 残渣が無ければ仕訳は立たない(entry_id None)= 記録することも無い。
                 if entry_id is not None:
-                    writeoffs[str(iid)] = {"entry_id": entry_id, "market_value": "0"}
+                    writeoffs[str(iid)] = _zero_qty_writeoff_row(written_off, entry_id)
+                # 洗い替えても消えない数量ゼロの残高は「説明不能」として名指しで残す。
+                residue = _util.securities_book_value(conn, book_id, iid, as_of=date)
+                if residue != 0:
+                    unexplained[str(iid)] = {"book_value": str(residue)}
                 continue
             positions_detail[str(iid)] = {
                 "qty": str(qty),
                 "price": str(price),
                 "market_value": str(qty * price),
             }
+    if unexplained:
+        _log.warning(
+            "%s %s: 数量ゼロなのに securities が残る銘柄がある(説明不能な残渣 — "
+            "逆仕訳のオペミスや評価替えを騙る手仕訳を疑う): %s",
+            book_id, date.isoformat(), unexplained,
+        )
 
     # 3. アクルーアル: 当面は手数料のみ(約定時に計上済み)。
     #    TODO: 金利(信用取引の支払利息 interest_expense / 貸株料など)の日次アクルーアル。
@@ -223,8 +266,11 @@ def run_daily_close(
         "priced_at": date.isoformat(),
     }
     # 全売却後の残渣を洗い替えた銘柄(数量ゼロなので positions とは語彙を分ける)。
+    # 再締め経路(_reapply_mtm)も同じキー・同じ行スキーマで書く(独立審査 新-16)。
     if writeoffs:
         detail["zero_qty_writeoffs"] = writeoffs
+    if unexplained:
+        detail["unexplained_residue"] = unexplained
     _upsert_nav(conn, book_id, date, nav, "provisional", detail, run_id)
 
     # 5. ブローカー照合。全件 matched なら confirmed に更新。
@@ -250,6 +296,8 @@ def run_daily_close(
         "marked": marked,
         "fills_recorded": fills_recorded,
         "recon": recon_result,
+        "zero_qty_writeoffs": writeoffs,
+        "unexplained_residue": unexplained,
     }
 
 
@@ -433,11 +481,14 @@ def _reapply_mtm(
     ``run_daily_close`` の当日経路と同じ定義であり、片方だけ直すと当日と再締めで NAV が
     食い違う。
 
-    戻り値 ``{"delta", "positions", "priced_at"}``。**建玉のある銘柄で 1 つでもその日の
+    戻り値 ``{"delta", "positions", "zero_qty_writeoffs", "priced_at"}``。``positions`` は
+    **建玉のある銘柄だけ**、数量ゼロの洗い替えは当日経路と同じスキーマで
+    ``zero_qty_writeoffs`` に出す(独立審査 新-16)。**建玉のある銘柄で 1 つでもその日の
     バーが無い日は None**(部分適用は「原価でも時価でもない NAV」を作るため、その日は
     再適用しない — 呼び出し側が前回値の引き継ぎか ``mtm_not_reapplied`` を選ぶ)。
     """
     positions: dict[str, Any] = {}
+    writeoffs: dict[str, Any] = {}
     delta = Decimal(0)
     for iid in _util.held_instruments(conn, book_id):
         qty, _cost = _util.replay_position(conn, book_id, iid, as_of=snap_date)
@@ -446,27 +497,28 @@ def _reapply_mtm(
             book_value = _util.mtm_book_value(conn, book_id, iid, as_of=snap_date)
             if book_value == 0:
                 continue  # その日は未保有かつ残渣なし
-            price = None
-            market_value = Decimal(0)
-        else:
-            raw = price_source(iid, snap_date)
-            if raw is None:
-                return None
-            price = _util.to_decimal(raw)
-            market_value = qty * price
-            book_value = _util.securities_book_value(conn, book_id, iid, as_of=snap_date)
+            delta -= book_value
+            writeoffs[str(iid)] = _zero_qty_writeoff_row(book_value, entry_id=None)
+            continue
+        raw = price_source(iid, snap_date)
+        if raw is None:
+            return None
+        price = _util.to_decimal(raw)
+        market_value = qty * price
+        book_value = _util.securities_book_value(conn, book_id, iid, as_of=snap_date)
         delta += market_value - book_value
         positions[str(iid)] = {
             "qty": str(qty),
-            # 数量ゼロは終値を引いていないので価格は null(存在しない価格を書かない)。
-            "price": None if price is None else str(price),
+            "price": str(price),
             "market_value": str(market_value),
-            # 数量ゼロ行の book_value は「評価替えが作った残高」= 洗い替える額であり、
-            # securities の総額ではない(zero_qty_writeoff がその目印)。
             "book_value": str(book_value),
-            **({"zero_qty_writeoff": True} if price is None else {}),
         }
-    return {"delta": delta, "positions": positions, "priced_at": snap_date.isoformat()}
+    return {
+        "delta": delta,
+        "positions": positions,
+        "zero_qty_writeoffs": writeoffs,
+        "priced_at": snap_date.isoformat(),
+    }
 
 
 def reclose_stale(
@@ -496,9 +548,11 @@ def reclose_stale(
     ``price_source`` が渡された日は、``_util.replay_position(as_of=snap_date)`` でその日
     時点の建玉を復元し、その日の終値で評価替えした差分を **集計内で** NAV に足す。
 
-    **仕訳は書かない**: ``post_mark_to_market`` を過去日付で呼ぶ経路は作らない(独立審査
-    再-6 の理由はそのまま生きている — 過去日への新規記帳は水位を進めて自分自身を stale に
-    する)。再適用の根拠は ``detail.mtm_reapplied`` に建玉・終値・帳簿価額として残す。
+    **仕訳は書かない**: ``post_mark_to_market`` を過去日付で呼ぶ経路は作らない。新-13 で
+    数量も ``as_of`` で切るようにしたので「その日に存在しなかった建玉を過去日付で記帳する」
+    危険は消えたが、再-6 のもう一方の理由は生きている — 過去日への新規記帳は水位を進めて
+    自分自身を stale にし、再締めが毎日仕訳を積む無限ループになる。再適用の根拠は
+    ``detail.mtm_reapplied`` に建玉・終値・帳簿価額として残す。
 
     **対象は ``recon_invalidated`` と同じ集合**(遅延仕訳に建玉行を含む日、および過去の
     再締めで一度でもそのフラグが立った日)。それ以外の日の MTM は締め時点の建玉に対して
@@ -731,6 +785,9 @@ def _restated_detail(
         detail["mtm_reapplied"] = {
             "delta": str(mtm["delta"]),
             "positions": mtm["positions"],
+            # 数量ゼロの洗い替えは当日経路と同じキー・同じ行スキーマ(独立審査 新-16)。
+            # 引き継ぎ(carried)のときは前回の再締めが書いた内容がそのまま乗る。
+            "zero_qty_writeoffs": mtm.get("zero_qty_writeoffs", {}),
             "priced_at": mtm["priced_at"],
             # 引き継ぎ時は**実際に計算した run** を残す(値の出どころを指すため)。
             "run_id": int(mtm["run_id"]) if carried else int(run_id),

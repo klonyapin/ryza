@@ -684,7 +684,35 @@ reminders:
     # 代替案(post_fill 側で時価取り崩し)は不採用: 実現損益が『時価 − 時価 = 0』になり
     # 移動平均法の実現/未実現の切り分けが壊れるため(残渣の所在が変わるだけ)。
     # 実測(修正後): d1 NAV 10,400,000 → 10,200,000、securities 残高 0、returns [0.0, 0.0]。
+    # 2026-08-04 独立審査(残渣修正審査記録)= 条件付き承認。新-13(将来日付売りの先行記帳で
+    # 実在建玉を消す回帰。as_of の非対称)・新-14(kind 偽装で洗い替えを誘発)・新-15
+    # (説明不能な残渣の検出器が無い)・新-16(記録スキーマの二重化)を同 PR で是正済み。
+    # 新-14 の構造的根治は mtm-separate-account、新-17 は in-kind-contribution-mtm へ分割。
     status: done
+
+  - id: mtm-separate-account
+    what: "評価替えの残高を推定でなく勘定体系で切る(MTM を独立勘定へ分離 — 残渣修正審査 新-14 の構造的根治)"
+    conditions:
+      - type: date_after
+        date: "2026-08-24"
+    action:
+      type: issue_create
+      title: "ledger: MTM を独立勘定へ分離し、mtm_book_value の推定をやめる"
+      labels: [impl, ledger, risk]
+      body: "全売却後の残渣を洗い替える量は `_util.mtm_book_value`(`securities` 勘定のうち evidence.kind='price_snapshot' かつ `journal_entries.posted_by` が締めジョブ由来の行の合計)で**推定**している。洗い替えは NAV を双方向に動かす原始操作なのに、判定子が仕訳の自由記入列である点が本質的な弱さである(独立審査の実測: kind を騙る手仕訳 Dr securities 3,000,000 / Cr capital は、posted_by 判定の追加**前**は次の締めで全額消され NAV 13,000,000→10,000,000、貸方 500,000 は逆に NAV を無から 10,500,000 に増やした)。posted_by の連言追加でこの 2 攻撃は塞いだが、`post_entry` の呼び出し側は依然その値を騙れる。根治: 評価替えの結果を `securities` に混ぜず**独立勘定**(例: `securities_mtm` / 未実現評価勘定)に積み、残渣の同定を勘定残高そのもの(推定不要)にする。BS 表示は securities + mtm の合算、`securities_book_value` / recon の valuation 突合・ダッシュボードの読み替えも同時に設計すること。**勘定科目の追加は migrations(保護領域)を伴うため独立役員審査+みなし承認が必要。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md 残渣修正審査記録 新-14。"
+    status: pending
+
+  - id: in-kind-contribution-mtm
+    what: "現物拠出の建玉が一度も評価替えされない前提の是正(残渣修正審査 新-17)"
+    conditions:
+      - type: date_after
+        date: "2026-08-24"
+    action:
+      type: issue_create
+      title: "ledger: 約定を経ない建玉(現物拠出)の建玉数量をどこが持つか決める"
+      labels: [impl, ledger]
+      body: "`_util.replay_position` は broker_fill 証憑しか再生しないため、約定を経ずに建った `securities`(現物拠出 Dr securities / Cr capital・資産振替)は**数量ゼロに見え、一度も評価替えされない**(独立審査の実測: 終値 1500/2000/500 を渡しても残高は拠出額 1,000,000 のまま、`detail.positions` にも現れない)。数量ゼロ残渣の洗い替えが『約定外の建玉に触れない』で正しくいられるのはこの前提のおかげであり、in-kind を時価評価する必要が出た時点で前提は崩れる(評価替えの対象になった途端、数量の出どころが無い)。決めるべきこと: ①現物拠出を制度として扱うのか(扱わないなら post_entry 側で securities への直接記帳を禁じる方が明快)、②扱うなら建玉数量の真実をどこに持たせるか(`trade.fills` 相当の建玉イベント表 or 拠出時に数量付きの証憑を要求する)。当面は締めの `unexplained_residue`(新-15)が該当銘柄を毎日名指しするので、黙って評価から漏れる状態にはない。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 残渣修正審査記録 新-17。"
+    status: pending
 
   - id: close-stage-failure-visibility
     what: "締め段が落ちた日にリスク日次が未再締めの系列を黙って測る問題(再々審査 起草者留意点(a)の独立評価 — 中)"

@@ -146,6 +146,40 @@ def test_mark_to_market_writes_off_residue_without_a_price(conn, run_id):
                                        price=None, entry_date=DAY, run_id=run_id) is None
 
 
+def test_mark_to_market_rejects_a_posted_by_outside_the_predicate(conn, run_id):
+    """評価替えの ``posted_by`` は ``MTM_POSTED_BY`` に限る(独立審査 新-14)。
+
+    後で「評価替えが作った残高」を同定する判定子がこの列なので、別の値で書くと自分が
+    書いた評価替えを自分で認識できず、残渣が説明不能な残高として残り続ける。
+    """
+    iid = 1006
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                      qty=10, price=100, entry_date=DAY, run_id=run_id)
+    with pytest.raises(ValueError, match="posted_by"):
+        posting.post_mark_to_market(conn, book_id="DEMO_FUND", instrument_id=iid,
+                                    price=120, entry_date=DAY, run_id=run_id,
+                                    posted_by="test.ledger")
+
+
+def test_mark_to_market_uses_the_same_as_of_for_qty_and_book_value(conn, run_id):
+    """数量と帳簿価額を同じ ``as_of=entry_date`` で切る(独立審査 新-13)。
+
+    将来日付の売りが先に記帳されていても、``entry_date`` 時点の建玉で評価替えする。
+    数量だけ全期間再生にすると「数量ゼロ ⇒ 残渣」と誤判定して実在の建玉を消す。
+    """
+    iid = 1007
+    d0, d1 = DAY, date(2026, 8, 5)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                      qty=100, price=500, entry_date=d0, run_id=run_id)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="sell",
+                      qty=100, price=600, entry_date=d1, run_id=run_id)  # 将来日付の売り
+
+    posting.post_mark_to_market(conn, book_id="DEMO_FUND", instrument_id=iid,
+                                price=600, entry_date=d0, run_id=run_id)
+    # d0 時点は 100 株保有 → 時価 60,000。将来の売りに引きずられてゼロにしない。
+    assert _balance(conn, "DEMO_FUND", "securities", as_of=d0, instrument_id=iid) == D(60000)
+
+
 def test_mark_to_market_rejects_missing_price_while_holding(conn, run_id):
     """数量が残っている銘柄に ``price=None`` を渡すのは呼び出し側の誤り(黙って 0 評価しない)。"""
     iid = 1004

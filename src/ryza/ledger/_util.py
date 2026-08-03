@@ -235,6 +235,15 @@ def replay_position(
     逆仕訳の除外も ``as_of`` で切る(``r.entry_date <= as_of``)。``securities_book_value``
     の as_of は逆仕訳の**明細**を日付で落とすので、数量側だけ日付を無視して取り消すと
     「時価 − 帳簿価額」の差分が両者の非対称から生じる — 評価替えの差分計算が壊れる。
+
+    **限界: これは「約定から見た建玉」であって建玉の唯一の真実ではない**(独立審査 新-17)。
+    約定を経ずに建った securities(現物拠出 Dr securities / Cr capital・資産振替)はここに
+    現れないため、``post_mark_to_market`` はそれを**一度も評価替えしない**(実測: 終値
+    1500/2000/500 を渡しても残高は拠出額のまま、``detail.positions`` にも出ない)。
+    数量ゼロの残渣洗い替えが「約定外の建玉に触れない」で正しくいられるのはこの前提の
+    おかげであり、in-kind を時価評価する必要が出た時点で前提は崩れる — 建玉の真実を
+    ``replay_position`` 以外に持たせる設計判断が要る(``ops/reminders.yaml`` の
+    ``in-kind-contribution-mtm``)。
     """
     sql = """
         SELECT je.evidence_id, e.payload_ref
@@ -317,6 +326,21 @@ def securities_book_value(
         return to_decimal(cur.fetchone()[0])
 
 
+#: 評価替え仕訳の ``posted_by``。``mtm_book_value`` の判定子であり、``post_mark_to_market``
+#: はこの値以外での記帳を拒否する(書いた評価替えが後で認識されない状態を作らないため)。
+#:
+#: **なぜ kind だけでは足りないか**(独立審査 新-14): 洗い替えは NAV を双方向に動かす原始
+#: 操作なのに、判定子が evidence の自由文字列 ``kind='price_snapshot'`` だけだと、その kind
+#: を付けた手仕訳が「評価替えが作った残高」と誤認される。審査実測: Dr securities 3,000,000 /
+#: Cr capital の手仕訳が次の締めで**全額消され** NAV 13,000,000→10,000,000、逆に貸方
+#: 500,000 を立てると NAV が無から 10,500,000 に増えた。
+#:
+#: **これは防御であって境界ではない**: ``posted_by`` も ``post_entry`` の呼び出し側が
+#: 決める列なので、値を騙る記帳は依然として可能である。構造的な根治(MTM を独立勘定へ
+#: 分離し、推定ではなく勘定体系で切る)は ``ops/reminders.yaml`` の ``mtm-separate-account``。
+MTM_POSTED_BY: tuple[str, ...] = ("ledger.closing",)
+
+
 def mtm_book_value(
     conn: psycopg.Connection,
     book_id: str,
@@ -339,6 +363,11 @@ def mtm_book_value(
     逆仕訳の扱いは ``replay_position`` と同じ(逆仕訳された評価替えは両方落とす)。
     ``reverse_entry`` が作る逆仕訳の証憑は kind='decision' なので、原仕訳だけを残すと
     既に取り消された評価替えを二重に消してしまう。
+
+    判定子は **evidence.kind と ``posted_by``(``MTM_POSTED_BY``)の連言**であり、kind の
+    文字列を騙るだけでは洗い替えの対象にならない(独立審査 新-14)。ここでカバーされない
+    数量ゼロの残高は ``closing.run_daily_close`` が ``unexplained_residue`` として毎締めに
+    検出・記録する(新-15)— 黙って消すのでも黙って残すのでもなく、名指しして残す。
     """
     sql = """
         SELECT COALESCE(sum(jl.debit - jl.credit), 0)
@@ -348,6 +377,7 @@ def mtm_book_value(
         WHERE jl.book_id = %s AND jl.account_id = 'securities'
           AND jl.instrument_id = %s
           AND e.kind = 'price_snapshot'
+          AND je.posted_by = ANY(%s)
           AND je.reversal_of IS NULL
           AND NOT EXISTS (
               SELECT 1 FROM ledger.journal_entries r
@@ -357,5 +387,8 @@ def mtm_book_value(
           AND (%s::date IS NULL OR je.entry_date <= %s)
     """
     with conn.cursor() as cur:
-        cur.execute(sql, (book_id, instrument_id, as_of, as_of, as_of, as_of))
+        cur.execute(
+            sql,
+            (book_id, instrument_id, list(MTM_POSTED_BY), as_of, as_of, as_of, as_of),
+        )
         return to_decimal(cur.fetchone()[0])

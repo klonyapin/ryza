@@ -415,6 +415,34 @@ def _build_restatement_embed(
     }
 
 
+def _build_residue_embed(
+    residue: dict[str, Any], *, book_id: str, day: str, as_of: datetime
+) -> dict[str, Any]:
+    """説明不能な残渣(数量ゼロなのに残る securities)の通知(#運営 — 独立審査 新-15)。
+
+    照合ブレイクと同格の専用 embed にする。実行サマリの 1 行に混ぜると ✅ 付きで埋もれる
+    (再-7 と同じ欠陥)。残渣は放置すると評価替えの経路を通らないまま NAV に居座り、
+    ``book_returns`` → ``ewma_vol`` → 誤 ``vol_exceeded`` の経路に乗る。
+    """
+    jst_str = as_of.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
+    return {
+        "title": f"⚠️ 説明不能な建玉残渣 {jst_str}",
+        "description": (
+            f"{book_id} {day}: 数量ゼロなのに securities 残高が残る銘柄が "
+            f"{len(residue)} 件ある。評価替え由来ではないため締めは洗い替えていない — "
+            "逆仕訳のオペミス、評価替えを騙る手仕訳、約定を経ない建玉(現物拠出)の"
+            "いずれかを確認すること。試算表はゼロバランスのままなので気づけない。"
+        ),
+        "color": COLOR_FLASH,
+        "fields": [
+            {"name": f"銘柄 {iid}", "value": f"帳簿価額 {v['book_value']}", "inline": True}
+            for iid, v in list(residue.items())[:10]
+        ],
+        "author": org.author_for_role("audit"),
+        "footer": {"text": DISCLAIMER},
+    }
+
+
 def _build_quarantine_alert(stats: dict[str, int], *, as_of: datetime) -> dict[str, Any]:
     """mass-quarantine の警告 embed(#運営)。照合ブレイクと同じ扱いで別途投入する。"""
     jst_str = as_of.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
@@ -618,6 +646,18 @@ def run_daily(
             enqueue(
                 conn, channel_ops,
                 _build_restatement_embed(restated, as_of=as_of), run.run_id,
+            )
+        # 数量ゼロなのに残る securities(評価替え由来でないため洗い替えの対象外)。
+        # 検出は締めが行い(ledger.closing — 独立審査 新-15)、ここで人へ届ける。
+        residue = close_result["ledger"].get("unexplained_residue") or {}
+        if residue:
+            detail["unexplained_residue"] = len(residue)
+            enqueue(
+                conn, channel_ops,
+                _build_residue_embed(
+                    residue, book_id=DEMO_BOOK, day=jst_date.isoformat(), as_of=as_of
+                ),
+                run.run_id,
             )
         if breaks:
             detail["breaks"] = len(breaks)

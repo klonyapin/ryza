@@ -304,7 +304,7 @@ def post_mark_to_market(
     entry_date: _date,
     run_id: int,
     currency: str = "JPY",
-    posted_by: str = "ledger.posting",
+    posted_by: str = _util.MTM_POSTED_BY[0],
 ) -> int | None:
     """評価替え(未実現損益の洗い替え)。securities 帳簿価額を時価に一致させる。
 
@@ -328,8 +328,24 @@ def post_mark_to_market(
     総額ではない。``replay_position`` は broker_fill しか再生しないので、約定を経ずに建った
     securities(現物拠出・資産振替)は数量ゼロに見える。総額を消すと実在の資産を帳簿から
     消してしまう(実測: 現物拠出 1,000,000 の日の NAV が丸ごと戻る)。
+
+    **数量も帳簿価額も同じ ``as_of=entry_date`` で切る**(独立審査 新-13)。数量だけ全期間
+    再生にすると、**将来日付の売りが先に記帳されている日**の締めが「数量ゼロ ⇒ 残渣」と
+    誤判定し、その日に実在する建玉の評価額を消す(審査実測: d2 付けの全売りを先に記帳した
+    状態で d1 を締めると NAV 10,200,000 → 10,000,000、returns ``[-0.019608]`` ← 真値
+    ``[0.0]``。符号が逆なだけで新-10 と同じ恒久的偽リターン)。時価と帳簿価額を別の
+    日付境界で測ること自体が差分計算の前提を壊す。
+
+    ``posted_by`` は ``_util.MTM_POSTED_BY`` に限る(新-14): 後で「評価替えが作った残高」を
+    同定する判定子がこの列なので、それ以外の値で書くと自分が書いた評価替えを自分で
+    認識できなくなる。
     """
-    qty, _cost = _util.replay_position(conn, book_id, instrument_id)
+    if posted_by not in _util.MTM_POSTED_BY:
+        raise ValueError(
+            f"評価替えの posted_by は {_util.MTM_POSTED_BY} のいずれか"
+            f"(mtm_book_value の判定子): {posted_by!r}"
+        )
+    qty, _cost = _util.replay_position(conn, book_id, instrument_id, as_of=entry_date)
     if price is None:
         if qty != 0:
             raise ValueError(
