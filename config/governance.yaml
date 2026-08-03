@@ -134,6 +134,14 @@ protected_areas:
     area: audit
   - path: ops/deploy-a18.sh # 監査ジョブのデプロイ経路(PR #40)
     area: deploy_path
+  # 統治エンジン(2026-08-04 登録): 役員室の批判義務ゲート(mark_resolution・決定論ガード・
+  # 詐称無害化)、承認記録 writer(record_deemed_approval/veto)、通知の不可分化(notices)、
+  # 着任・盲検(personas)。boardroom-residual 実装時に登録漏れと判明(実装エージェント報告)。
+  - path: src/ryza/governance/**
+    area: governance_engine
+  # 統治実施規程(L2 文書)。役員室・決議・盲検の規範の正。
+  - path: docs/design/05-governance.md
+    area: governance_doc
   - path: src/ryza/risk/** # リスクエンジン(リミット判定+測定値の定義。navflow 審査 重要-8 で登録 — 測定定義の変更も第5条の対象。C-2 の宿題消化)
     area: risk_limits
   - path: src/ryza/gate/** # コンプラゲート実装(T-014。参照実装 src/ryza/ips.py と同じ area の棚卸し)
