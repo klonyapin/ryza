@@ -89,45 +89,6 @@ def fetch_observations(
     return resp.json()
 
 
-def _write_indicator(
-    conn: psycopg.Connection,
-    run: Run,
-    *,
-    series_code: str,
-    ts: datetime,
-    value: float,
-    as_of: datetime,
-) -> bool:
-    """``market.indicators`` に 1 点書き込む。既存（同一 PK）は無視。新規なら True。
-
-    改定対応: 同一 (series_code, ts) に別 value が来たら revision を進めて追記する
-    （追記オンリー。既存 revision と同値なら何もしない）。
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT revision, value FROM market.indicators "
-            "WHERE series_code = %s AND ts = %s ORDER BY revision DESC LIMIT 1",
-            (series_code, ts),
-        )
-        row = cur.fetchone()
-    revision = 0
-    if row is not None:
-        last_rev, last_val = row
-        if float(last_val) == value:
-            return False  # 同値の再取込 → 冪等スキップ
-        revision = last_rev + 1
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO market.indicators (series_code, ts, value, revision, as_of, run_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (series_code, ts, revision) DO NOTHING
-            """,
-            (series_code, ts, value, revision, as_of, run.run_id),
-        )
-        return cur.rowcount == 1
-
-
 def ingest_series(
     conn: psycopg.Connection,
     run: Run,
@@ -160,13 +121,13 @@ def ingest_series(
             ts = datetime.fromisoformat(obs["date"]).replace(tzinfo=UTC)
         except (ValueError, KeyError):
             continue
-        if _write_indicator(
+        if base.write_indicator(
             conn, run, series_code=series_code, ts=ts, value=value, as_of=as_of
         ):
             written += 1
             record(
                 conn, run,
-                [("indicators", f"{series_code}:{ts.isoformat()}")],
+                [("indicators", base.indicator_ref(series_code, ts))],
                 [("evidence", evidence_id)],
             )
     return {"written": written, "total": len(observations)}

@@ -347,6 +347,56 @@ def write_bar(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# 統計系列（market.indicators）— FRED / e-Stat / EDGAR / 海外中銀で共用
+# ────────────────────────────────────────────────────────────────────────────
+def indicator_ref(series_code: str, ts: datetime) -> str:
+    """indicator 行のリネージ用合成 ID（indicators は複合 PK のため）。"""
+    return f"{series_code}:{ts.isoformat()}"
+
+
+def write_indicator(
+    conn: psycopg.Connection,
+    run: Run,
+    *,
+    series_code: str,
+    ts: datetime,
+    value: float,
+    as_of: datetime | None = None,
+) -> bool:
+    """``market.indicators`` に 1 点書き込む。既存（同一 PK）は無視。新規なら True。
+
+    改定対応: 同一 (series_code, ts) に別 value が来たら revision を進めて追記する
+    （追記オンリー。既存 revision と同値なら何もしない）。系列は取込ソース別に
+    接頭辞（``FRED:`` / ``ESTAT:`` / ``EDGAR:`` / ``ECB:`` / ``BOE:`` / ``IMF:``）で
+    名前空間分離する（T-012）。
+    """
+    as_of = as_of or datetime.now(UTC)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT revision, value FROM market.indicators "
+            "WHERE series_code = %s AND ts = %s ORDER BY revision DESC LIMIT 1",
+            (series_code, ts),
+        )
+        row = cur.fetchone()
+    revision = 0
+    if row is not None:
+        last_rev, last_val = row
+        if float(last_val) == value:
+            return False  # 同値の再取込 → 冪等スキップ
+        revision = last_rev + 1
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO market.indicators (series_code, ts, value, revision, as_of, run_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (series_code, ts, revision) DO NOTHING
+            """,
+            (series_code, ts, value, revision, as_of, run.run_id),
+        )
+        return cur.rowcount == 1
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # 経済カレンダー（market.calendar_events）
 # ────────────────────────────────────────────────────────────────────────────
 def write_calendar_event(
