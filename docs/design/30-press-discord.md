@@ -111,11 +111,12 @@ flowchart LR
 CREATE TABLE press.outbox (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   channel text NOT NULL,             -- press|approval|ops|dev(2026-08-03 統合)
-  embed_json jsonb NOT NULL,
+  embed_json jsonb NOT NULL,         -- **Discord のフィールドのみ**(0032 の CHECK が内部キーの混入を拒む)
   urgent boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL,
   sent_at timestamptz,               -- NULL=未送
-  run_id bigint NOT NULL
+  run_id bigint NOT NULL,
+  author_member_id text              -- 発信者キャラクター(0032)。配送時のアイコン解決用の内部キーで Discord へは送らない
 );
 CREATE TABLE press.predictions (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

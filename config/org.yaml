@@ -3,6 +3,10 @@
 # 設計リード=あおば、報道=射命丸文。FM は哲学に合う人気キャラを設計リードが選定)。
 # アイコン: 代表指示により Web 上の画像を使用。ただし public リポジトリへの画像コミットは再配布に
 # あたるため行わず、icon_url(外部 URL のホットリンク)で参照する。サイトは認証付き(非公開)。
+# 2026-08-04: 非公開の自前ストレージへの再ホストも**採らない**と整理した(docs/research/icon-hosting-legal.md)。
+#   Discord は embed の icon_url を自社サーバから取得するため、Discord に出す再ホスト構成は必ず公開 URL を
+#   伴い送信可能化になる。代わりにホットリンク先の差し替えを日次で検知する(0033・ops/icon_revalidate.py)。
+#   恒久解は権利処理済みの自前素材への差し替え(ops/reminders.yaml の icon-own-artwork)。
 # FM の id(ben/jim/stan/peter)は哲学の器・マンデートファイルの技術 ID として維持し、表示名のみキャラクター名。
 version: "2"
 representative:

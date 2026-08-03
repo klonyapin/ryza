@@ -686,6 +686,39 @@ reminders:
       title: "アイコン上書きを外部ホットリンクから自前再ホストへ移行する"
       labels: [impl]
       body: "現行の ops.org_icon_overrides(0020)は外部 URL のホットリンクを保存し、保存時に単発の HEAD/GET で検証するだけである。これには2つの構造的な限界がある。(1) 検証は保存時点のスナップショットでしかなく、URL 先の画像が後から差し替えられても検知できない(C-7)。(2) 実アクセスを伴う検証はそれ自体が SSRF の入口で、現行の緩和(https 限定・リダイレクト追従なし・解決先 IP が公開アドレスであることの確認)は DNS rebinding には無力である(C-6・src/ryza/org.py の _reject_internal_host に明記)。恒久是正は、保存時に画像を1度だけ取得して自前ストレージ(GCS 等)へ複製し、以後は自前 URL を配信すること。取得はサイズ上限(現行 5MB)とタイムアウト付きの1回に限定し、以後の外部アクセスを無くす。**着手前に再配布の法的懸念を整理すること**: config/org.yaml 冒頭の判断(『public リポジトリへの画像コミットは再配布にあたるため行わず icon_url のホットリンクで参照する』)は、非公開の自前ストレージへの複製が同じ問題になるかを検討していない。非公開・単一利用者・認証必須(IAP)の配信であれば私的複製の範囲と整理できる可能性があるが、結論を出してから実装すること。整理の結果『再ホストしない』となった場合は、代わりに定期的な再検証ジョブ(保存済み URL の Content-Type/サイズを週次で HEAD 確認し、変化を #運営 へ通知)を実装する。"
+    # 2026-08-04 前倒し実施。**整理の結論は「再ホストしない」**(全文: docs/research/icon-hosting-legal.md)。
+    #   決め手は著作権の一般論ではなく目的の構造: Discord は embed の icon_url を**自社サーバから取得**する
+    #   ため、「Discord に出す」再ホスト構成は必ず公開 URL を伴い、送信可能化(著作権法23条1項)になる。
+    #   私的使用の複製(30条1項)は複製の権利制限であって公衆送信を正当化せず、49条1項1号で複製時点に
+    #   遡って侵害とみなされる。非公開ストレージに留めれば公衆送信は避けられるが、その構成では Discord に
+    #   出せず 0020 の目的を果たさない。加えて 30 条1項側にも障害が2つある(業務性の除外・30条1項4号の
+    #   侵害コンテンツDL規制)。台帳のアイコンは全て safebooru の第三者二次創作である(site/avatars は不在)。
+    # したがって本リマインダーが明示的に許容した代替へ分岐した:
+    #   ①migrations/0033(ops.org_icon_checks / org_icon_check_events)②src/ryza/ops/icon_revalidate.py
+    #   ③Bot の 18:00 JST ループへ配線(週次指定を**日次**に強めた — 検査は 9 件の HEAD、通知は遷移が
+    #     あった日だけなので騒音は増えず、検知から通知までのラグが7日→1日に縮む)
+    # 独立役員 追補審査(2026-08-04)で塞いだ迂回路: C-12 障害中のすり替え(失敗時も指紋を温存し復旧時に
+    #   必ず比較。1日 404 を返してから差し替える手が通らない)、C-13 URL ごとの差し替え(URL 変更を
+    #   org_icon_override_log の**前回検査より後の**記録と突合。記録が無ければ url_unverified で
+    #   通知し、台帳で説明できないものは urgent)、C-14 失敗 Run の別接続記録、C-16 抑止を例外型名へ正規化。
+    # **受容した残存リスク**: 指紋は配信元が名乗るヘッダであり、UA/IP で応答を出し分ける配信元
+    #   (クローキング)には無力。これを塞げるのは再ホストだけで、法的整理により採らない。爆風半径は
+    #   独立役員審査 0020 が「中」と評価(非公開サーバー・閲覧者は代表のみ)。恒久解は権利処理済みの
+    #   自前素材への差し替えであり、後続 `icon-own-artwork` に登録した。
+    # **C-6(SSRF)は本件では解決していない**: 再ホストは SSRF の解決策でもなかった(本文を取得する経路は
+    #   むしろ取得量が増える)。根治は接続先 IP のピン留めで、別論点として残る。
+    status: done # 2026-08-04 再ホストせず定期再検証(0033)を実装。判断根拠 docs/research/icon-hosting-legal.md
+
+  - id: icon-own-artwork
+    what: "キャラクターアイコンを権利処理済みの自前素材へ差し替える(外部依存の根治 — icon-rehost-storage の残り)"
+    conditions:
+      - type: date_after
+        date: "2026-11-01"
+    action:
+      type: issue_create
+      title: "アイコンを権利処理済みの自前素材へ差し替え、外部ホットリンク依存を断つ"
+      labels: [decision]
+      body: "現行のキャラクターアイコンは全て safebooru 上の第三者二次創作の外部 URL である(config/org.yaml)。2026-08-04 の法的整理(docs/research/icon-hosting-legal.md)は再ホストを退け、差し替えの**検知**(0033)で凌ぐ構成を採ったが、これは暫定である。検知はクローキングに無力で、検知しても復旧は手作業であり、『弱い統制を置いたから対処済み』と扱えば 05-governance §6-5 の形骸化そのものになる(同文書 §6 反対意見書②)。恒久解は権利処理済み素材(自作・生成・委託)を site/avatars に置き、台帳の icon_url を自前の公開経路へ向けることである。素材が揃えば再ホスト・キャッシュ・改竄検知の論点はまとめて消える。発火時の判断材料: 0033 の検知イベント(ops.org_icon_check_events)の実績件数と、素材調達のコスト見積り。"
     status: pending
 
   - id: outbox-internal-key-separation
@@ -698,7 +731,25 @@ reminders:
       title: "outbox の内部キー(author.member_id)を embed_json の外へ出す"
       labels: [impl]
       body: "0020 は配送時にアイコン上書きを解決するため、embed_json の author に内部キー member_id を載せる方式を採った(src/ryza/org.py embed_author / AUTHOR_MEMBER_KEY)。これは press.outbox の全行に Discord API のフィールドではない値が永続化されることを意味し、除去は送信直前の1関数(org.resolve_author)だけに依存している(独立役員審査 0020 C-10)。将来 embed_json を別経路(新しい配送先・再送ツール・エクスポート)へ流す実装が resolve_author を通し忘れると、未知フィールドが Discord へ送られる。是正: press.outbox に author_member_id 列を追加する(あるいは embed_json と並ぶ meta 列を設ける)か、outbox.OutboxMessage のデータ構造として embed とは別に持ち、embed_json には Discord のフィールドだけを入れる。press.outbox はスキーマ変更のため保護領域の手続を経ること。現行方式でも実害が出ていないのは、Discord が未知フィールドを無視するためであり(0020 時点で確認)、緊急性は低い。"
-    status: pending
+    # 2026-08-04 前倒し実施(migrations/0032):
+    #   ①press.outbox に author_member_id 列を追加。②outbox.enqueue が org.split_author_member_id で
+    #     embed から内部キーを外して列へ移す(embed_json には Discord のフィールドしか入らない)。
+    #     ③OutboxMessage / claim_pending が列を運び、bot/main.py は列から member_id を渡す。
+    #   **除去を投入時へ移すだけでは足りない**と判断し、embed_json への再混入を CHECK 制約
+    #     (outbox_embed_has_no_internal_keys_check)で禁じた — enqueue を通さない書込経路
+    #     (例 src/ryza/ingest/freshness.py の直接 INSERT)が strip を忘れても DB が書込時に落とす。
+    #     制約は **NOT VALID**(既存行は評価しない): press.outbox の**送済**行は配送済みの投稿記録
+    #     =証跡であり遡って書き換えない。
+    #   **独立役員 追補審査 C-11(2026-08-04)で是正**: NOT VALID は「既存行を検証しない」だけで
+    #     既存行への **UPDATE には効く**。未送の legacy 行を残すと、配送成功後の mark_sent(UPDATE)が
+    #     CheckViolation で落ち、deliver_pending がバッチごと rollback → 5秒ごとに同じメッセージを
+    #     送り続ける(承認・KS 通報を含む「送信は高々1回」の破壊+配送の恒久詰まり)。したがって
+    #     0032 は**未送行のみ**を backfill する(embed から内部キーを外し列へ移す)。未送行は
+    #     「まだ出していないキューの状態」であって出した記録ではないため証跡論は及ばない。
+    #     送済行は不改変のまま残り、mark_sent が二度と UPDATE しない(WHERE sent_at IS NULL)ため
+    #     CHECK にも当たらない。旧キーが残る送済行の配送側フォールバックは維持
+    #     (org.resolve_author。tests/bot/test_outbox.py で再現→解消を対照検証)。
+    status: done # 2026-08-04 0032 で列分離+CHECK 制約+未送行の backfill(C-11)
 
   - id: resolution-critic-recency
     what: "決議の決定論チェックを『最終代表発言以降に独立役員が発言したか』へ精緻化し、確認付き決議の連続を監査アラート対象にする(独立役員 再確認審査 懸念A)"
