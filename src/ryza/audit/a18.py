@@ -4,9 +4,11 @@
 
   A-18-1 保護領域突合   … `protected_areas` の glob に触れた発効日以後のコミットを列挙し、
                           (a) ``Approved:`` トレーラ (b) GitHub マージ PR 経由(Merge pull request
-                          マージコミットの配下)のいずれも無いものを違反として列挙する。
+                          マージコミットの配下) (c) PR 承継(有効なトレーラを持つ PR マージが
+                          持ち込んだコミット群)のいずれも無いものを違反として列挙する。
                           DB 接続がある実行ではトレーラの参照先を ``current_decisions`` と
-                          突合し、否認済み・却下・不在は承認と見なさない
+                          突合し、否認済み・却下・不在は承認と見なさない(承継の起点判定も
+                          同じ照合を通る)
   A-18-2 文書⇔config    … 80-ips.md ⇔ config/ips.yaml、06-constitution.md ⇔ config/governance.yaml
                           のバージョン文字列一致を検査する
   A-18-3 宣言棚卸し     … controls のうち ``enforcement: declaration`` を列挙する(検査ではなく
@@ -42,6 +44,24 @@
 - GitHub の squash マージ(``... (#N)`` 形式の単独コミット)は「マージ PR」と判定しない。
   本リポジトリの承認手続はマージコミット(``Merge pull request``)で行われている(批准 PR #32 が
   実例)。squash 併用を始める場合は判定の拡張が必要
+
+**PR 承継(2026-08-04 設計リード裁定)**: first-parent 上のマージ M が有効な ``Approved:``
+トレーラを持つとき、M が main に持ち込んだコミット群(M の配下でまだ main に無かったもの)は
+M の承認を承継し違反としない。PR 単位のみなし承認は独立審査を経た PR の内容全体に及ぶためで、
+ブランチ内コミット(worktree の統合マージ含む)に個別トレーラを要求すると統合フローが構造的に
+違反を量産し監査が形骸化する。承継は ``inherited`` として集計し報告に必ず出す(黙って消さない)。
+承継の起点は「first-parent 上・件名がマージ形式・親2・トレーラ有効」の4条件を満たすコミット
+のみで、トレーラの無い PR マージ配下は従来どおり検査する。**起点のトレーラ有効性は必ず
+:func:`trailer_approves` を通す** — 素の :func:`has_approval_trailer` で分岐すると、否認済みの
+承認がブランチ全体へ承継され、否認照合が承継経路から迂回される。``conn`` が無い(照合不能な)
+実行では形式的有効性のみで承継し、その件数を notes に開示する(黙って通さない)。
+
+**既知違反の受容(acknowledged_findings)**: 是正不能な過去の違反(git 履歴の書き換えなしには
+消せない evil merge 等)は ``config/governance.yaml`` の ``acknowledged_findings`` に
+commit(完全 SHA)・paths(触れた保護パス集合)・理由・承認記録の参照とともに登録できる。
+A-18-1 は一致した違反を ``violations`` から外す代わりに ``acknowledged`` へ移し、報告 embed の
+別フィールドとして **必ず表示** する(黙って消さない)。一致は commit と paths の完全一致を要求し、
+一致しない受容エントリは notes に「陳腐化」として開示する。
 
 **evil merge 対策**: マージコミット自身のコンフリクト解消差分は ``git diff-tree --cc``
 (全親と異なるファイルのみ列挙)で検査する。保護パスに触れる場合は **マージコミット自身の**
@@ -107,6 +127,9 @@ _PR_MERGE_RE = re.compile(r"^Merge pull request #\d+")
 
 # 見出し行のバージョン表記(例: 「# Ryza 投資方針書(IPS)v1.3」)。
 _DOC_VERSION_RE = re.compile(r"v(\d+(?:\.\d+)+)")
+
+# 受容記録の commit は 40 桁 hex の完全 SHA のみ(短縮 SHA は曖昧で誤一致・永久不一致を招く)。
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 
 # Approved トレーラの参照が governance.decisions の ID を指す表記。接頭辞は必須
 # (裸の数字は Issue 番号と区別できない — 独立役員審査 重要-2)。
@@ -356,22 +379,27 @@ def check_protected_commits(
     *,
     since_commit: str | None = RATIFICATION_COMMIT,
     conn: Any | None = None,
-) -> tuple[list[dict[str, Any]], int, list[dict[str, Any]]]:
-    """A-18-1: 保護領域の無承認コミット・検査コミット数・トレーラ所見を返す。
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, list[dict[str, Any]]]:
+    """A-18-1: ``(違反, PR 承継で承認, 検査コミット数, トレーラ所見)`` を返す。
 
     承認とみなす条件(定款附則):
       (a) コミット本文の ``Approved:`` トレーラ。``conn`` が与えられれば
           :func:`verify_decision_refs` で参照(``decision:<id>`` / ``proposal_ref`` 一致)を
           実在照合し、**否認済み・却下・不在は承認と見なさない**
-      (b) GitHub マージ PR 経由 = ``Merge pull request`` マージコミットの配下で main に到達
+      (b) GitHub マージ PR 経由 = ``Merge pull request`` マージコミット(**親2**)の配下で
+          main に到達
+      (c) **PR 承継**: 有効な ``Approved:`` トレーラを持つ first-parent 上の PR マージ M
+          (**親2**)が main に持ち込んだコミット群は、M の承認を承継する(下記)
     ``since_commit``(批准コミット)以前のコミットは ``rev-list since..HEAD`` により対象外。
 
-    **トレーラが無効なら (b) では救済しない**: 「この承認記録で承認された」と明示的に
+    **トレーラが無効なら (b)・(c) では救済しない**: 「この承認記録で承認された」と明示的に
     主張しているコミットが、その記録の否認によって主張を失った場合、PR 経由であることを
     理由に承認扱いへ戻すと否認が監査から見えなくなる。否認は取消義務(定款第3条)を
-    生じさせるので、取消されるまでは無承認変更として列挙されるのが正しい。
+    生じさせるので、取消されるまでは無承認変更として列挙されるのが正しい。承継の起点判定も
+    同じ理由で :func:`trailer_approves` を通す(素の存在検査で分岐すると、否認済みの承認が
+    ブランチ全体へ承継され照合が迂回される)。
 
-    3つ目の戻り値は「受理はしたが問題のある参照」(有効な承認と否認済みの承認を併記した
+    4つ目の戻り値は「受理はしたが問題のある参照」(有効な承認と否認済みの承認を併記した
     コミット等)。違反ではないが取消義務の検討対象なので報告から落とさない(軽微-10)。
     """
     repo = str(repo_path)
@@ -385,6 +413,7 @@ def check_protected_commits(
     fp_merges = _rev_list(repo, since_commit, "--first-parent", "--merges")
 
     violations: list[dict[str, Any]] = []
+    inherited: list[dict[str, Any]] = []
     trailer_findings: list[dict[str, Any]] = []
     for sha in commits:
         parents = _git(repo, "log", "-1", "--format=%P", sha).split()
@@ -401,9 +430,9 @@ def check_protected_commits(
             continue
 
         message = _git(repo, "log", "-1", "--format=%B", sha)
-        # 承認の有効性判定は trailer_approves に集約する。PR 承継など「別のコミットの
-        # トレーラで承認する」規則を足すときも、この関数を通せば否認済み承認を
-        # 承継させずに済む(素の has_approval_trailer で分岐しないこと)。
+        # 承認の有効性判定は trailer_approves に集約する。PR 承継のように「別のコミットの
+        # トレーラで承認する」規則も必ずこの関数を通す(素の has_approval_trailer で分岐すると
+        # その経路だけ否認済み承認を受理する穴になる)。
         verdict = trailer_approves(conn, message, trailer)
         trailer_reason: str | None = None
         if verdict is not None:
@@ -425,28 +454,151 @@ def check_protected_commits(
                 "Approved トレーラの承認記録が有効でない: " + "; ".join(verdict.problems)
             )
 
+        # 承継の起点候補: sha を main に持ち込んだ first-parent 上のマージ M。
+        # sha 自身が first-parent 上にある場合(= main への直接の到達点)は承継しない。
+        # 自分のトレーラが無効(否認済み等)なコミットは (b)・(c) で救済しない。
+        merge = (
+            None
+            if trailer_reason is not None or sha in first_parent
+            else _find_introducing_merge(repo, sha, fp_merges)
+        )
+        if merge is not None:
+            m_subject = _git(repo, "log", "-1", "--format=%s", merge).strip()
+            # octopus マージ(親3以上)は起点にしない。GitHub の PR マージは常に親2であり、
+            # octopus に PR 件名を付けると複数ブランチの内容を1つの承認で通せてしまう
+            # (独立役員審査 2026-08-04 中-3 の PoC: 未審査の保護ファイル3件が violations=0 で
+            # 通過した)。起点候補の探索自体は全 first-parent マージに対して行う — octopus を
+            # 探索対象から外すと「持ち込んだマージ」が後続の別 PR に誤帰属するため。
+            m_is_two_parent = len(_git(repo, "log", "-1", "--format=%P", merge).split()) == 2
+            m_is_pr = bool(_PR_MERGE_RE.match(m_subject)) and m_is_two_parent
+            # 起点のトレーラも trailer_approves を通す。否認済みの PR トレーラで
+            # ブランチ全体を承継させると、否認照合が承継経路から迂回される。
+            m_verdict = trailer_approves(
+                conn, _git(repo, "log", "-1", "--format=%B", merge), trailer
+            )
+            m_approved = m_verdict is not None and m_verdict.accepted
+            if m_is_pr and not is_merge:
+                continue  # (b) マージ PR 経由のブランチ内コミット = 代表承認(附則・従来どおり)
+            if m_is_pr and m_approved:
+                # (c) PR 承継。PR 単位のみなし承認(定款第3条 v0.4)は独立審査を経た PR の
+                # 内容全体に及ぶ。ブランチ内コミット(worktree の統合マージ含む)に個別
+                # トレーラを要求すると、統合フローが構造的に違反を量産し監査が形骸化する
+                # (2026-08-04 設計リード裁定・g-a18 審査 C-3 の恒久対策)。
+                # 承継の起点は「first-parent 上・件名がマージ形式・親2・トレーラ有効」に限る。
+                # トレーラの無い PR マージ(#56 等の初期)は承継させない。
+                # conn が無い実行では形式的有効性のみで承継する。その事実は
+                # decision_verified=False として持ち、報告 notes で件数を開示する。
+                inherited.append(
+                    {
+                        "commit": sha[:12],
+                        "commit_full": sha,
+                        "subject": _git(repo, "log", "-1", "--format=%s", sha).strip(),
+                        "files": touched,
+                        "merge": merge[:12],
+                        "merge_subject": m_subject,
+                        "decision_verified": conn is not None,
+                    }
+                )
+                continue
+
         if trailer_reason is not None:
             reason = trailer_reason
         elif is_merge:
             # マージ自身の差分は PR 件名では承認と見なさない(レビューはブランチ内容に対する
             # もので、マージ時に持ち込まれた差分をカバーしない)。トレーラ必須。
+            # 承継が効くのは「トレーラ有効な PR マージが持ち込んだ」ブランチ内マージのみで、
+            # first-parent 上のマージ自身(件名偽装の余地がある経路)は従来どおり検査する。
             reason = "マージ自身のコンフリクト解消差分(evil merge)で Approved トレーラなし"
         elif sha not in first_parent:
-            merge = _find_introducing_merge(repo, sha, fp_merges)
-            if merge and _PR_MERGE_RE.match(_git(repo, "log", "-1", "--format=%s", merge)):
-                continue  # マージ PR 経由 = 代表承認(附則)
-            reason = "マージ経由だが PR マージコミットが確認できない"
+            reason = "マージ経由だが PR マージコミット(親2)が確認できない"
         else:
             reason = "main への直接コミットで Approved トレーラなし"
         violations.append(
             {
                 "commit": sha[:12],
+                # 受容記録(acknowledged_findings)の突合は完全 SHA で行う(短縮形は曖昧)。
+                "commit_full": sha,
                 "subject": _git(repo, "log", "-1", "--format=%s", sha).strip(),
                 "files": touched,
                 "reason": reason,
             }
         )
-    return violations, len(commits), trailer_findings
+    return violations, inherited, len(commits), trailer_findings
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# A-18-1 既知違反の受容(acknowledged_findings — 独立役員審査 C-3)
+# ────────────────────────────────────────────────────────────────────────────
+def _ack_key(commit: str, files: list[str] | tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
+    """受容記録の一致キー: (完全 SHA, 保護パスの正規化集合)。順序差では外れない。"""
+    return commit.strip().lower(), tuple(sorted({str(f).strip() for f in files}))
+
+
+def acknowledged_index(
+    gov: dict[str, Any],
+) -> tuple[dict[tuple[str, tuple[str, ...]], dict[str, Any]], list[str]]:
+    """``acknowledged_findings`` を(一致キー → エントリ の索引, 無効エントリの注記)に変換する。
+
+    無効(commit / paths 欠落・40 桁 hex でない SHA)なエントリは索引に入れず、注記で開示する。
+    黙って落とすと運用者が「受容できた」と誤認する(独立役員審査 2026-08-04 低-7)。
+    """
+    index: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
+    notes: list[str] = []
+    for entry in gov.get("acknowledged_findings") or []:
+        commit = str(entry.get("commit", "")).strip()
+        paths = entry.get("paths") or []
+        if not commit or not paths:
+            # 不完全なエントリは受容として効かせない(fail-safe = 違反のまま出す)。
+            notes.append(
+                f"acknowledged_findings のエントリが無効(commit / paths のいずれかが欠落): "
+                f"{commit or '(commit なし)'}"
+            )
+            continue
+        if not _FULL_SHA_RE.match(commit):
+            notes.append(
+                f"acknowledged_findings のエントリが無効(40 桁 hex の完全 SHA が必要 — "
+                f"短縮 SHA は曖昧なため受け付けない): {commit}"
+            )
+            continue
+        index[_ack_key(commit, paths)] = entry
+    return index, notes
+
+
+def partition_acknowledged(
+    violations: list[dict[str, Any]], gov: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """違反を(未受容, 受容済み, 陳腐化した受容エントリの注記)に分割する。
+
+    一致条件は **完全 SHA と保護パス集合の完全一致**。片方でも違えば受容は効かず、違反として
+    残る(将来の別の違反や、保護領域追加でパス集合が変わったケースを巻き込まない)。
+    受容済みは捨てずに返し、報告側で必ず可視化する(黙って消さない)。
+    """
+    index, notes = acknowledged_index(gov)
+    matched: set[tuple[str, tuple[str, ...]]] = set()
+    unacknowledged: list[dict[str, Any]] = []
+    acknowledged: list[dict[str, Any]] = []
+    for v in violations:
+        key = _ack_key(str(v.get("commit_full") or v["commit"]), v["files"])
+        entry = index.get(key)
+        if entry is None:
+            unacknowledged.append(v)
+            continue
+        matched.add(key)
+        acknowledged.append(
+            {
+                **v,
+                "acknowledged_on": entry.get("acknowledged_on"),
+                "approval_ref": entry.get("approval_ref"),
+                "ack_reason": entry.get("reason"),
+            }
+        )
+    notes += [
+        f"acknowledged_findings のエントリが一致する違反を持たない(陳腐化・SHA/パスの誤り"
+        f"の可能性): {key[0][:12]}({', '.join(key[1])})"
+        for key in index
+        if key not in matched
+    ]
+    return unacknowledged, acknowledged, notes
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -690,9 +842,11 @@ def run_a18(
     場合は従来どおりトレーラの存在検査までで、その旨を notes に載せる。
     """
     gov = load_governance(repo_path, governance_path)
-    violations, checked, trailer_findings = check_protected_commits(
+    found, inherited, checked, trailer_findings = check_protected_commits(
         repo_path, gov, since_commit=since_commit, conn=conn
     )
+    # 既知違反の受容: violations からは外すが捨てない(報告で必ず別枠表示する)。
+    violations, acknowledged, ack_notes = partition_acknowledged(found, gov)
     direct_pushes, fp_checked = check_direct_pushes(repo_path, since_commit=pr_since_commit)
     unnotified: list[dict[str, Any]] = []
     untracked_deemed = 0
@@ -703,6 +857,8 @@ def run_a18(
         "since_commit": since_commit,
         "checked_commits": checked,
         "violations": violations,
+        "inherited": inherited,
+        "acknowledged": acknowledged,
         "mismatches": check_versions(repo_path, version_pairs),
         "declarations": list_declarations(gov),
         "pr_since_commit": pr_since_commit,
@@ -715,6 +871,8 @@ def run_a18(
         "notes": [
             *_coverage_notes(gov),
             *_staleness_note(repo_path),
+            *ack_notes,
+            *_unverified_inheritance_notes(inherited),
             *([] if conn is not None else [
                 "DB 接続なしの実行のため Approved トレーラの承認記録(否認済みか)と"
                 "みなし承認の通知配送(A-18-5)は未照合"
@@ -727,6 +885,17 @@ def run_a18(
             *STANDARD_DISCLOSURES,
         ],
     }
+
+
+def _unverified_inheritance_notes(inherited: list[dict[str, Any]]) -> list[str]:
+    """decisions 照合なしで承継した件数を開示する(照合不能でも黙って通さない)。"""
+    n = sum(1 for i in inherited if not i.get("decision_verified"))
+    if not n:
+        return []
+    return [
+        f"decisions 照合なしの承継 {n} 件(DB 接続が無い実行のため、起点 PR のトレーラは"
+        "形式的有効性のみで判定した — 否認済みかどうかは未照合)"
+    ]
 
 
 def _trailer_notes(trailer_findings: list[dict[str, Any]]) -> list[str]:
@@ -779,6 +948,45 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
             {
                 "name": "A-18-1 保護領域突合",
                 "value": f"✅ 違反なし(検査 {result['checked_commits']} コミット)",
+                "inline": False,
+            }
+        )
+
+    # PR 承継で承認されたコミットは違反にしないが、起点の PR マージごとに集計して可視化する。
+    inherited = result.get("inherited") or []
+    if inherited:
+        by_merge: dict[str, list[dict[str, Any]]] = {}
+        for item in inherited:
+            by_merge.setdefault(f"`{item['merge']}` {item['merge_subject']}", []).append(item)
+        # 免除した保護パスの和集合まで出す(件数だけでは「何が免除されたか」が見えない
+        # — 独立役員審査 2026-08-04 中-3)。長くなる場合は先頭数件+残数に丸める。
+        inh_lines = []
+        for m, items in by_merge.items():
+            paths = sorted({f for item in items for f in item["files"]})
+            shown = ", ".join(paths[:5])
+            if len(paths) > 5:
+                shown += f" ほか {len(paths) - 5} 件"
+            inh_lines.append(f"- {m}: {len(items)} コミット({shown})")
+        fields.append(
+            {
+                "name": f"PR 承継で承認: {len(inherited)} コミット(起点 {len(by_merge)} PR)",
+                "value": "\n".join(inh_lines)[:1024],
+                "inline": False,
+            }
+        )
+
+    # 受容済み既知違反は violations から外れるが、必ず別枠で可視化する(黙って消さない)。
+    acknowledged = result.get("acknowledged") or []
+    if acknowledged:
+        ack_lines = [
+            f"- `{a['commit']}` {a['subject']}({', '.join(a['files'])}"
+            f"{' / 承認記録: ' + a['approval_ref'] if a.get('approval_ref') else ''})"
+            for a in acknowledged
+        ]
+        fields.append(
+            {
+                "name": f"受容済み既知違反: {len(acknowledged)} 件(A-18-1・是正不能として受容)",
+                "value": "\n".join(ack_lines)[:1024],
                 "inline": False,
             }
         )
@@ -917,9 +1125,11 @@ def run_and_report(
     if dry_run:
         result = run_a18(repo_path, since_commit=since_commit, pr_since_commit=pr_since_commit)
         log.info(
-            "[DRY_RUN] A-18 結果: violations=%d mismatches=%d declarations=%d "
-            "direct_pushes=%d(enqueue %s)",
-            len(result["violations"]), len(result["mismatches"]), len(result["declarations"]),
+            "[DRY_RUN] A-18 結果: violations=%d inherited=%d acknowledged=%d mismatches=%d "
+            "declarations=%d direct_pushes=%d(enqueue %s)",
+            len(result["violations"]), len(result.get("inherited") or []),
+            len(result.get("acknowledged") or []),
+            len(result["mismatches"]), len(result["declarations"]),
             len(result["direct_pushes"]),
             "対象" if (has_findings(result) or always_report) else "不要",
         )
@@ -969,6 +1179,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
     for m in result["mismatches"]:
         print(f"[不整合] {m['doc']} v{m['doc_version']} ⇔ {m['config']} v{m['config_version']}",
               file=sys.stderr)
+    for a in result.get("acknowledged") or []:
+        print(f"[受容済み] {a['commit']} {a['subject']}: {a['files']}", file=sys.stderr)
     for d in result["direct_pushes"]:
         print(f"[直push] {d['commit']} {d['subject']}: {d['files']}", file=sys.stderr)
     for u in result.get("unnotified_deemed", []):
@@ -976,6 +1188,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
               file=sys.stderr)
     print(
         f"A-18 完了(検査 {result['checked_commits']} コミット, 違反 {len(result['violations'])}, "
+        f"PR 承継 {len(result.get('inherited') or [])}, "
+        f"受容済み {len(result.get('acknowledged') or [])}, "
         f"不整合 {len(result['mismatches'])}, 宣言 {len(result['declarations'])}, "
         f"直push {len(result['direct_pushes'])}, "
         f"通知なき発効 {len(result.get('unnotified_deemed', []))})",

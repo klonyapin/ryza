@@ -1,14 +1,19 @@
-"""ips のテスト(Issue #28)。
+"""ips と保護領域の不変条件テスト(Issue #28)。
 
 ``config/ips.yaml``(IPS v1.3 機械可読版)のローダ・値域検証と、マンデート整合検証
 (IPS を「緩める」方向の値の拒否)を検証する。DB 不要の純粋テスト。実ファイル
 (config/ips.yaml・config/mandates/*.yaml)が 80-ips.md / 81-fm-mandates.md の値と
 一致していることもここで固定する(保護領域のリグレッション検知)。
+
+さらに ``config/governance.yaml`` の ``protected_areas`` に登録されたパスが実体を持つことを
+不変条件として固定する(独立役員審査 C-5)。改名・削除で登録が実体を失うと A-18-1 は
+「そのパスに触れたコミット」を永久に見つけられないまま静かに無力化するため、CI で検知する。
 """
 
 from __future__ import annotations
 
 import copy
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +35,10 @@ from ryza.ips import (
 _ROOT = Path(__file__).resolve().parents[1]
 _IPS_PATH = _ROOT / "config" / "ips.yaml"
 _MANDATES_DIR = _ROOT / "config" / "mandates"
+_GOVERNANCE_PATH = _ROOT / "config" / "governance.yaml"
+
+# glob メタ文字を含むパスは「実在」を単純検査できないため、追跡ファイルとの照合に回す。
+_GLOB_CHARS = ("*", "?")
 
 
 @pytest.fixture(scope="module")
@@ -301,3 +310,88 @@ class TestMandates:
         path.write_text(yaml.safe_dump(bad, allow_unicode=True), encoding="utf-8")
         with pytest.raises(IPSValidationError, match="pod_sigma_budget"):
             Mandate.load(path)
+
+
+# ── 保護領域の登録が実体を持つ(不変条件・独立役員審査 C-5)─────────────────────
+def _governance() -> dict[str, Any]:
+    return yaml.safe_load(_GOVERNANCE_PATH.read_text(encoding="utf-8")) or {}
+
+
+def _protected_paths() -> list[str]:
+    return [str(e["path"]) for e in _governance().get("protected_areas", [])]
+
+
+def _governance_line(path: str) -> str:
+    """governance.yaml 内で当該 path を宣言している行を「N行目: ...」で返す(失敗メッセージ用)。"""
+    for i, line in enumerate(_GOVERNANCE_PATH.read_text(encoding="utf-8").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped.startswith("- path:"):
+            continue
+        if stripped.split("- path:", 1)[1].split("#")[0].strip() == path:
+            return f"config/governance.yaml {i} 行目: {stripped}"
+    return f"config/governance.yaml(該当行を特定できず): {path}"
+
+
+def _tracked_files() -> list[str]:
+    """git 追跡ファイルの一覧(.venv 等の未追跡物を含めない)。"""
+    out = subprocess.run(
+        ["git", "-C", str(_ROOT), "ls-files"], capture_output=True, text=True, check=True
+    )
+    return [ln for ln in out.stdout.splitlines() if ln]
+
+
+class TestProtectedAreaPathsExist:
+    """protected_areas の登録が実体を失っていないこと。
+
+    ファイルを改名・削除しても登録は残るため、A-18-1 は「そのパスに触れたコミット」を
+    永久に見つけられないまま静かに無力化する(改番 PR #66 で deploy-a13.sh → deploy-a18.sh、
+    audit/a13.py → a18.py を改名した際に現実の危険として顕在化した)。
+    """
+
+    def test_non_glob_paths_exist(self) -> None:
+        missing = [
+            p for p in _protected_paths()
+            if not any(c in p for c in _GLOB_CHARS) and not (_ROOT / p).exists()
+        ]
+        assert not missing, (
+            "保護領域の登録が実体を失っている(改名・削除の見落とし。A-18-1 が当該パスの"
+            "無承認変更を検出できなくなる):\n"
+            + "\n".join(f"  - {p}\n    {_governance_line(p)}" for p in missing)
+        )
+
+    def test_glob_paths_match_at_least_one_tracked_file(self) -> None:
+        """glob 登録も 1 件以上にマッチすること(空 glob は実質無効な登録)。"""
+        from ryza.audit.a18 import glob_to_regex
+
+        files = _tracked_files()
+        empty = [
+            p for p in _protected_paths()
+            if any(c in p for c in _GLOB_CHARS)
+            and not any(glob_to_regex(p).match(f) for f in files)
+        ]
+        assert not empty, (
+            "保護領域の glob 登録が 1 件もマッチしない(実体を失っているか、実体の追加前に"
+            "登録された可能性。A-18-1 は空振りする):\n"
+            + "\n".join(f"  - {p}\n    {_governance_line(p)}" for p in empty)
+        )
+
+    def test_governance_yaml_itself_is_protected(self) -> None:
+        """自己参照の固定: 本検査の入力(governance.yaml)自身が保護領域であること。"""
+        assert "config/governance.yaml" in _protected_paths()
+
+    def test_this_test_file_is_protected(self) -> None:
+        """不変条件テスト自体が保護領域であること(テストを外して統制を消せないようにする)。"""
+        assert "tests/test_ips.py" in _protected_paths()
+
+    def test_ci_workflow_is_protected(self) -> None:
+        """CI 定義が保護領域であること(独立役員審査 2026-08-04 中-5)。
+
+        不変条件テストを守っても、それを走らせる唯一の執行点(required status check)が
+        無防備なら統制は `Run tests` ステップの削除だけで静かに外れる。
+        """
+        assert ".github/workflows/ci.yml" in _protected_paths()
+
+    def test_ci_checkout_fetches_full_history(self) -> None:
+        """CI の checkout が全履歴を取ること(浅い clone では A-18 の実リポジトリ検査が落ちる)。"""
+        ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        assert "fetch-depth: 0" in ci

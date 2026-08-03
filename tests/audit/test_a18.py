@@ -15,6 +15,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from ryza.audit import a18
 
@@ -75,20 +76,20 @@ def repo(tmp_path: Path) -> tuple[Path, str]:
 
 
 def _run_a181(repo_path: Path, since: str | None):
-    """A-18-1 を DB 無しで実行し ``(違反, 検査数)`` を返す(トレーラ所見は別テストで見る)。"""
-    gov = a18.load_governance(repo_path)
-    violations, checked, _findings = a18.check_protected_commits(
-        repo_path, gov, since_commit=since
-    )
+    """A-18-1 を DB 無しで実行し ``(違反, 検査数)`` を返す(承継・所見は別ヘルパで見る)。"""
+    violations, _inherited, checked, _findings = _run_a181_full(repo_path, since)
     return violations, checked
+
+
+def _run_a181_full(repo_path: Path, since: str | None, conn=None):
+    """A-18-1 の全戻り値 ``(違反, 承継, 検査数, トレーラ所見)``。"""
+    gov = a18.load_governance(repo_path)
+    return a18.check_protected_commits(repo_path, gov, since_commit=since, conn=conn)
 
 
 def _run_a181_db(repo_path: Path, since: str | None, conn):
     """DB 接続つきの A-18-1(トレーラ実在照合あり)。``(違反, トレーラ所見)`` を返す。"""
-    gov = a18.load_governance(repo_path)
-    violations, _checked, findings = a18.check_protected_commits(
-        repo_path, gov, since_commit=since, conn=conn
-    )
+    violations, _inherited, _checked, findings = _run_a181_full(repo_path, since, conn)
     return violations, findings
 
 
@@ -210,6 +211,326 @@ def test_evil_merge_with_trailer_is_ok(repo):
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# A-18-1 PR 承継(2026-08-04 設計リード裁定)
+# ────────────────────────────────────────────────────────────────────────────
+APPROVED = "Approved: https://github.com/x/y/pull/9"
+
+
+def _merge_pr_with_evil_merge(r: Path, merge_message: str) -> tuple[str, str]:
+    """ブランチ内で「origin/main 統合の evil merge」を作り、PR マージで main へ取り込む。
+
+    実運用の worktree フロー(ブランチ作業中に origin/main を統合してコンフリクトを解消する)
+    を再現する。戻り値は (ブランチ内 evil merge の sha, main 側 PR マージの sha)。
+    """
+    base = _git(r, "rev-parse", "HEAD").strip()
+    _git(r, "checkout", "-q", "-b", "prfeature")
+    _commit(r, "docs/protected.md", "branch side\n", "docs: ブランチ側の保護領域変更")
+    _git(r, "checkout", "-q", "main")
+    _commit(r, "docs/protected.md", "main side\n", "docs: main 側\n\n" + APPROVED)
+    main_tip = _git(r, "rev-parse", "HEAD").strip()
+    _git(r, "checkout", "-q", "prfeature")
+    conflict = subprocess.run(
+        ["git", "-C", str(r), "merge", main_tip], capture_output=True, text=True, check=False
+    )
+    assert conflict.returncode != 0  # コンフリクトが起きていること
+    (r / "docs/protected.md").write_text("resolved: neither side\n", encoding="utf-8")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-m", "merge: origin/main をブランチへ統合(コンフリクト解消)")
+    evil = _git(r, "rev-parse", "HEAD").strip()
+    _git(r, "checkout", "-q", "main")
+    _git(r, "merge", "--no-ff", "-q", "prfeature", "-m", merge_message)
+    assert base  # 起点の記録(可読性のため)
+    return evil, _git(r, "rev-parse", "HEAD").strip()
+
+
+def test_pr_inheritance_covers_in_branch_evil_merge(repo):
+    """トレーラ有効な PR マージが持ち込んだブランチ内 evil merge は違反にならない。"""
+    r, since = repo
+    evil, merge = _merge_pr_with_evil_merge(
+        r, "Merge pull request #9 from k/feature\n\n" + APPROVED
+    )
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
+    assert violations == []
+    assert [i["commit"] for i in inherited] == [evil[:12]]
+    assert inherited[0]["merge"] == merge[:12]
+    assert inherited[0]["files"] == ["docs/protected.md"]
+
+
+def test_pr_inheritance_is_visible_in_report(repo):
+    """承継は黙って消さず、起点 PR ごとの集計行として報告に出す。"""
+    r, since = repo
+    evil, merge = _merge_pr_with_evil_merge(
+        r, "Merge pull request #9 from k/feature\n\n" + APPROVED
+    )
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [i["commit"] for i in result["inherited"]] == [evil[:12]]
+    field = next(
+        f for f in a18.build_alert_embed(result)["fields"] if f["name"].startswith("PR 承継で承認")
+    )
+    assert "1 コミット" in field["name"]
+    assert merge[:12] in field["value"] and "1 コミット" in field["value"]
+    # 件数だけでなく「何を免除したか」= 保護パスも出す(独立役員審査 2026-08-04 中-3)。
+    assert "docs/protected.md" in field["value"]
+
+
+def test_pr_inheritance_requires_trailer_on_the_merge(repo):
+    """トレーラの無い PR マージ配下の evil merge は従来どおり違反(初期 PR #56 型)。"""
+    r, since = repo
+    evil, _ = _merge_pr_with_evil_merge(r, "Merge pull request #9 from k/feature")
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
+    assert [v["commit"] for v in violations] == [evil[:12]]
+    assert "evil merge" in violations[0]["reason"]
+    assert inherited == []
+
+
+def test_pr_inheritance_requires_pr_merge_subject(repo):
+    """件名がマージ形式でない(= PR でない)統合は、トレーラがあっても承継の起点にしない。"""
+    r, since = repo
+    evil, _ = _merge_pr_with_evil_merge(r, "ローカルマージ(PR でない)\n\n" + APPROVED)
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
+    assert inherited == []
+    # evil merge に加え、ブランチ内の通常コミットも附則(b)の対象外になり違反として残る。
+    assert evil[:12] in [v["commit"] for v in violations]
+
+
+def test_first_parent_merge_itself_is_not_inherited(repo):
+    """first-parent 上のマージ自身の解消差分は承継の対象外(件名偽装の防御を維持)。
+
+    main 側で直接コンフリクト解消したマージ(= first-parent 上)は、トレーラを持つ別の PR の
+    配下に見えても承継しない。起点になれるのは自分より前の first-parent マージだけである。
+    """
+    r, since = repo
+    _merge_pr_with_evil_merge(r, "Merge pull request #9 from k/feature\n\n" + APPROVED)
+    _make_evil_merge(r, "Merge pull request #10 from k/other")  # トレーラなし・main 上
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
+    assert len(violations) == 1
+    assert "evil merge" in violations[0]["reason"]
+    assert len(inherited) == 1  # 先の PR #9 配下の承継は維持される
+
+
+def test_inheritance_does_not_cover_direct_main_commits(repo):
+    """main への直コミットは、後続 PR にトレーラがあっても承継されない。"""
+    r, since = repo
+    sha = _commit(r, "docs/protected.md", "v2\n", "docs: main への直コミット")
+    _merge_pr(r, "f1", "src/prot/ks.py", "x = 1\n", 11)
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
+    assert [v["commit"] for v in violations] == [sha[:12]]
+    assert inherited == []
+
+
+def test_octopus_merge_cannot_be_an_inheritance_origin(repo):
+    """octopus マージ(親3以上)は PR 件名+トレーラを付けても承継・附則(b)の起点にしない。
+
+    GitHub の PR マージは常に親2。octopus に PR 件名を付けると複数ブランチの内容を1つの
+    承認で通せてしまう(独立役員審査 2026-08-04 中-3 の PoC)。
+    """
+    r, since = repo
+    _git(r, "checkout", "-q", "-b", "o1")
+    a = _commit(r, "docs/protected.md", "a\n", "docs: o1 の保護領域変更")
+    _git(r, "checkout", "-q", "main")
+    _git(r, "checkout", "-q", "-b", "o2")
+    b = _commit(r, "src/prot/ks.py", "x = 1\n", "feat: o2 の保護領域変更")
+    _git(r, "checkout", "-q", "main")
+    _git(r, "merge", "--no-ff", "-q", "o1", "o2",
+         "-m", "Merge pull request #9 from k/octopus\n\n" + APPROVED)
+    assert len(_git(r, "log", "-1", "--format=%P").split()) == 3  # octopus であること
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
+    assert inherited == []
+    assert sorted(v["commit"] for v in violations) == sorted([a[:12], b[:12]])
+    assert all("親2" in v["reason"] for v in violations)
+
+
+def test_plain_branch_commits_are_not_counted_as_inherited(repo):
+    """従来どおり附則(b)で承認されるブランチ内の通常コミットは承継集計に載せない。
+
+    集計「PR 承継で承認: N」は『承継が無ければ違反になっていたコミット』だけを数える
+    (毎週の集計を実質的な件数に保つため)。
+    """
+    r, since = repo
+    _merge_pr(r, "f1", "src/prot/ks.py", "x = 1\n", 12)
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
+    assert violations == [] and inherited == []
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# A-18-1 既知違反の受容(acknowledged_findings — 独立役員審査 C-3)
+# ────────────────────────────────────────────────────────────────────────────
+def _acknowledge(r: Path, commit: str, paths: list[str]) -> None:
+    """一時リポジトリの governance.yaml に受容エントリを1件書き込む(コミットはしない)。"""
+    gov = yaml.safe_load(GOV_YAML)
+    gov["acknowledged_findings"] = [
+        {
+            "commit": commit,
+            "paths": paths,
+            "reason": "是正不能な歴史的 evil merge(テスト)",
+            "approval_ref": "https://github.com/x/y/pull/1",
+            "acknowledged_on": "2026-08-03",
+        }
+    ]
+    (r / "config" / "governance.yaml").write_text(
+        yaml.safe_dump(gov, allow_unicode=True), encoding="utf-8"
+    )
+
+
+def test_acknowledged_finding_is_reported_separately_not_counted(repo):
+    """受容済みは violations から外れるが、acknowledged として必ず残る(黙って消さない)。"""
+    r, since = repo
+    sha = _commit(r, "docs/protected.md", "v2\n", "docs: 是正不能な無承認変更")
+    _acknowledge(r, sha, ["docs/protected.md"])
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert result["violations"] == []
+    assert [a["commit"] for a in result["acknowledged"]] == [sha[:12]]
+    assert result["acknowledged"][0]["approval_ref"] == "https://github.com/x/y/pull/1"
+    # 別枠フィールドに件数と SHA が必ず載る。
+    embed = a18.build_alert_embed(result)
+    field = next(f for f in embed["fields"] if f["name"].startswith("受容済み既知違反"))
+    assert "1 件" in field["name"] and sha[:12] in field["value"]
+    # A-18-1 の警告フィールドは出ない(受容済みだけでは要対応にしない)。
+    assert not any("A-18-1 保護領域の無承認変更" in f["name"] for f in embed["fields"])
+
+
+def test_unacknowledged_finding_still_violation(repo):
+    """受容リストに載っていない違反は従来どおり違反として出る。"""
+    r, since = repo
+    acked = _commit(r, "docs/protected.md", "v2\n", "docs: 受容する変更")
+    other = _commit(r, "src/prot/ks.py", "x = 1\n", "feat: 受容しない変更")
+    _acknowledge(r, acked, ["docs/protected.md"])
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [v["commit"] for v in result["violations"]] == [other[:12]]
+    assert [a["commit"] for a in result["acknowledged"]] == [acked[:12]]
+
+
+def test_acknowledgement_with_wrong_sha_has_no_effect(repo):
+    """SHA が一致しない受容エントリは効かない(違反のまま)+ 陳腐化を notes で開示する。"""
+    r, since = repo
+    sha = _commit(r, "docs/protected.md", "v2\n", "docs: 無承認変更")
+    _acknowledge(r, "0" * 40, ["docs/protected.md"])
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [v["commit"] for v in result["violations"]] == [sha[:12]]
+    assert result["acknowledged"] == []
+    assert any("acknowledged_findings のエントリが一致する違反を持たない" in n
+               for n in result["notes"])
+
+
+def test_acknowledgement_with_wrong_paths_has_no_effect(repo):
+    """SHA が合っていてもパス集合が違えば効かない(将来の別の違反を巻き込まない)。"""
+    r, since = repo
+    sha = _commit(r, "docs/protected.md", "v2\n", "docs: 無承認変更")
+    _acknowledge(r, sha, ["src/prot/ks.py"])
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [v["commit"] for v in result["violations"]] == [sha[:12]]
+    assert result["acknowledged"] == []
+
+
+def test_acknowledgement_requires_full_path_set(repo):
+    """複数の保護パスに触れた違反は、その全パスを列挙した受容エントリでのみ受容される。"""
+    r, since = repo
+    (r / "docs").mkdir(exist_ok=True)
+    (r / "docs" / "protected.md").write_text("v2\n", encoding="utf-8")
+    sha = _commit(r, "src/prot/ks.py", "x = 1\n", "chore: 2つの保護パスに触れる無承認変更")
+    _acknowledge(r, sha, ["docs/protected.md"])  # 片方だけ → 効かない
+    partial = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [v["commit"] for v in partial["violations"]] == [sha[:12]]
+    _acknowledge(r, sha, ["src/prot/ks.py", "docs/protected.md"])  # 全部(順序は不問)
+    full = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert full["violations"] == []
+    assert len(full["acknowledged"]) == 1
+
+
+def test_incomplete_acknowledgement_entry_is_ignored(repo):
+    """commit か paths を欠くエントリは受容として効かせない(fail-safe = 違反のまま)。"""
+    r, since = repo
+    sha = _commit(r, "docs/protected.md", "v2\n", "docs: 無承認変更")
+    gov = yaml.safe_load(GOV_YAML)
+    gov["acknowledged_findings"] = [{"commit": sha}, {"paths": ["docs/protected.md"]}]
+    (r / "config" / "governance.yaml").write_text(
+        yaml.safe_dump(gov, allow_unicode=True), encoding="utf-8"
+    )
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [v["commit"] for v in result["violations"]] == [sha[:12]]
+
+
+def test_acknowledged_only_result_is_not_alerting():
+    """受容済みだけなら has_findings は False(週次の恒久的な赤を作らない)。"""
+    result = _result([], [])
+    result["acknowledged"] = [
+        {"commit": "abc123def456", "subject": "s", "files": ["CLAUDE.md"],
+         "reason": "r", "approval_ref": "https://x/1"}
+    ]
+    assert not a18.has_findings(result)
+    embed = a18.build_alert_embed(result)
+    assert "所見なし" in embed["title"]
+    # 所見なしでも受容の存在は隠さない。
+    assert any(f["name"].startswith("受容済み既知違反") for f in embed["fields"])
+
+
+def test_partition_acknowledged_is_pure():
+    """分割関数は単体でも使える(完全 SHA の一致・commit_full が無い場合は commit で突合)。"""
+    sha = "a" * 40
+    gov = {"acknowledged_findings": [{"commit": sha, "paths": ["CLAUDE.md"]}]}
+    v = {"commit": sha[:12], "commit_full": sha, "subject": "s",
+         "files": ["CLAUDE.md"], "reason": "r"}
+    unack, ack, notes = a18.partition_acknowledged([v], gov)
+    assert unack == [] and len(ack) == 1 and notes == []
+
+
+def test_short_sha_acknowledgement_is_invalid_and_disclosed():
+    """短縮 SHA のエントリは索引に入れず「無効」として notes 開示する(低-7)。"""
+    gov = {"acknowledged_findings": [{"commit": "abc123def456", "paths": ["CLAUDE.md"]}]}
+    v = {"commit": "abc123def456", "commit_full": "abc123def456" + "0" * 28,
+         "subject": "s", "files": ["CLAUDE.md"], "reason": "r"}
+    unack, ack, notes = a18.partition_acknowledged([v], gov)
+    assert len(unack) == 1 and ack == []
+    assert any("40 桁 hex の完全 SHA が必要" in n for n in notes)
+
+
+def test_incomplete_acknowledgement_entry_is_disclosed():
+    """commit / paths 欠落のエントリも黙って落とさず notes に出す(低-7)。"""
+    gov = {"acknowledged_findings": [{"commit": "b" * 40}, {"paths": ["CLAUDE.md"]}]}
+    _unack, _ack, notes = a18.partition_acknowledged([], gov)
+    assert sum("commit / paths のいずれかが欠落" in n for n in notes) == 2
+
+
+# ── 実リポジトリの受容記録(承認手続の固定)────────────────────────────────────
+def _real_governance() -> dict:
+    root = Path(__file__).resolve().parents[2]
+    return a18.load_governance(root)
+
+
+def test_real_acknowledged_findings_are_well_formed():
+    """受容エントリは commit(完全 SHA)・paths・理由・承認記録の参照・受容日を必ず持つ。"""
+    entries = _real_governance().get("acknowledged_findings") or []
+    assert entries, "既知違反の受容記録が空(機構の導線が消えていないか確認すること)"
+    for e in entries:
+        assert len(str(e["commit"])) == 40, f"完全 SHA でない受容エントリ: {e['commit']}"
+        assert e["paths"], f"paths が空: {e['commit']}"
+        assert str(e.get("reason", "")).strip(), f"受容理由が無い: {e['commit']}"
+        assert str(e.get("approval_ref", "")).strip(), f"承認記録の参照が無い: {e['commit']}"
+        assert str(e.get("acknowledged_on", "")).strip(), f"受容日が無い: {e['commit']}"
+
+
+def test_acknowledgement_registration_requires_approval():
+    """受容エントリの追加自体が承認手続を要する = 置き場所が保護領域であることの固定。
+
+    acknowledged_findings は config/governance.yaml にのみ置く。同ファイルが protected_areas に
+    登録されている限り、エントリ追加のコミットは A-18-1 の突合対象となり承認記録を要求される。
+    """
+    gov = _real_governance()
+    paths = [str(e["path"]) for e in gov["protected_areas"]]
+    assert a18.GOVERNANCE_PATH in paths
+    assert "src/ryza/audit/**" in paths  # 受容を実装する側のコードも保護領域
+
+
+def test_real_repo_acknowledged_findings_are_matched():
+    """実リポジトリの受容エントリが実在の違反に一致している(陳腐化していない)。"""
+    root = Path(__file__).resolve().parents[2]
+    result = a18.run_a18(root)
+    assert len(result["acknowledged"]) == len(_real_governance()["acknowledged_findings"])
+    assert not any("acknowledged_findings のエントリが一致する違反を持たない" in n
+                   for n in result["notes"])
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # A-18-1 Approved トレーラの実在照合(governance.current_decisions との突合)
 #
 # 「トレーラがある」で受理すると、代表が否認した承認を A-18 が承認として受理し、
@@ -297,6 +618,45 @@ def test_vetoed_decision_trailer_is_violation(repo, conn, run_id):
     assert len(violations) == 1
     assert "否認済み" in violations[0]["reason"]
     conn.rollback()
+
+
+def _merge_pr_with_evil_merge_trailer(r: Path, ref: str) -> tuple[str, str]:
+    """PR マージのトレーラに ``ref`` を書いた「ブランチ内 evil merge 付き PR」を作る。"""
+    return _merge_pr_with_evil_merge(
+        r, f"Merge pull request #9 from k/prfeature\n\nApproved: {ref}"
+    )
+
+
+def test_vetoed_pr_trailer_cannot_be_an_inheritance_origin(repo, conn, run_id):
+    """**承継 × 否認**: 否認済みの PR トレーラは承継の起点にならず、配下は違反のまま。
+
+    承継の起点判定を素の has_approval_trailer で行うと、この経路だけ否認照合を迂回して
+    「否認された PR の内容がブランチ丸ごと承認扱い」になる(2026-08-04 設計リード追達1)。
+    """
+    r, since = repo
+    url = "https://github.com/x/y/pull/301"
+    _deemed(conn, run_id, url)
+    evil, _merge = _merge_pr_with_evil_merge_trailer(r, url)
+    # 否認前: 承継が効き違反ゼロ。
+    violations, inherited, _checked, _f = _run_a181_full(r, since, conn)
+    assert violations == [] and [i["commit"] for i in inherited] == [evil[:12]]
+    assert inherited[0]["decision_verified"] is True
+    # 否認後: 起点が無効になり、配下の evil merge が違反として復活する。
+    _veto(conn, run_id, url)
+    violations_after, inherited_after, _c, _f2 = _run_a181_full(r, since, conn)
+    assert inherited_after == []
+    assert evil[:12] in [v["commit"] for v in violations_after]
+    conn.rollback()
+
+
+def test_inheritance_without_conn_is_disclosed(repo):
+    """conn なし(照合不能)では形式的有効性のみで承継し、notes に件数を開示する。"""
+    r, since = repo
+    evil, _merge = _merge_pr_with_evil_merge_trailer(r, "https://github.com/x/y/pull/302")
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [i["commit"] for i in result["inherited"]] == [evil[:12]]
+    assert result["inherited"][0]["decision_verified"] is False
+    assert any("decisions 照合なしの承継 1 件" in n for n in result["notes"])
 
 
 def test_pr_merge_does_not_rescue_a_vetoed_trailer(repo, conn, run_id):
@@ -494,18 +854,16 @@ def test_run_a18_with_conn_marks_refs_verified(repo, conn):
 def test_real_repo_trailers_resolve_without_conn():
     """実リポジトリの履歴で A-18-1 が壊れていない(conn 無しの従来経路)。
 
-    CI の浅い checkout(fetch-depth 1)では批准コミットが存在せず検査自体が
-    成立しないためスキップする(fetch-depth: 0 化は a18-ack-l1 ラインで対応)。
+    #78 は浅い clone(fetch-depth 1)で ValueError になる本テストを skip で回避していたが、
+    本ラインが ci.yml に ``fetch-depth: 0`` を入れて根本原因を消したため skip を外す
+    (skip のままだと CI が浅くなったとき実リポジトリ検査が黙って行われなくなる —
+    「沈黙を作らない」原則。tests/test_ips.py が fetch-depth: 0 の存在自体を固定している)。
     """
     root = Path(__file__).resolve().parents[2]
     gov = a18.load_governance(root)
-    try:
-        violations, checked, findings = a18.check_protected_commits(root, gov)
-    except ValueError as exc:
-        if "発効基準コミット" in str(exc):
-            pytest.skip(f"浅い clone のため実リポジトリ検査不能: {exc}")
-        raise
+    violations, inherited, checked, findings = a18.check_protected_commits(root, gov)
     assert isinstance(violations, list) and checked >= 0 and isinstance(findings, list)
+    assert isinstance(inherited, list)
 
 
 # ────────────────────────────────────────────────────────────────────────────
