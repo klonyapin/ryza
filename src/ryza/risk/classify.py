@@ -55,9 +55,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import sys
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -424,17 +426,81 @@ class CuratedUniverse:
     criterion: str
     manages_tags: frozenset[str]
     entries: tuple[CuratedEntry, ...]
-    approved_at: str
+    approved_at: date
     approved_by: str
+    content_sha256: str
 
     @property
     def source(self) -> str:
-        """``upsert_classification`` に渡す出所(監査で config の版まで辿れる形)。"""
-        return f"curated:{self.name}:v{self.version}"
+        """``upsert_classification`` に渡す出所(監査で config の版と**内容**まで辿れる形)。
+
+        版番号だけでは、同じ ``v1`` のまま銘柄を差し替えた 2 つの状態を履歴から区別
+        できない(審査 C-25)。内容ハッシュの先頭を含めることで、適用済みのリストを
+        監査時に一意に復元できる。
+        """
+        return f"curated:{self.name}:v{self.version}:{self.content_sha256[:12]}"
 
 
 class CuratedUniverseError(ValueError):
-    """curated ユニバース定義が不正(必須項目の欠落・重複・語彙外タグ)。"""
+    """curated ユニバース定義が不正(必須項目の欠落・重複・語彙外タグ・内容ハッシュ不一致)。"""
+
+
+# 承認者として受け付ける唯一の値。curated タグ付与はマンデートの universe 語彙に属する
+# 母集団を実際に埋める操作であり、統制上はマンデート変更と同格である(審査 C-24)。
+# 承認できるのは代表(投資委員会)だけで、起草者が自分で名乗ることはできない。
+CURATED_APPROVER = "representative"
+
+
+def curated_content_digest(criterion: str, entries: list[dict[str, Any]]) -> str:
+    """承認対象の内容(選定基準+銘柄・タグ・根拠)の sha256(審査 C-25)。
+
+    ハッシュに含めるのは「承認したときに読んだもの」である。銘柄だけでなく
+    ``criterion`` と ``rationale`` も含めるのは、リストが同じでも選定基準や根拠が
+    書き換われば別の承認対象だからである。YAML のキー順・空白・コメントには依存
+    させない(正規化してから取る)。
+    """
+    canonical = [
+        [
+            str(e.get("symbol") or "").strip(),
+            sorted(str(t) for t in (e.get("tags") or ())),
+            str(e.get("rationale") or "").strip(),
+        ]
+        for e in entries
+    ]
+    canonical.sort(key=lambda row: row[0])
+    payload = json.dumps(
+        [criterion.strip(), canonical], ensure_ascii=False, separators=(",", ":")
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _require_approval(filename: str, raw: dict[str, Any]) -> date:
+    """承認欄を検査して承認日を返す(空・形式不正・承認者違いはすべて拒否 — 審査 C-24)。"""
+    approved_at = raw.get("approved_at")
+    approved_by = raw.get("approved_by")
+    if not approved_at or not approved_by:
+        raise CuratedUniverseError(
+            f"{filename}: 未承認(approved_at / approved_by が空)。curated タグは FM の"
+            "売買母集団を広げるため、承認記録の無いリストは反映しない"
+        )
+    if isinstance(approved_at, datetime):
+        parsed = approved_at.date()
+    elif isinstance(approved_at, date):
+        parsed = approved_at
+    else:
+        try:
+            parsed = date.fromisoformat(str(approved_at).strip())
+        except ValueError as exc:
+            raise CuratedUniverseError(
+                f"{filename}: approved_at {approved_at!r} が ISO 日付ではない"
+                "(自由文は承認日として使えない)"
+            ) from exc
+    if str(approved_by).strip() != CURATED_APPROVER:
+        raise CuratedUniverseError(
+            f"{filename}: approved_by は {CURATED_APPROVER!r} 固定(承認できるのは代表のみ)"
+            f"。{approved_by!r} は受け付けない"
+        )
+    return parsed
 
 
 def load_curated_universe(path: Path | str) -> CuratedUniverse:
@@ -444,20 +510,33 @@ def load_curated_universe(path: Path | str) -> CuratedUniverse:
     ``rationale``(なぜ基準を満たすか)を必須にする。基準そのもの(``criterion``)も
     ファイル単位で必須 — 基準を書かずに列挙されたリストは監査できない。
 
-    **未承認(``approved_at`` が null)のファイルは拒否する**。curated タグの付与は
-    「その FM が売買してよい母集団を広げる」操作であり、決定論ルールが安全側に倒して
-    付けなかったタグを人手で足す唯一の口である。承認記録の無いリストが実行経路に
-    入れるなら、fail-closed(タグを緩めて埋めない)は運用規約でしかなくなる。
+    **未承認のファイルは拒否する**。curated タグの付与は「その FM が売買してよい母集団を
+    広げる」操作であり、決定論ルールが安全側に倒して付けなかったタグを人手で足す唯一の
+    口である。承認記録の無いリストが実行経路に入れるなら、fail-closed(タグを緩めて
+    埋めない)は運用規約でしかなくなる。承認検査は3段(審査 C-24 / C-25):
+
+    - ``approved_at`` は **ISO 日付としてパースできること**(「いつか」は承認ではない)
+    - ``approved_by`` は ``representative`` **固定**(起草者が自分で名乗れない)
+    - ``content_sha256`` が**実内容と一致**すること(承認したリストと適用するリストの同一性)
+
+    なお承認の**正**は config/governance.yaml の protected_areas 経由の承認記録
+    (``Approved:`` トレーラ・A-18-1 の突合)であり、本ファイル内の3項目はその写しである。
+    写しだけでは「自分で承認済みと書く」を止められないため、``config/universe/**`` を
+    保護領域に登録して両輪にしている。
     """
     p = Path(path)
     raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
     for key in ("name", "version", "criterion", "manages_tags", "entries"):
         if not raw.get(key):
             raise CuratedUniverseError(f"{p.name}: {key} は必須")
-    if not raw.get("approved_at") or not raw.get("approved_by"):
+    approved_at = _require_approval(p.name, raw)
+    digest = curated_content_digest(str(raw["criterion"]), list(raw["entries"]))
+    declared = str(raw.get("content_sha256") or "").strip().lower()
+    if declared != digest:
         raise CuratedUniverseError(
-            f"{p.name}: 未承認(approved_at / approved_by が空)。curated タグは FM の"
-            "売買母集団を広げるため、承認記録の無いリストは反映しない"
+            f"{p.name}: content_sha256 が実内容と一致しない(宣言 {declared or '(空)'} / "
+            f"実測 {digest})。承認したリストと適用するリストが同じであることを"
+            "版番号だけでは示せない — 内容を変えたらハッシュと version を更新して再承認する"
         )
     manages = frozenset(str(t) for t in raw["manages_tags"])
     entries: list[CuratedEntry] = []
@@ -493,8 +572,9 @@ def load_curated_universe(path: Path | str) -> CuratedUniverse:
         criterion=str(raw["criterion"]),
         manages_tags=manages,
         entries=tuple(entries),
-        approved_at=str(raw["approved_at"]),
-        approved_by=str(raw["approved_by"]),
+        approved_at=approved_at,
+        approved_by=CURATED_APPROVER,
+        content_sha256=digest,
     )
 
 
@@ -681,6 +761,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
 
 
 __all__ = [
+    "CURATED_APPROVER",
     "CURATED_UNIVERSE_DIR",
     "E6_NO_HISTORY_NOTE",
     "E6_UNCOVERED_NOTE",
@@ -694,6 +775,7 @@ __all__ = [
     "classification_pit_status",
     "classify_current_instruments",
     "classify_instrument",
+    "curated_content_digest",
     "history_coverage_since",
     "load_classification",
     "load_classification_at",

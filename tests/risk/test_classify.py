@@ -29,6 +29,7 @@ from ryza.risk.classify import (
     classification_pit_status,
     classify_current_instruments,
     classify_instrument,
+    curated_content_digest,
     history_coverage_since,
     load_classification,
     load_classification_at,
@@ -451,25 +452,40 @@ def test_null_asset_class_is_allowed_and_means_unclassified(conn, run_id):
     assert loaded is not None and loaded.asset_class is None
 
 
-def _backfill_statements() -> list[str]:
-    """0028 のバックフィル UPDATE 文(migration ファイルから実物を取り出す)。"""
+def _backfill_section() -> str:
+    """0028 のバックフィル区間(マーカー間)を**実物として**取り出す。
+
+    区間には解除するトリガの**名前指定**・DO ブロック・自己検査まで含まれる。文単位で
+    抜くのをやめたのは、DO ブロック内の `;` で壊れるうえ、「解除の粒度」「解除の戻し」
+    「自己検査」という C-22 の要点がテストの外に出てしまうためである。
+    """
     sql = _MIGRATION_0028.read_text(encoding="utf-8")
-    body = "\n".join(
-        line for line in sql.splitlines() if not line.strip().startswith("--")
+    start = sql.index("-- >>> BACKFILL BEGIN") + len("-- >>> BACKFILL BEGIN")
+    end = sql.index("-- <<< BACKFILL END")
+    section = sql[start:end]
+    assert "DISABLE TRIGGER instrument_classification_history_no_mutation" in section, (
+        "解除は名前指定の1本に限る(審査 C-22)"
     )
-    statements = [
-        f"{s.strip()};" for s in body.split(";") if s.strip().upper().startswith("UPDATE")
-    ]
-    assert len(statements) == 2, "0028 の UPDATE 文は現在値表と履歴表の2文"
-    return statements
+    assert "DISABLE TRIGGER USER" not in section, "表の全トリガを落としてはならない"
+    return section
+
+
+def _backfill_note(conn, instrument_id: int) -> list[str | None]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT asset_class, asset_class_backfill_note "  # noqa: S608
+            f"FROM {_HISTORY_TABLE} WHERE instrument_id = %s ORDER BY history_id",
+            (instrument_id,),
+        )
+        return cur.fetchall()
 
 
 def test_backfill_derives_asset_class_from_the_instrument_master(conn, run_id):
     """**0028 のバックフィル**: 既存行を現行の導出ロジックで埋める(migration の実物を実行)。
 
     テスト DB は新規作成のため、migration 適用時には埋める対象が無い。導出ロジック自体を
-    回帰にするため、asset_class が NULL の行を作ってから **migration ファイルの UPDATE 文を
-    そのまま**流す。履歴表は追記オンリーのため、migration と同じくトリガを一時的に外す。
+    回帰にするため、asset_class が NULL の行を作ってから **migration ファイルのバックフィル
+    区間をそのまま**流す。
     """
     tse = _insert_instrument(conn, symbol="BF1.T", asset_class="equity", venue="TSE")
     us = _insert_instrument(conn, symbol="BF2", asset_class="equity", venue="NASDAQ")
@@ -481,12 +497,8 @@ def test_backfill_derives_asset_class_from_the_instrument_master(conn, run_id):
         )
         assert load_classification(conn, inst).asset_class is None
 
-    current_sql, history_sql = _backfill_statements()
     with conn.cursor() as cur:
-        cur.execute(current_sql)
-        cur.execute(f"ALTER TABLE {_HISTORY_TABLE} DISABLE TRIGGER USER")
-        cur.execute(history_sql)
-        cur.execute(f"ALTER TABLE {_HISTORY_TABLE} ENABLE TRIGGER USER")
+        cur.execute(_backfill_section())
 
     assert load_classification(conn, tse).asset_class == "equity_jp"
     assert load_classification(conn, us).asset_class == "equity_us"
@@ -495,19 +507,129 @@ def test_backfill_derives_asset_class_from_the_instrument_master(conn, run_id):
     assert at is not None and at.asset_class == "equity_jp"
 
 
+def test_backfill_marks_reconstructed_rows(conn, run_id):
+    """**審査 C-23**: 再構成した値は行から識別できる(コメントではなくデータで区別)。
+
+    分類できなかった行にも印が付く — 「0028 が見て分類できなかった」と「0028 以後に
+    書かれた行」は別物であり、後者だけが note NULL であるべきだからである。
+    """
+    tse = _insert_instrument(conn, symbol="BN1.T", asset_class="equity", venue="TSE")
+    lse = _insert_instrument(conn, symbol="BN2", asset_class="equity", venue="LSE")
+    for inst in (tse, lse):
+        upsert_classification(
+            conn, inst, replace(_tagged("jp_equity_cash"), asset_class=None),
+            run_id=run_id, source="curated",
+        )
+    with conn.cursor() as cur:
+        cur.execute(_backfill_section())
+
+    (cls, note), = _backfill_note(conn, tse)
+    assert cls == "equity_jp" and note is not None and "0028" in note
+    (cls_lse, note_lse), = _backfill_note(conn, lse)
+    assert cls_lse is None and note_lse is not None
+
+    # 0028 以後に通常経路で書かれた行には印が付かない(区別が成立している)。
+    upsert_classification(
+        conn, tse, _tagged("jp_equity_cash", "liquid_equity"),
+        run_id=run_id, as_of=datetime.now(UTC),
+    )
+    assert _backfill_note(conn, tse)[-1] == ("equity_jp", None)
+
+
+def test_backfill_restores_the_append_only_guard(conn, run_id):
+    """**審査 C-22**: 区間を通したあと、当該表の全トリガが有効に戻っている。
+
+    自己検査 DO ブロックが区間内にあるため、戻し忘れは migration 自体の失敗になる
+    (この実行が例外なく終わること自体が検査の成功)。ここでは結果も直接確認する。
+    """
+    inst = _insert_instrument(conn, symbol="BG1.T", asset_class="equity", venue="TSE")
+    upsert_classification(
+        conn, inst, replace(_tagged("jp_equity_cash"), asset_class=None),
+        run_id=run_id, source="curated",
+    )
+    with conn.cursor() as cur:
+        cur.execute(_backfill_section())
+        cur.execute(
+            "SELECT tgname, tgenabled FROM pg_trigger "
+            f"WHERE tgrelid = '{_HISTORY_TABLE}'::regclass AND NOT tgisinternal",  # noqa: S608
+        )
+        states = dict(cur.fetchall())
+    assert states and all(state == "O" for state in states.values()), states
+    # ガードが実際に効いている(区間の後で UPDATE が拒まれる)。
+    _expect_rejected(
+        conn,
+        f"UPDATE {_HISTORY_TABLE} SET universe_tags = '{{}}' "  # noqa: S608
+        f"WHERE instrument_id = {inst}",
+        psycopg.errors.RaiseException,
+    )
+
+
+def test_backfill_is_point_in_time_across_scd2_versions(conn, run_id):
+    """**審査の敵対的プローブと同型**: venue が変わった銘柄で当時の資産クラスを再構成する。
+
+    NASDAQ → TSE に上場替えした銘柄では、旧版期間の履歴行は ``equity_us`` でなければ
+    ならない。``valid_to IS NULL``(= 現行版)を使う look-ahead 実装ならここが
+    ``equity_jp`` になって落ちる — 単一版の銘柄しか使わないテストでは検出できない。
+    """
+    t_old = datetime.now(UTC) - timedelta(days=60)
+    t_new = datetime.now(UTC) - timedelta(days=10)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO market.instruments
+                (symbol, asset_class, venue, currency, valid_from, valid_to)
+            VALUES ('SCD1', 'equity', 'NASDAQ', 'USD', %s, %s)
+            RETURNING instrument_id
+            """,
+            (t_old - timedelta(days=30), t_new),
+        )
+        inst = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO market.instruments
+                (instrument_id, symbol, asset_class, venue, currency, valid_from, valid_to)
+            OVERRIDING SYSTEM VALUE
+            VALUES (%s, 'SCD1.T', 'equity', 'TSE', 'JPY', %s, NULL)
+            """,
+            (inst, t_new),
+        )
+    # 旧版期間と新版期間に1行ずつ、asset_class 未設定の履歴を置く。
+    for stamp in (t_old, t_new + timedelta(days=1)):
+        upsert_classification(
+            conn, inst, replace(_tagged("jp_equity_cash"), asset_class=None),
+            run_id=run_id, source=f"curated:{stamp.isoformat()}", as_of=stamp,
+        )
+
+    with conn.cursor() as cur:
+        cur.execute(_backfill_section())
+
+    rows = _backfill_note(conn, inst)
+    assert [r[0] for r in rows] == ["equity_us", "equity_jp"], rows
+    assert all(r[1] is not None for r in rows)
+    # 履歴行を直接見るのは意図的である。``load_classification_at`` は bitemporal
+    # (created_at < 判断時点の当日終端)のため、今このテストで書いた行は 60 日前の
+    # 判断時点からは**見えないのが正しい** — 再構成の正しさはここでは行の値で見る。
+
+
 # ── curated ユニバース(流動性タグの供給)─────────────────────────────────────
 def _write_universe(tmp_path, entries, **overrides) -> Path:
-    """テスト用の curated ユニバース YAML を書き出す(同一パスを上書きする)。"""
+    """テスト用の curated ユニバース YAML を書き出す(同一パスを上書きする)。
+
+    ``content_sha256`` は既定で実内容から計算する(``overrides`` で壊せる)。
+    """
     doc = {
         "name": "test-liquid",
         "version": "1",
         "criterion": "テスト用の基準",
         "manages_tags": ["liquid_equity"],
         "approved_at": "2026-08-04",
-        "approved_by": "test",
+        "approved_by": "representative",
         "entries": entries,
     }
     doc.update(overrides)
+    doc.setdefault(
+        "content_sha256", curated_content_digest(str(doc["criterion"]), list(entries))
+    )
     path = tmp_path / "universe.yaml"
     path.write_text(yaml.safe_dump(doc, allow_unicode=True), encoding="utf-8")
     return path
@@ -529,6 +651,52 @@ def test_loader_requires_approval(tmp_path):
     path = _write_universe(tmp_path, [_entry("7203.T")], approved_at=None)
     with pytest.raises(CuratedUniverseError, match="未承認"):
         load_curated_universe(path)
+
+
+def test_loader_rejects_freeform_approval_date(tmp_path):
+    """**審査 C-24**: approved_at は ISO 日付。「いつか」は承認日ではない。"""
+    path = _write_universe(tmp_path, [_entry("7203.T")], approved_at="いつか")
+    with pytest.raises(CuratedUniverseError, match="ISO 日付"):
+        load_curated_universe(path)
+
+
+def test_loader_rejects_self_declared_approver(tmp_path):
+    """**審査 C-24**: 承認できるのは代表のみ(起草者が自分で名乗れない)。"""
+    path = _write_universe(tmp_path, [_entry("7203.T")], approved_by="dev-lead")
+    with pytest.raises(CuratedUniverseError, match="representative"):
+        load_curated_universe(path)
+
+
+def test_loader_detects_content_swap_under_the_same_version(tmp_path):
+    """**審査 C-25**: 同じ v1 のまま中身を差し替えると読み込みが失敗する。"""
+    original = [_entry("7203.T")]
+    path = _write_universe(tmp_path, original)
+    stale = yaml.safe_load(path.read_text(encoding="utf-8"))["content_sha256"]
+    swapped = _write_universe(
+        tmp_path, [_entry("9984.T")], content_sha256=stale
+    )
+    with pytest.raises(CuratedUniverseError, match="content_sha256"):
+        load_curated_universe(swapped)
+
+
+def test_source_carries_the_content_hash(tmp_path):
+    """出所に内容ハッシュが入る(適用済みリストを監査で一意に復元できる)。"""
+    universe = load_curated_universe(_write_universe(tmp_path, [_entry("7203.T")]))
+    assert universe.source.startswith("curated:test-liquid:v1:")
+    assert universe.source.endswith(universe.content_sha256[:12])
+
+
+def test_content_digest_ignores_key_order_and_tag_order(tmp_path):
+    """ハッシュは内容に依存し、YAML の書式には依存しない(無用な再承認を強いない)。"""
+    a = curated_content_digest("基準", [{"symbol": "A", "tags": ["x", "y"], "rationale": "r"}])
+    b = curated_content_digest("基準", [{"rationale": "r", "tags": ["y", "x"], "symbol": "A"}])
+    assert a == b
+    assert a != curated_content_digest(
+        "別の基準", [{"symbol": "A", "tags": ["x", "y"], "rationale": "r"}]
+    )
+    assert a != curated_content_digest(
+        "基準", [{"symbol": "A", "tags": ["x", "y"], "rationale": "別の根拠"}]
+    )
 
 
 def test_loader_rejects_tags_outside_manages(tmp_path):
@@ -557,8 +725,25 @@ def test_shipped_jim_universe_is_wellformed_but_unapproved():
     assert all(e.get("rationale") for e in raw["entries"])
     assert all(e["tags"] == ["liquid_equity"] for e in raw["entries"])
     assert len({e["symbol"] for e in raw["entries"]}) == len(raw["entries"])
+    # 宣言ハッシュは実内容と一致している(承認時にこの版が固定される — 審査 C-25)。
+    assert raw["content_sha256"] == curated_content_digest(
+        str(raw["criterion"]), list(raw["entries"])
+    )
     with pytest.raises(CuratedUniverseError, match="未承認"):
         load_curated_universe(path)
+
+
+def test_universe_config_is_a_protected_area():
+    """**審査 C-24**: config/universe/** が保護領域に登録されている(A-18-1 の突合対象)。
+
+    承認の正はファイル内の approved_by ではなく `Approved:` トレーラ側にある。登録が
+    外れると「銘柄を足すこと」と「承認済みと書くこと」を無トレーラで同時に行える。
+    """
+    governance = yaml.safe_load(
+        (_REPO_ROOT / "config" / "governance.yaml").read_text(encoding="utf-8")
+    )
+    entries = {p["path"]: p["area"] for p in governance["protected_areas"]}
+    assert entries.get("config/universe/**") == "mandates"
 
 
 def test_curated_tag_is_granted_and_recorded_in_history(conn, run_id, tmp_path):

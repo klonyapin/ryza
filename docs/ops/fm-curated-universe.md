@@ -15,8 +15,23 @@
 1. **基準を決める**(`criterion`)。何をもって流動性が高いとするかを、後から機械検証できる形で書く。実測が使えない段階では代理基準でよいが、代理であることと置換課題を明記する
 2. **銘柄を列挙する**(`entries`)。各行に `rationale`(なぜ基準を満たすか)を書く。ローダは `rationale` の無い行を拒否する
 3. **`manages_tags` を宣言する**。このファイルが正であるタグの集合。config から外れた銘柄のタグは反映時に**剥がされる**(付与だけを config 駆動にすると「config が正」が嘘になる)
-4. **承認を得る**。`approved_at` / `approved_by` が空のファイルはローダが拒否する。マンデート自体の変更ではないため定款第3条の3専決には当たらないが、売買母集団を決める設定であるため記録を残す
-5. **反映する**
+4. **内容ハッシュを更新する**。`content_sha256` は `criterion` と全エントリ(symbol・tags・rationale)の正規化ハッシュで、実内容と一致しなければローダが拒否する。同じ `version` のまま中身を差し替えられないようにするための固定である
+
+   ```
+   uv run python -c "import yaml,pathlib;from ryza.risk.classify import curated_content_digest as d;\
+   r=yaml.safe_load(pathlib.Path('config/universe/jim-curated.yaml').read_text());\
+   print(d(r['criterion'], r['entries']))"
+   ```
+
+5. **承認を得る**。検査は3段で、どれか1つでも欠けるとローダが拒否する:
+
+   - `approved_at` が **ISO 日付**としてパースできること(自由文は承認日にならない)
+   - `approved_by` が **`representative` 固定**(起草者が自分で名乗れない)
+   - `content_sha256` が実内容と一致すること
+
+   ただし**承認の正はファイル内の文字列ではない**。`config/universe/**` は `config/governance.yaml` の `protected_areas`(area: mandates)に登録されており、変更コミットには `Approved:` トレーラが要る(A-18-1 が突合する)。YAML の3項目はその写しであり、両輪で「銘柄を足すこと」と「承認済みと書くこと」を同一 PR・無トレーラで行えないようにしている。マンデート自体の変更ではないため定款第3条の3専決には当たらない
+
+6. **反映する**
 
    ```
    uv run python -m ryza.risk.classify --curated-universe config/universe/jim-curated.yaml --dry-run  # 読み込み検証のみ
@@ -28,7 +43,7 @@
    - `unresolved`: 銘柄マスタ(`market.instruments`)に存在しない symbol。取込前の銘柄を先に curate できる一方、綴り間違いを黙って飲み込まないため件数と symbol を返す。**毎回ゼロであることを確認する**
    - `unclassifiable`: ルール分類も既存分類も無い銘柄。タグだけの分類行は作らない(商品・単元の無い分類はゲートで block されるだけ)
 
-6. **反映を確認する**
+7. **反映を確認する**
 
    ```sql
    SELECT c.instrument_id, i.symbol, c.universe_tags, c.asset_class, c.source, c.as_of
@@ -46,5 +61,5 @@
 
 ## 改訂
 
-- 基準の変更、または銘柄の追加・削除は `version` を上げて再承認する。`source` に版が入る(`curated:jim-liquid-equity:v1`)ため、どの版で付いたタグかは履歴から辿れる
+- 基準の変更、または銘柄の追加・削除は `version` を上げ、`content_sha256` を再計算して再承認する。`source` には版と内容ハッシュの両方が入る(`curated:jim-liquid-equity:v1:69827e5059ef`)ため、**同じ v1 の異なる内容**も履歴から区別でき、適用済みリストを監査で一意に復元できる
 - 代理基準を使っている間は、**指数の定期見直しのたびに突き合わせる**。追随を忘れると「かつて流動性が高かった銘柄」を持ち続けることになる

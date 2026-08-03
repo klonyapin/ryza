@@ -37,10 +37,18 @@
 #   entries が当時の日経225 構成銘柄であることを必ず突き合わせること**。本ファイルは
 #   その時点の写しであり、日経225 の正ではない
 # - approved_at が null の間、ローダは読み込みを拒否する(未承認のリストでユニバースを
-#   広げない)。承認は投資委員会(ユーザー)。マンデート自体の変更ではないため定款第3条の
-#   3専決には当たらないが、Jim が売買できる母集団を決める設定であるため記録を残す
+#   広げない)。承認は投資委員会(代表)。マンデート自体の変更ではないため定款第3条の
+#   3専決には当たらないが、Jim が売買できる母集団を決める設定であるため記録を残す。
+#   本ファイルは config/governance.yaml の protected_areas(area: mandates)に登録されて
+#   おり、変更コミットには `Approved:` トレーラが要る(承認の正はそちら — 審査 C-24)
 # - **銘柄を1行足すことは「Jim が売れる銘柄を1つ増やす」こと**である。rationale の無い
 #   エントリはローダが拒否する
+# - content_sha256 は criterion + 全エントリ(symbol・tags・rationale)の正規化ハッシュ。
+#   1文字でも変えると読み込みが失敗するので、**内容を変えたら version と併せて更新し、
+#   再承認する**(同じ v1 のまま中身を差し替えられないようにするため — 審査 C-25)。
+#   再計算: uv run python -c "import yaml,pathlib;from ryza.risk.classify import
+#   curated_content_digest as d;r=yaml.safe_load(pathlib.Path('config/universe/jim-curated.yaml')
+#   .read_text());print(d(r['criterion'], r['entries']))"
 
 name: jim-liquid-equity
 version: "1"
@@ -49,9 +57,13 @@ criterion: >-
   売買代金の実測(直近60営業日中央値)が整備されるまでの代理基準。
 manages_tags: [liquid_equity]
 
-# 承認記録(null の間は反映されない)。
+# 承認記録(null の間は反映されない)。approved_at は ISO 日付、approved_by は
+# 'representative' 固定(起草者が自分で名乗れない — 審査 C-24)。
 approved_at: null
 approved_by: null
+
+# criterion + entries の正規化 sha256(内容と版の紐付け — 審査 C-25)。
+content_sha256: "69827e5059efb0215d91216cf7df292f6f055efe4478158cd040c7cf31045921"
 
 entries:
   # 輸送用機器

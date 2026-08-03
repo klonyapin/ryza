@@ -390,14 +390,32 @@ def test_open_instruments_lists_positions_of_the_fm(conn, run):
 @pytest.mark.parametrize(
     "argv",
     [
-        ["--quarantine", "1"],                       # --reason 欠落
-        ["--quarantine", "1", "--reason", "x"],      # --by 欠落
-        ["--quarantine", "1", "--show", "1"],        # モードの同時指定
-        [],                                          # モードの指定なし
+        ["--quarantine", "1"],                                   # --reason 欠落
+        ["--quarantine", "1", "--reason", "x"],                  # --by 欠落
+        ["--quarantine", "1", "--reason", "x", "--by", "a"],     # --confirmed-by 欠落
+        # --yes でも二者確認は省けない(審査 C-26)。
+        ["--quarantine", "1", "--reason", "x", "--by", "a", "--yes"],
+        # 同一人物の二重記名は二者確認ではない。
+        ["--quarantine", "1", "--reason", "x", "--by", "a", "--confirmed-by", "a"],
+        ["--quarantine", "1", "--show", "1"],                    # モードの同時指定
+        [],                                                      # モードの指定なし
     ],
 )
 def test_cli_rejects_incomplete_invocations(argv):
-    """理由・実施主体を欠いた検疫は CLI が受け付けない(手動 SQL との差はここ)。"""
+    """理由・二者確認を欠いた検疫は CLI が受け付けない(手動 SQL との差はここ)。"""
     with pytest.raises(SystemExit) as exc:
         theses_mod.main(argv)
     assert exc.value.code == 2  # argparse のエラー終了
+
+
+def test_two_person_actor_records_both_names():
+    """**審査 C-26**: 二者確認をコードで強制し、記録にも2名を残す。"""
+    assert theses_mod.two_person_actor("dev-lead", "auditor") == (
+        "by=dev-lead; confirmed_by=auditor"
+    )
+    with pytest.raises(ThesisError, match="--confirmed-by は必須"):
+        theses_mod.two_person_actor("dev-lead", "  ")
+    with pytest.raises(ThesisError, match="--by は必須"):
+        theses_mod.two_person_actor("", "auditor")
+    with pytest.raises(ThesisError, match="同一"):
+        theses_mod.two_person_actor("dev-lead", "dev-lead")

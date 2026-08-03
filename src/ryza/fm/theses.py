@@ -539,13 +539,36 @@ def _open_instruments(conn: psycopg.Connection, fm: str) -> list[int]:
         return sorted(int(r[0]) for r in cur.fetchall())
 
 
+def two_person_actor(by: str | None, confirmed_by: str | None) -> str:
+    """二者確認の実施主体を組み立てる(空・同一値は ``ThesisError`` — 審査 C-26)。
+
+    runbook は「設計リード + 監査の二者確認」を求めているが、宣言だけでは強制にならない
+    — 誤検疫は解除できないため、二者であることは**コードが要求する**必要がある。
+    同一値を拒むのは、1人が両方の欄に自分を書けば二者確認が形骸化するためである。
+    """
+    first = (by or "").strip()
+    second = (confirmed_by or "").strip()
+    if not first:
+        raise ThesisError("--by は必須(検疫を実施した者)")
+    if not second:
+        raise ThesisError(
+            "--confirmed-by は必須(runbook の二者確認 — 設計リードと監査の2名)"
+        )
+    if first == second:
+        raise ThesisError(
+            f"--by と --confirmed-by が同一({first!r})。二者確認は別人でなければ意味がない"
+        )
+    return f"by={first}; confirmed_by={second}"
+
+
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行パス
     """CLI: 提案の検疫(表示 → 確認 → 登録 → 影響と件数の再表示)。
 
-    ``uv run python -m ryza.fm.theses --quarantine <thesis_id> --reason "..." --by "..."``
+    ``uv run python -m ryza.fm.theses --quarantine <id> --reason "..." --by A --confirmed-by B``
 
-    ``--show`` は表示のみ(検疫しない)。``--yes`` は確認プロンプトを省く — 対話端末の
-    無い環境向けだが、**runbook は二者確認を求めているので通常運用では使わない**。
+    ``--show`` は表示のみ(検疫しない)。``--yes`` は thesis_id 再入力のプロンプトを省く
+    (対話端末の無い環境向け)が、**二者確認は省けない** — ``--by`` と ``--confirmed-by``
+    は常に必須で、同一値は拒否する(審査 C-26)。
     """
     parser = argparse.ArgumentParser(
         description="FM 提案の検疫(手順: docs/ops/fm-quarantine-runbook.md)"
@@ -554,8 +577,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
     parser.add_argument("--show", type=int, metavar="THESIS_ID", help="内容の表示のみ")
     parser.add_argument("--stats", action="store_true", help="検疫件数の表示のみ")
     parser.add_argument("--reason", help="検疫の理由(何が汚染したか — 必須)")
-    parser.add_argument("--by", dest="quarantined_by", help="実施主体(二者の氏名/役割)")
-    parser.add_argument("--yes", action="store_true", help="確認プロンプトを省く")
+    parser.add_argument("--by", dest="quarantined_by", help="実施者(必須)")
+    parser.add_argument(
+        "--confirmed-by", dest="confirmed_by", help="確認者(必須・--by と別人)"
+    )
+    parser.add_argument(
+        "--yes", action="store_true", help="thesis_id 再入力を省く(二者確認は省けない)"
+    )
     args = parser.parse_args(argv)
 
     from ryza.db.conn import connect
@@ -588,8 +616,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
     thesis_id = args.quarantine
     if not (args.reason or "").strip():
         parser.error("--reason は必須です(何が汚染したかを残す)")
-    if not (args.quarantined_by or "").strip():
-        parser.error("--by は必須です(runbook は設計リード・監査の二者確認を求める)")
+    try:
+        actor = two_person_actor(args.quarantined_by, args.confirmed_by)
+    except ThesisError as exc:
+        parser.error(str(exc))
 
     conn = connect()
     try:
@@ -616,7 +646,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
         with conn.transaction():
             quarantine_id = quarantine_thesis(
                 conn, thesis_id, reason=args.reason,
-                quarantined_by=args.quarantined_by, run_id=run.run_id,
+                quarantined_by=actor, run_id=run.run_id,
             )
             open_ids = _open_instruments(conn, record.fm)
             orphaned = quarantined_open_instruments(conn, record.fm, open_ids)
@@ -655,6 +685,7 @@ __all__ = [
     "quarantined_open_instruments",
     "record_thesis",
     "recent_theses",
+    "two_person_actor",
     "validate_evidence_refs",
 ]
 
