@@ -1214,3 +1214,14 @@ reminders:
       labels: [decision, ips]
       body: "L2 レビュー(2026-08-04・risk-observability-independent-review.md 末尾)の条件。80-ips.md L10 の「ユーザーのみ起票可」は旧承認モデルの残骸で、定款第4条(L2 起票=代表・CIO)と矛盾(定款が上位のため実務は定款優先)。9/2 の IPS 月次レビューで本文を整合させる。あわせて ops/reminders.yaml 内の同旨の古い記述(ips.yaml 変更はユーザー起票が必要)も是正する。"
     status: pending
+
+  - id: ops-weekly-bq-acl-verify
+    what: "IAM 最小化後、初回の週次 ops の BQ 経路(データセット ACL READER)の実走確認"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: notify
+      channel: 運営
+      body: "月曜の ops-weekly 実行後、BQ コスト行が正しく出ていること・誤った『テーブル欠落』起票が無いことを確認する(gcp-iam-inventory.md §8.4/§11)。問題があれば §9.5 のロールバック(bigquery.dataViewer の再付与)ではなくデータセット ACL の修正を先に試す。"
+    status: pending

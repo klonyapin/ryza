@@ -367,3 +367,17 @@ gcloud artifacts repositories describe ryza --location=us-west1 --project ryza-m
 ```
 
 `ryza-secret-drop` イメージ 2 件と `cloud-run-source-deploy` リポジトリの削除、および R-7(`deploy-ops-weekly.sh` の `latest` タグ廃止・SHA タグ固定への統一)は、いずれも**本タスクの範囲外**として未実施である。R-7 はスクリプト改訂を伴うため、R-2 の書き換えと同じ PR にまとめると審査が 1 回で済む。
+
+## 11. 削除系の実施記録(2026-08-04・設計リード実行)
+
+代表の直接指示(Discord「最小化はあなたがコマンドで実行できないのですか」)を実行承認として、
+設計リードが §9 手順書どおり実施した(実装エージェントは二次伝聞を理由に実行を辞退 — 正当な留保)。
+
+- 実施: R-1(editor 剥離)→ 陽性確認4系統 → R-2(project レベル run.invoker / bigquery.dataViewer)→ R-3(secretVersionAdder)
+- 陽性確認の実測: Bot active / VM からの Secret 取得 OK(discord-bot-token・anthropic-api-key・github-token)/
+  daily --dry-run 完走(posted=True)/ ops-weekly Job succeeded=1 / ryza-a18.timer enabled / dashboard IAP 302
+- 結果: compute SA のプロジェクトレベルロール **3 → 0**(BEFORE: editor, run.invoker, bigquery.dataViewer / AFTER: 空)。
+  リソースレベル(R-0 の受け皿)のみ残存
+- バックアップ: 実施前後の get-iam-policy JSON をセッション記録に保存(scratchpad)。ロールバックは §9.5
+- 残る監視点: 次回 ops-weekly(月曜)の BQ 経路はデータセット ACL READER 経由の初回実走 —
+  §8.4 のとおり起票内容(誤った「テーブル欠落」起票が無いこと)まで確認する(reminders: `ops-weekly-bq-acl-verify`)
