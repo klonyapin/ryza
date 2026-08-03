@@ -107,7 +107,12 @@ def fetch_image(
         payload = http(url)
     except Exception:  # noqa: BLE001 - 取得失敗は画像なしで続行（§6④）
         return None
-    posts = payload if isinstance(payload, list) else payload.get("post") if isinstance(payload, dict) else None
+    if isinstance(payload, list):
+        posts = payload
+    elif isinstance(payload, dict):
+        posts = payload.get("post")
+    else:
+        posts = None
     if not posts:
         return None
     return select_from_posts(list(posts), cfg, source=source or cfg.board, rng=rng)

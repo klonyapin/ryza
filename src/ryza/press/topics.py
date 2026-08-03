@@ -1,8 +1,8 @@
 """topics — トピック候補生成＋報道価値スコアリング（30-press §2）。
 
 候補は「market_view の変化点・triage_queue の高スコア文書・カレンダーイベント」から作り、
-**報道価値 = 新規性 × 影響度 × 確度** で採点する（政策・地政学カテゴリに定常加点）。**採点根拠も保存**
-（監査可能性・§2）。採点（``score_candidate`` / ``rank_candidates``）は純関数。DB 収集
+**報道価値 = 新規性 × 影響度 × 確度** で採点する（政策・地政学に定常加点）。**採点根拠も保存**
+する（監査可能性・§2）。採点（``score_candidate`` / ``rank_candidates``）は純関数。DB 収集
 （``collect_candidates``）は point-in-time（as_of までの素材のみ）。
 
 新規性の実装上の注意: 設計は「既報との埋め込み距離」を掲げるが、market_view 変化点や
@@ -139,10 +139,11 @@ def _from_market_view(
         refs = [int(x) for x in (detail.get("refs") or basis)]
         magnitude = float(ch.get("magnitude", 0.0))
         sources = int(detail.get("accumulated_sources", 1) or 1)
+        subject = detail.get("dimension") or detail.get("risk_id") or ch.get("kind") or i
         out.append(
             TopicCandidate(
-                key=f"mv:{view_id}:{ch.get('kind')}:{detail.get('dimension') or detail.get('risk_id') or i}",
-                title=f"市場観の変化: {detail.get('dimension') or detail.get('risk_id') or ch.get('kind')}",
+                key=f"mv:{view_id}:{ch.get('kind')}:{subject}",
+                title=f"市場観の変化: {subject}",
                 source_kind="market_view",
                 category=None,
                 refs=refs,

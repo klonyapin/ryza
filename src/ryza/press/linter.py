@@ -143,11 +143,11 @@ def is_u_shape(levels: list[int]) -> bool:
         return False
     i = levels.index(lo)  # 谷（min）の最初の出現位置
     # 谷より前（0..i）は非増加。
-    for a, b in zip(levels[:i], levels[1 : i + 1]):
+    for a, b in zip(levels[:i], levels[1 : i + 1], strict=False):
         if b > a:
             return False
     # 谷より後（i..末尾）は非減少。
-    for a, b in zip(levels[i:], levels[i + 1 :]):
+    for a, b in zip(levels[i:], levels[i + 1 :], strict=False):
         if b < a:
             return False
     return True

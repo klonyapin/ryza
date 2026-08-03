@@ -60,9 +60,9 @@ def build_morning_embed(
 ) -> dict[str, Any]:
     """朝刊 embed を組む（トピック→本日の注目→ポートフォリオ概況）。
 
-    - ``image``: マスコット/サムネイル（URL 参照・クレジットは footer）。取得失敗時 None なら画像なし。
+    - ``image``: マスコット/サムネイル。URL 参照・クレジットは footer。失敗時 None は画像なし。
     - ``events``: 本日の注目イベント表 [{title, at}]。
-    - ``nav``: ポートフォリオ概況 {value, change_pct, provisional}。確定値のみ（provisional は明示）。
+    - ``nav``: ポートフォリオ概況 {value, change_pct, provisional}。確定値のみ・暫定は明示。
     """
     fields: list[dict[str, Any]] = []
     for i, t in enumerate(topics, 1):
@@ -74,7 +74,9 @@ def build_morning_embed(
         fields.append({"name": "本日の注目", "value": "\n".join(lines)[:1024], "inline": False})
 
     if nav is not None:
-        fields.append({"name": "ポートフォリオ概況", "value": _nav_line(nav)[:1024], "inline": False})
+        fields.append(
+            {"name": "ポートフォリオ概況", "value": _nav_line(nav)[:1024], "inline": False}
+        )
 
     embed: dict[str, Any] = {
         "title": title,
