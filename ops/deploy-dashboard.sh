@@ -7,6 +7,13 @@
 # 本スクリプトは保護領域 deploy_path(定款第5条)。独立役員審査(2026-08-03・
 # docs/reviews/dashboard-deploy-independent-review.md)の差し戻しを受けて是正済み。
 #
+# 統制ゲートの所在(再審査「次回 PR 対応」で切り出し。保護領域の一部):
+#   ops/lib/deploy-guards.sh  … git ゲート・公開バインディング検査(gcloud を使う)
+#   ops/lib/pg_hba_check.sh   … pg_hba のアドレス列検査(base64 で VM へ運ぶ)
+#   ロール権限ゲートは本ファイル内の生成 SQL 末尾 `DO $ryza_gate$`(値が想定外なら中断)
+#   いずれも tests/ops/test_deploy_guards.py / test_deploy_role_gate.py が
+#   「実際に中断すること」を CI で検証している(統制コードは壊れても静かに通るため)。
+#
 # 構成判断:
 #   - **稼働コード = 承認済み main**(定款第5条)。作業ツリーが clean かつ
 #     HEAD == origin/main でなければ**何もせず中断**する(重大-1)。イメージタグは
@@ -81,41 +88,18 @@ EXPECTED_ORIGIN="${EXPECTED_ORIGIN:-https://github.com/klonyapin/ryza}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SSH=(gcloud compute ssh "${VM}" --zone "${ZONE}" --project "${PROJECT}")
 
+# 統制ゲートは ops/lib/deploy-guards.sh の関数に切り出してある(CI でテストするため —
+# tests/ops/test_deploy_guards.py)。ここでの呼び出しに `|| exit 1` を付け忘れると
+# ゲートが無効化されるので注意。
+# shellcheck source=lib/deploy-guards.sh
+. "${ROOT}/ops/lib/deploy-guards.sh"
+
 echo "== ryza-dashboard deploy (Cloud Run + IAP) =="
 echo "project=${PROJECT} region=${REGION} vm=${VM} service=${SERVICE} user=${DASHBOARD_USER}"
 
 # ── 0. 承認済みコード一致の検証(重大-1・定款第5条)────────────────────────────
-# デプロイできるのは「レビュー・CI・マージを通った main の実物」だけ。ローカルの
-# 未コミット変更や未 push のコミットが本番へ入る経路をここで塞ぐ。
-# 抜け道(--force 等)は意図的に用意しない — 用意すると統制目的が消えるため。
 echo "-- 稼働コードの検証: 作業ツリー clean かつ HEAD == origin/main"
-if ! git -C "${ROOT}" rev-parse --git-dir >/dev/null 2>&1; then
-  echo "ERROR: ${ROOT} は git リポジトリではない。デプロイは承認済み main の checkout から行う。" >&2
-  exit 1
-fi
-# origin が本物のリポジトリを指すことを確認する。HEAD == origin/main だけでは、
-# origin を攻撃者のリモートに差し替えれば任意コードが「承認済み」を騙れる(再審査 条件4)。
-ORIGIN_URL="$(git -C "${ROOT}" remote get-url origin 2>/dev/null || true)"
-if [ "${ORIGIN_URL%.git}" != "${EXPECTED_ORIGIN%.git}" ]; then
-  echo "ERROR: origin が想定と違う(取得='${ORIGIN_URL}' 期待='${EXPECTED_ORIGIN}')。" >&2
-  echo "       origin を差し替えれば HEAD==origin/main は容易に満たせるため、ここで中断する。" >&2
-  echo "       SSH リモート(git@github.com:...)を使っている場合は EXPECTED_ORIGIN で明示すること。" >&2
-  exit 1
-fi
-DIRTY="$(git -C "${ROOT}" status --porcelain)"
-if [ -n "${DIRTY}" ]; then
-  echo "ERROR: 作業ツリーに未コミット/未追跡の変更がある。デプロイ対象は承認済み main のみ(定款第5条)。" >&2
-  printf '%s\n' "${DIRTY}" >&2
-  exit 1
-fi
-git -C "${ROOT}" fetch origin main --quiet
-CODE_VERSION="$(git -C "${ROOT}" rev-parse HEAD)"
-ORIGIN_MAIN="$(git -C "${ROOT}" rev-parse origin/main)"
-if [ "${CODE_VERSION}" != "${ORIGIN_MAIN}" ]; then
-  echo "ERROR: HEAD(${CODE_VERSION}) が origin/main(${ORIGIN_MAIN})と一致しない。" >&2
-  echo "       PR をマージし、main を checkout してから再実行すること(全変更 PR 経由)。" >&2
-  exit 1
-fi
+CODE_VERSION="$(guard_git_state "${ROOT}" "${EXPECTED_ORIGIN}")" || exit 1
 echo "-- code_version=${CODE_VERSION}(origin/main と一致)"
 
 # イメージタグはコミット SHA(:latest は使わない — どのコードが動いているかを不変にする)。
@@ -326,6 +310,87 @@ SELECT count(*) AS boardroom_log_mutation_grants
   FROM information_schema.role_table_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
    AND table_name = 'org_icon_override_log' AND privilege_type <> 'INSERT';
+
+-- ── 4) ゲート(想定外ならデプロイを中断する)──────────────────────────────────
+-- 上の SELECT はログに残す**証跡**にすぎず、値が想定外でもデプロイは進んでいた
+-- (独立役員 再審査「次回 PR 対応」第1項)。同じ条件をここで**強制**する。
+-- psql は -v ON_ERROR_STOP=1 で起動しており、RAISE EXCEPTION は非ゼロ終了となって
+-- 呼び出し側(set -e のリモートシェル)ごとデプロイを止める。
+DO $ryza_gate$
+DECLARE
+  n bigint;
+  bad text;
+  expected_ops_tables int;
+BEGIN
+  -- 4.1 両ロールが揃っていること
+  SELECT count(*) INTO n FROM pg_roles WHERE rolname IN ('__DASH_ROLE__', '__BR_ROLE__');
+  IF n <> 2 THEN
+    RAISE EXCEPTION 'ロールが揃っていない(__DASH_ROLE__ / __BR_ROLE__ の期待 2 に対し実際 %)', n;
+  END IF;
+
+  -- 4.2 ロール属性が最小権限であること(superuser 不可・INHERIT 不可・他ロールの
+  --     メンバーシップ 0・LOGIN 必須)。旧版の IN ROLE 継承が残っていればここで落ちる。
+  SELECT string_agg(
+           format('%s(super=%s inherit=%s login=%s memberships=%s)',
+                  r.rolname, r.rolsuper, r.rolinherit, r.rolcanlogin,
+                  (SELECT count(*) FROM pg_auth_members m WHERE m.member = r.oid)),
+           ', ' ORDER BY r.rolname)
+    INTO bad
+    FROM pg_roles r
+   WHERE r.rolname IN ('__DASH_ROLE__', '__BR_ROLE__')
+     AND (r.rolsuper OR r.rolinherit OR NOT r.rolcanlogin
+          OR EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid));
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION 'ロール属性が想定外(super/inherit/継承メンバーシップは不可・LOGIN 必須): %', bad;
+  END IF;
+
+  -- 4.3 読取専用ロールに非 SELECT 権限が無いこと
+  SELECT count(*) INTO n FROM information_schema.role_table_grants
+   WHERE grantee = '__DASH_ROLE__' AND privilege_type <> 'SELECT';
+  IF n <> 0 THEN
+    RAISE EXCEPTION '読取専用ロール __DASH_ROLE__ に非 SELECT 権限が % 件ある', n;
+  END IF;
+
+  -- 4.4 秘密テーブルへの権限が無いこと(ops.discord_webhooks — 0017 冒頭)
+  SELECT count(*) INTO n FROM information_schema.role_table_grants
+   WHERE grantee = '__DASH_ROLE__'
+     AND table_schema || '.' || table_name IN ('ops.discord_webhooks');
+  IF n <> 0 THEN
+    RAISE EXCEPTION '読取専用ロール __DASH_ROLE__ が秘密テーブル ops.discord_webhooks に権限を持つ(% 件)', n;
+  END IF;
+
+  -- 4.5 役員室ロールの ops 権限が「存在する対象2表ぶん」と一致すること。
+  --     上の GRANT は to_regclass ガード付きで 0020 未適用の DB では黙ってスキップ
+  --     されるため、期待値を「実在する表の数」として数える(0020 適用済みなら 2)。
+  expected_ops_tables := (to_regclass('ops.org_icon_overrides') IS NOT NULL)::int
+                       + (to_regclass('ops.org_icon_override_log') IS NOT NULL)::int;
+  SELECT count(DISTINCT table_name) INTO n FROM information_schema.role_table_grants
+   WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops';
+  IF n <> expected_ops_tables THEN
+    RAISE EXCEPTION
+      '役員室ロールの ops 権限表数が想定外(期待 %, 実際 %)。GRANT が効いていないか余計な表に広がっている',
+      expected_ops_tables, n;
+  END IF;
+
+  -- 4.6 想定外の ops 表への権限が無いこと(trading_state / flags / discord_webhooks 等)
+  SELECT count(*) INTO n FROM information_schema.role_table_grants
+   WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+     AND table_name NOT IN ('org_icon_overrides', 'org_icon_override_log');
+  IF n <> 0 THEN
+    RAISE EXCEPTION '役員室ロールが ops の想定外テーブルに権限を持つ(% 件)', n;
+  END IF;
+
+  -- 4.7 履歴表は追記オンリー(非 INSERT 権限を持たない)
+  SELECT count(*) INTO n FROM information_schema.role_table_grants
+   WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+     AND table_name = 'org_icon_override_log' AND privilege_type <> 'INSERT';
+  IF n <> 0 THEN
+    RAISE EXCEPTION 'ops.org_icon_override_log への非 INSERT 権限がある(% 件・追記オンリー違反)', n;
+  END IF;
+
+  RAISE NOTICE 'ロール権限ゲート: 全項目 OK(4.1〜4.7)';
+END
+$ryza_gate$;
 """
 
 sql = (
@@ -341,6 +406,11 @@ PY
 )"
 
 # ── 5. VM 側 PostgreSQL 設定(冪等。localhost 接続の bot/daily は変更しない) ─────
+# pg_hba の検査ロジックは ops/lib/pg_hba_check.sh に切り出し、base64 で VM へ運んで
+# eval で読み込む(ヒアドキュメントに直書きするとローカルシェルが $1 等を展開して壊れる)。
+# 同じ関数を CI が tests/ops/test_deploy_guards.py から直接叩いて検証している。
+PG_HBA_LIB_B64="$(base64 < "${ROOT}/ops/lib/pg_hba_check.sh" | tr -d '\n')"
+
 echo "-- VM 上の PostgreSQL を VPC サブネットからの接続に対応させる(冪等)"
 "${SSH[@]}" --command "sudo bash -s" <<REMOTE
 set -euo pipefail
@@ -364,11 +434,11 @@ fi
 # 5.2 pg_hba: 既存の non-localhost host 行を検査してから追記する。
 #     pg_hba は**先勝ち**のため、既存の広い host 行があると本行は無効化される。
 #     想定外の行を見つけたら中断し、人間に判断させる(自動で消さない)。
+#     判定は**アドレス列のみ**(ops/lib/pg_hba_check.sh)。行全体の文字列マッチは
+#     コメントや DB 名の 'localhost' で誤判定するため使わない(再審査 次回 PR 対応)。
+eval "\$(printf '%s' '${PG_HBA_LIB_B64}' | base64 -d)"
 DESIRED_HBA="host    ${DB_NAME}    ${DB_ROLE},${BOARDROOM_ROLE}    ${SUBNET_CIDR}    scram-sha-256"
-HOST_LINES="\$(grep -E '^[[:space:]]*host(ssl|nossl)?[[:space:]]' "\${HBA}" || true)"
-UNEXPECTED="\$(printf '%s\n' "\${HOST_LINES}" \
-  | grep -vE '127\.0\.0\.1/32|::1/128|samehost|localhost' \
-  | grep -vF "\${DESIRED_HBA}" || true)"
+UNEXPECTED="\$(pg_hba_unexpected_lines "\${HBA}" "\${DESIRED_HBA}" || true)"
 if [ -n "\${UNEXPECTED}" ]; then
   echo "ERROR: pg_hba.conf に想定外の non-localhost host 行がある(先勝ち規則で本設定が無効化される)。" >&2
   printf '%s\n' "\${UNEXPECTED}" >&2
@@ -510,72 +580,15 @@ gcloud beta iap web get-iam-policy --project "${PROJECT}" --resource-type=cloud-
   --service="${SERVICE}" --region="${REGION}" \
   --flatten="bindings[].members" --format="value(bindings.role,bindings.members)" || true
 
-# ── 12. 公開バインディングの検査と除去(重大-3)──────────────────────────────────
-# 2026-08-02 の無認証 Cloud Run 公開版と同名サービスの場合、allUsers の run.invoker が
-# 残っていると IAP を有効化しても直接 URL で全世界に公開されたままになる。
-#
-# **失敗は「公開なし」ではない**(再審査 条件1)。get-iam-policy が権限不足・API 断で
-# 落ちたときに「検出ゼロ」と同じ扱いにすると、検査自体が沈黙して公開を見逃す。
-# 取得の終了コードを見て、失敗なら中断する。
+# ── 12. 公開バインディングの検査と除去(重大-3・再審査 条件1)──────────────────────
+# 実装は ops/lib/deploy-guards.sh(取得失敗を「公開なし」と混同しない・除去後に再取得して
+# 確認する)。tests/ops/test_deploy_guards.py が中断挙動を検証している。
 echo "-- 公開バインディング(allUsers / allAuthenticatedUsers)を検査"
-service_iam_policy() {  # 失敗時は非ゼロで返る(呼び出し側が中断する)
-  gcloud run services get-iam-policy "${SERVICE}" --project "${PROJECT}" --region "${REGION}" \
-    --flatten="bindings[].members" --format="value(bindings.role,bindings.members)"
-}
-public_members_in() {  # $1=ポリシーのテキスト
-  printf '%s\n' "$1" | grep -E '[[:space:]](allUsers|allAuthenticatedUsers)$' || true
-}
-
-if ! POLICY="$(service_iam_policy)"; then
-  echo "ERROR: ${SERVICE} の IAM ポリシーを取得できなかった。公開状態を確認できないため中断する。" >&2
-  echo "       (取得失敗を『公開なし』とみなすと検査が沈黙する — 再審査 条件1)" >&2
-  exit 1
-fi
-FOUND="$(public_members_in "${POLICY}")"
-if [ -n "${FOUND}" ]; then
-  echo "WARNING: 公開バインディングを検出したため除去する:" >&2
-  printf '%s\n' "${FOUND}" >&2
-  while IFS=$'\t ' read -r role member; do
-    [ -n "${role:-}" ] && [ -n "${member:-}" ] || continue
-    # </dev/null: gcloud に while の入力(残りの行)を食わせない
-    gcloud run services remove-iam-policy-binding "${SERVICE}" \
-      --project "${PROJECT}" --region "${REGION}" \
-      --member="${member}" --role="${role}" --quiet >/dev/null </dev/null
-  done <<< "${FOUND}"
-  if ! POLICY="$(service_iam_policy)"; then
-    echo "ERROR: 除去後の IAM ポリシーを再取得できなかった。公開のままの可能性がある。" >&2
-    exit 1
-  fi
-  STILL="$(public_members_in "${POLICY}")"
-  if [ -n "${STILL}" ]; then
-    echo "ERROR: 公開バインディングを除去できなかった。サービスは全世界公開のままの可能性がある。" >&2
-    printf '%s\n' "${STILL}" >&2
-    exit 1
-  fi
-  echo "-- 公開バインディングを除去した(現在は無し)"
-else
-  echo "-- サービスレベルの公開バインディングは無し"
-fi
+guard_service_public_bindings "${SERVICE}" "${PROJECT}" "${REGION}" || exit 1
 
 # ── 12.5 プロジェクトレベル IAM の公開バインディング(再審査 条件1)────────────────
-# roles/run.invoker がプロジェクト全体で allUsers に付いていると、サービス側の
-# ポリシーが清潔でも全 Cloud Run サービスが無認証で叩ける。ここは**自動で消さない** —
-# 他サービスへの影響が読めないため、検出したら中断して人間に判断させる。
 echo "-- プロジェクトレベル IAM の公開バインディングを検査"
-if ! PROJ_POLICY="$(gcloud projects get-iam-policy "${PROJECT}" \
-    --flatten="bindings[].members" --format="value(bindings.role,bindings.members)")"; then
-  echo "ERROR: プロジェクトの IAM ポリシーを取得できなかった。公開状態を確認できないため中断する。" >&2
-  exit 1
-fi
-PROJ_PUBLIC="$(printf '%s\n' "${PROJ_POLICY}" \
-  | grep -E '^roles/run\.[a-zA-Z]+[[:space:]]+(allUsers|allAuthenticatedUsers)$' || true)"
-if [ -n "${PROJ_PUBLIC}" ]; then
-  echo "ERROR: プロジェクトレベルで Cloud Run の公開バインディングがある(全サービスが無認証で到達可能):" >&2
-  printf '%s\n' "${PROJ_PUBLIC}" >&2
-  echo "       他サービスへの影響があるため自動では消さない。手動で除去してから再実行すること。" >&2
-  exit 1
-fi
-echo "-- プロジェクトレベルの公開バインディングは無し"
+guard_project_public_bindings "${PROJECT}" || exit 1
 
 URL="$(gcloud run services describe "${SERVICE}" --project "${PROJECT}" --region "${REGION}" \
   --format='value(status.url)')"
