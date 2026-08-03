@@ -551,9 +551,13 @@ def page_ingest(conn) -> None:
         freshness.style.map(
             # ok は着色しない: 緑は差異・リミット超過に予約してある(A12・中-7)。
             # 異常だけが色で立ち上がる方が、SLA 違反の発見も速い。
+            # 色は DADS セマンティック。pandas の Styler は生の CSS を吐くため
+            # Streamlit の色指定を経由できず、ここだけ hex を dads から引く
+            # (CSS の色名 orange/red は DADS 外かつ orange は 4.5:1 を割る)。
+            # 判定は "stale"/"no_data" という**語**で既に読めるので、色は冗長な符号化。
             lambda v: {
-                "stale": "color: orange",
-                "no_data": "color: red",
+                "stale": f"color: {dads.WARNING}",
+                "no_data": f"color: {dads.ERROR}",
             }.get(v, ""),
             subset=["status"],
         ),
@@ -776,42 +780,52 @@ def page_dev_status() -> None:
 # ── 組織(組織サイト化 — 2026-08-03 代表指示)──────────────────────────────────
 _TIER_LABELS = {"fable": "Fable(最上位)", "mid": "中位モデル", "light": "軽量/非LLM"}
 
-_ORG_CSS = """
+#: 投資委員会・コンプラゲートの強調(DADS semantic warning-yellow-2。白背景 4.54:1)。
+#: 「注意して見るべき節点」であって異常ではないので error(赤)は使わない。
+_ORG_ACCENT = "#927200"
+
+# 組織図・メンバーカードは Streamlit の部品では組めないため自前の HTML/CSS で描く。
+# 2026-08-03 のデザイン改修で DADS トークンへ寄せた: 罫線は Solid Gray-420
+# (#949494 = 白背景で 3:1 ちょうど。非テキスト要素の下限)、角丸は 6/8/12px、
+# 余白は 8px グリッド。半透明の灰(rgba(128,128,128,.35) 等)は背景次第で 3:1 を
+# 割るため実値のトークンに置き換えた。投資委員会の強調は warning-yellow-2
+# (#927200 = 4.54:1)で、旧値 #d9a441 は白背景で 2:1 前後しか出ていなかった。
+_ORG_CSS = f"""
 <style>
-.oc-apex { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:6px; }
-.oc-node { border:1px solid rgba(128,128,128,.45); border-radius:8px; padding:8px 14px;
-  font-size:.85rem; }
-.oc-node b { display:block; }
-.oc-node small { opacity:.7; }
-.oc-ic { border-color:#c9a24b; border-width:2px; }
-.oc-aud { border-style:dashed; }
-.oc-vline { width:2px; height:16px; background:rgba(128,128,128,.45); margin:0 0 6px 40px; }
-.oc-offices { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
-  gap:10px; }
-.oc-office { border:1px solid rgba(128,128,128,.35); border-radius:10px; padding:10px 12px; }
-.oc-office h4 { margin:0 0 6px; font-size:.75rem; opacity:.7; letter-spacing:.06em; }
-.oc-office ul { list-style:none; margin:0; padding:0; }
-.oc-office li { font-size:.8rem; padding:4px 8px; margin:4px 0; border-radius:6px;
-  border:1px solid rgba(128,128,128,.3); }
-.oc-office li small { display:block; opacity:.65; font-size:.68rem; }
-.oc-flow { display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:.78rem;
-  margin-top:10px; }
-.oc-flow span.s { border:1px solid rgba(128,128,128,.4); border-radius:6px; padding:2px 9px; }
-.oc-flow span.g { border-color:#d9a441; color:#d9a441; }
-.oc-flow span.a { opacity:.6; }
-.oc-members { display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr));
-  gap:12px; margin-top:6px; }
-.oc-card { border:1px solid rgba(128,128,128,.35); border-radius:12px; padding:14px;
-  display:flex; gap:12px; border-top:3px solid var(--mc,#888); }
-.oc-avatar { width:64px; height:64px; border-radius:50%; flex:none; object-fit:cover; }
-.oc-fallback { display:flex; align-items:center; justify-content:center; color:#fff;
-  font-size:1.6rem; font-weight:600; }
-.oc-card .nm { font-size:1.05rem; font-weight:600; }
-.oc-card .src { font-size:.7rem; opacity:.65; }
-.oc-card .ttl { font-size:.8rem; margin:2px 0 4px; }
-.oc-card .tg { font-size:.75rem; opacity:.75; margin-top:4px; }
-.oc-chip { font-size:.65rem; border:1px solid rgba(128,128,128,.4); border-radius:10px;
-  padding:1px 8px; margin-right:4px; white-space:nowrap; }
+.oc-apex {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:8px; }}
+.oc-node {{ border:1px solid {dads.BORDER}; border-radius:8px; padding:8px 16px;
+  font-size:.85rem; }}
+.oc-node b {{ display:block; }}
+.oc-node small {{ opacity:.7; }}
+.oc-ic {{ border-color:{_ORG_ACCENT}; border-width:2px; }}
+.oc-aud {{ border-style:dashed; }}
+.oc-vline {{ width:2px; height:16px; background:{dads.BORDER}; margin:0 0 8px 40px; }}
+.oc-offices {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+  gap:8px; }}
+.oc-office {{ border:1px solid {dads.BORDER}; border-radius:12px; padding:8px 12px; }}
+.oc-office h4 {{ margin:0 0 8px; font-size:.75rem; opacity:.7; letter-spacing:.06em; }}
+.oc-office ul {{ list-style:none; margin:0; padding:0; }}
+.oc-office li {{ font-size:.8rem; padding:4px 8px; margin:4px 0; border-radius:6px;
+  border:1px solid {dads.BORDER}; line-height:1.3; }}
+.oc-office li small {{ display:block; opacity:.65; font-size:.68rem; }}
+.oc-flow {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:.78rem;
+  margin-top:8px; }}
+.oc-flow span.s {{ border:1px solid {dads.BORDER}; border-radius:6px; padding:2px 8px; }}
+.oc-flow span.g {{ border-color:{_ORG_ACCENT}; color:{_ORG_ACCENT}; }}
+.oc-flow span.a {{ opacity:.6; }}
+.oc-members {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr));
+  gap:12px; margin-top:8px; }}
+.oc-card {{ border:1px solid {dads.BORDER}; border-radius:12px; padding:16px;
+  display:flex; gap:12px; border-top:3px solid var(--mc,{dads.BORDER}); }}
+.oc-avatar {{ width:64px; height:64px; border-radius:50%; flex:none; object-fit:cover; }}
+.oc-fallback {{ display:flex; align-items:center; justify-content:center; color:#fff;
+  font-size:1.6rem; font-weight:600; }}
+.oc-card .nm {{ font-size:1.05rem; font-weight:600; line-height:1.4; }}
+.oc-card .src {{ font-size:.7rem; opacity:.65; }}
+.oc-card .ttl {{ font-size:.8rem; margin:2px 0 4px; line-height:1.5; }}
+.oc-card .tg {{ font-size:.75rem; opacity:.75; margin-top:4px; line-height:1.5; }}
+.oc-chip {{ font-size:.65rem; border:1px solid {dads.BORDER}; border-radius:10px;
+  padding:1px 8px; margin-right:4px; white-space:nowrap; }}
 </style>
 """
 
@@ -1123,10 +1137,12 @@ def page_rules() -> None:
             df.style.map(
                 # schema/gate(最も強い執行点)は無着色。緑をカテゴリ識別に使わない
                 # (A12・中-7)。色で立ち上がるのは弱い執行点と欠落だけにする。
+                # 色は DADS トークン(理由は page_ingest と同じ — Styler は生 CSS)。
+                # 執行点は列の**文字列そのもの**が種別なので、色は冗長な符号化。
                 lambda v: {
-                    "ci(テスト・CI)": "color: #2c7be5",
-                    "audit(監査ジョブ)": "color: orange",
-                    "宣言のみ(執行点なし)": "color: red; font-weight: bold",
+                    "ci(テスト・CI)": f"color: {dads.PRIMARY}",
+                    "audit(監査ジョブ)": f"color: {dads.WARNING}",
+                    "宣言のみ(執行点なし)": f"color: {dads.ERROR}; font-weight: bold",
                 }.get(v, ""),
                 subset=["執行点"],
             ),
@@ -1764,15 +1780,21 @@ def main() -> None:
     # CSS 層(44px タップターゲット・行間・フォーカスリング)は再実行のたびに要る。
     # ナビゲーションより先に注入して、初回描画で小さいリンクが一瞬見える状態を避ける。
     dads.inject()
-    st.sidebar.title("Ryza 運用ダッシュボード")
+    # expanded=True。既定(False)は 13 ページ以上で 10 件に折り畳み「View 4 more」を
+    # 出すが、監視面は**全ページが常に見えている**ことが要件(どこに何があるかを
+    # 探させない)。折り畳みボタン自体もタップターゲットを1つ増やす。
+    page = st.navigation(_build_pages(), position="sidebar", expanded=True)
+    # サイドバーへの追記は必ずナビゲーションの**下**に出る(st.navigation はサイドバー
+    # 先頭に固定される)。旧実装の st.sidebar.title はここでは脚注の位置に落ちて
+    # 読み手を混乱させるため置かない —— アプリ名はブラウザのタブ(set_page_config)と
+    # 各ページの見出しが担っており、サイドバーで名乗り直す必要がない。
+    # 残すのは「この画面で何ができないか」の断り書きだけで、脚注として妥当な内容。
+    st.sidebar.divider()
     st.sidebar.caption(
         "Cloud Run + IAP で公開(許可アカウントのみ。認証は IAP に全面委譲)+ローカル。"
         "役員室以外は読み取り専用。操作(Kill Switch 等)は Discord から。"
     )
-    # expanded=True。既定(False)は 13 ページ以上で 10 件に折り畳み「View 4 more」を
-    # 出すが、監視面は**全ページが常に見えている**ことが要件(どこに何があるかを
-    # 探させない)。折り畳みボタン自体もタップターゲットを1つ増やす。
-    st.navigation(_build_pages(), position="sidebar", expanded=True).run()
+    page.run()
 
 
 main()

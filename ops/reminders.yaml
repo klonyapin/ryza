@@ -478,3 +478,15 @@ reminders:
       labels: [impl]
       body: "ダッシュボードの NAV 系列(dashboard/queries.py fetch_nav_series)は ledger.journal_lines × journal_entries × accounts を全走査して出資フローを日次集計し、コスト集計(fetch_cost_daily / fetch_cost_summary)は meta.runs を started_at で全走査する。どちらも支える索引が無い(journal_lines の PK は (entry_id, line_no)、meta.runs の PK は run_id のみ)。現在は行数が小さく問題にならないが、仕訳と実行記録は単調増加するため放置すると再実行のたびに全表走査が効く。暫定対応として app.py 側に @st.cache_data(ttl=60) を入れてある(独立役員審査 中-10 の部分対応)。是正: (1) ledger.journal_lines (book_id, account_id) の索引、(2) ledger.journal_entries (book_id, entry_date) の索引、(3) meta.runs (started_at DESC) の索引、(4) meta.runs (job_name, run_id DESC) の索引を migrations で追加し、EXPLAIN で効いていることを確認する。**migrations は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 中-10。"
     status: pending
+
+  - id: dashboard-framework-evaluation
+    what: "ダッシュボードのフレームワーク移行を比較調査する(Streamlit 継続 vs Next.js 系等。Phase 5 判断)"
+    conditions:
+      - type: date_after
+        date: "2026-09-30"
+    action:
+      type: issue_create
+      title: "ダッシュボード基盤の比較調査: Streamlit 継続 vs 移行(Phase 5 判断)"
+      labels: [decision]
+      body: "2026-08-03 の DADS デザイン改修(代表指示)で、Streamlit には CSS でも JS でも回避できない制約が7項目あることが確定した(docs/research/dads-streamlit-application.md §6)。とくに決定打になりうるのは (1) st.dataframe が canvas 描画で DOM にテキストを持たず、スクリーンリーダー・ブラウザ内検索・テキスト選択・拡大が一切効かないこと、(2) CSS 注入が非公式 API でありバージョン更新で無言で壊れ CI で検知できないこと。現時点では『単一利用者の非公開ツールに全面準拠の実利なし』という裁定でトークン層のみ採用したが、この裁定は利用者が代表1名という前提に依存する。調査すべき論点: (a) §6 の7項目のうち Phase 5 時点で実害が出ているものはどれか(『表の値をコピーできない』『Ctrl+F で銘柄を探せない』は単一利用者でも効く実害であり、想定と実測を突き合わせること)、(b) 移行先候補(Next.js + Recharts / SvelteKit / Dash / Panel 等)の実装コストと、Python の可視化ヘルパ dashboard/viz.py・queries.py をどこまで再利用できるか、(c) 移行しない場合の緩和策(明細を CSV ダウンロードで出す、st.dataframe を st.table に落とす等)で足りるか、(d) 二系統(取引デモ/実)の将来的な同時表示や外部公開の可能性が判断を変えるか。**結論は『移行する/しない』ではなく、判断材料(実害の実測とコスト見積り)を投資委員会へ出すこと。** 反対意見書(この提案が間違っている場合の理由トップ3+代替案)を添付すること(CLAUDE.md 議論規約2)。出典: docs/research/dads-streamlit-application.md §6・§7。"
+    status: pending

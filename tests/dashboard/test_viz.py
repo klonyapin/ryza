@@ -7,8 +7,10 @@ DB を使わない純ロジック(フォーマッタの桁数・bullet の境界
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -66,19 +68,37 @@ def test_fmt_pct_and_signed():
 
 
 def test_fmt_delta_md_colors_are_variance_only():
-    # 赤緑は差異専用(IBCS)。0 と欠測は無着色。
-    assert viz.fmt_delta_md(0.01) == ":green[+1.00%]"
-    assert viz.fmt_delta_md(-0.01) == ":red[-1.00%]"
+    # 赤緑は差異専用(IBCS)。0 と欠測は無着色・矢印なし(0 は差異ではない)。
+    assert viz.fmt_delta_md(0.01) == ":green[▲ +1.00%]"
+    assert viz.fmt_delta_md(-0.01) == ":red[▼ -1.00%]"
     assert viz.fmt_delta_md(0.0) == "+0.00%"
     assert viz.fmt_delta_md(None) == viz.MISSING
-    assert viz.fmt_delta_md(-1, text="-¥100万") == ":red[-¥100万]"
+    assert viz.fmt_delta_md(-1, text="-¥100万") == ":red[▼ -¥100万]"
 
 
 def test_fmt_delta_md_good_when_negative_inverts_colors():
     """コスト超過のように「小さいほど良い」差異は色を反転する。"""
-    assert viz.fmt_delta_md(0.01, good_when="negative") == ":red[+1.00%]"
-    assert viz.fmt_delta_md(-0.01, good_when="negative") == ":green[-1.00%]"
+    assert viz.fmt_delta_md(0.01, good_when="negative") == ":red[▲ +1.00%]"
+    assert viz.fmt_delta_md(-0.01, good_when="negative") == ":green[▼ -1.00%]"
     assert viz.fmt_delta_md(0.0, good_when="negative") == "+0.00%"
+
+
+def test_fmt_delta_md_arrow_tracks_sign_not_favourability():
+    """DADS: 色だけに頼らない。矢印は**符号の向き**で、有利/不利は色が担う。
+
+    「下がって有利」(緑の ▼)が普通に起きる — 矢印を有利/不利に紐付けると、
+    コスト削減が ▲ で表示されて増減が読めなくなる。
+    """
+    assert viz.fmt_delta_md(-0.01, good_when="negative").startswith(":green[▼")
+    assert viz.fmt_delta_md(0.01, good_when="negative").startswith(":red[▲")
+
+
+def test_fmt_delta_md_is_readable_without_color():
+    """色指定を剥がしても増減が読めること(色覚特性・モノクロ・CSS 破損への冗長性)。"""
+    for value in (0.0123, -0.0123):
+        body = viz.fmt_delta_md(value).split("[", 1)[1].rstrip("]")
+        assert body[0] in (viz.UP_ARROW, viz.DOWN_ARROW)
+        assert ("+" in body) if value > 0 else ("-" in body)
 
 
 def test_fmt_hours_switches_to_days():
@@ -161,6 +181,30 @@ def test_bullet_unknown_text_carries_note():
 def test_bullet_text_always_carries_comparison_context():
     b = viz.make_bullet("ES95", 0.012, 0.03, fmt=viz.fmt_pct)
     assert "1.2%" in b.text and "3.0%" in b.text and "使用率 40%" in b.text
+
+
+# ── 色に頼らない表示(DADS・2026-08-03 デザイン改修)──────────────────────────
+def test_bullet_level_is_labelled_in_words_not_only_color():
+    """breach / warn / unknown は語でも読めること。ok だけは無印(異常だけを立たせる)。"""
+    assert viz.LEVEL_LABELS["breach"] in viz.make_bullet("x", 1.0, 1.0).text
+    assert viz.LEVEL_LABELS["warn"] in viz.make_bullet("x", 0.8, 1.0).text
+    assert viz.LEVEL_LABELS["unknown"] in viz.make_bullet("x", None, 1.0).text
+    ok = viz.make_bullet("x", 0.1, 1.0).text
+    assert not any(viz.LEVEL_LABELS[lv] in ok for lv in ("breach", "warn", "unknown"))
+
+
+def test_viz_never_hardcodes_hex_colors():
+    """色の変更点を .streamlit/config.toml の一箇所に保つ。
+
+    viz.py が hex を直書きすると、DADS セマンティックの統一(error-1 / success-2 /
+    warning-orange-2)が config.toml とここの二箇所に散る。Streamlit の色指定
+    (:red[…] 等)だけを使い、実色はテーマ設定に解決させる規約を機械的に守らせる。
+    """
+    source = Path(viz.__file__).read_text(encoding="utf-8")
+    # docstring 内の DADS 実値への言及(#EC0000 等)は規約の説明なので除外する。
+    code = "".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
+    code = re.sub(r'"""(.|\n)*?"""', "", code)
+    assert not re.search(r"#[0-9A-Fa-f]{6}\b", code)
 
 
 # ── underwater / NAV ─────────────────────────────────────────────────────────

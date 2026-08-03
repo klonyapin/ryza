@@ -33,6 +33,7 @@ from psycopg.types.json import Jsonb
 
 pytest.importorskip("streamlit", reason="streamlit 未導入(.[dashboard] を入れると走る)")
 
+import dads  # noqa: E402
 import github_api  # noqa: E402
 import queries  # noqa: E402
 import streamlit as st  # noqa: E402
@@ -258,6 +259,23 @@ def test_every_page_is_reachable_by_its_url_path(app, page):
     固有の見出しが出ていることまで確認する。
     """
     assert [h.value for h in app(page).header] == [PAGE_HEADERS[page]]
+
+
+@pytest.mark.parametrize("page", ALL_PAGES)
+def test_every_page_receives_the_dads_css_block(app, page):
+    """DADS の CSS 層(44px タップターゲット・行間・フォーカスリング)が全ページに届く。
+
+    **限界を明示する**: 確認できるのは「CSS ブロックが注入されている」ことだけで、
+    実際に 44px で描画されているかは検査できない(AppTest は DOM もレンダラも持た
+    ない)。Streamlit の更新でセレクタが一致しなくなってもこのテストは通る —
+    実寸は人間が実ブラウザで見るしかない。根拠と割り切りは dashboard/dads.py。
+
+    それでも意味があるのは、CSS の注入自体を落とす回帰(``main()`` の
+    ``dads.inject()`` を消す、再実行のたびの注入を忘れる)は捕まえられるため。
+    """
+    blocks = [str(el.body) for el in app(page).get("html")]
+    assert sum(dads.CSS_MARKER in b for b in blocks) == 1, page
+    assert any(f"min-height: {dads.TARGET_SIZE_PX}px" in b for b in blocks), page
 
 
 def test_navigation_sections_match_the_declared_structure():
