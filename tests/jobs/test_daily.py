@@ -40,12 +40,21 @@ def test_daily_end_to_end(conn, run, llm_config, make_daily_llms, insert_enriche
     _seed(insert_enriched_doc)
     result, _ = _run(conn, run, llm_config, make_daily_llms)
 
-    # ステップ実行順(取込→前処理→分析→朝刊→サマリ)。
+    # ステップ実行順(取込→前処理→分析→執行/締め→朝刊→サマリ)。
     assert [s.name for s in result.stages] == [
-        "ingest", "preprocess", "analysis", "morning", "ops_summary"
+        "ingest", "preprocess", "analysis", "execution", "morning", "ops_summary"
     ]
     assert result.ok
     assert all(s.ok for s in result.stages)
+    # 執行段(T-016): 注文が無い日は no-op だが、締めは走り NAV を記帳する。
+    execution = result.stage("execution")
+    assert execution.detail["filled"] == 0
+    assert execution.detail["nav_status"] == "confirmed"
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM risk.nav_daily WHERE book_id = 'DEMO_FUND'"
+        )
+        assert cur.fetchone()[0] == 1
     # 分析が research_reports を生成している。
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM docs.research_reports WHERE run_id = %s", (run.run_id,))
@@ -57,6 +66,69 @@ def test_daily_end_to_end(conn, run, llm_config, make_daily_llms, insert_enriche
     with conn.cursor() as cur:
         cur.execute("SELECT channel FROM press.outbox WHERE id = %s", (result.ops_outbox_id,))
         assert cur.fetchone()[0] == "ops"
+
+
+# ── 執行段: ゲート通過注文が daily で約定・記帳される(T-016 配線)──────────────
+def test_daily_execution_fills_passed_order(
+    conn, run, llm_config, make_daily_llms, insert_enriched_doc
+):
+    from datetime import time
+    from decimal import Decimal
+    from zoneinfo import ZoneInfo
+
+    from ryza.gate.compliance import OrderProposal
+    from ryza.gate.orders import gate_and_record
+
+    _seed(insert_enriched_doc)
+    jst = ZoneInfo("Asia/Tokyo")
+    today = datetime.now(UTC).astimezone(jst).date()
+    with conn.cursor() as cur:  # ゲートの前提状態(取引状態・リスク状態・当日バー)
+        cur.execute(
+            """
+            INSERT INTO ops.trading_state (state, updated_by) VALUES ('normal', 'test')
+            ON CONFLICT (singleton) DO UPDATE SET state = 'normal', updated_by = 'test'
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO risk.limits_state
+                (book_id, dd_soft, dd_hard, vol_exceeded, es_exceeded, as_of)
+            VALUES ('DEMO_FUND', false, false, false, false, now())
+            ON CONFLICT (book_id) DO UPDATE SET as_of = now()
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO market.bars
+                (instrument_id, ts, timeframe, close, volume, source, as_of, run_id)
+            VALUES (1, %s, '1d', 1000, 1000000, 'test', now(), %s)
+            """,
+            (datetime.combine(today, time(0, 0), tzinfo=jst), run.run_id),
+        )
+    proposal = OrderProposal(
+        book_id="DEMO_FUND", fm="ben", instrument_id=1, side="buy",
+        qty=Decimal(100), order_type="market", ref_price=Decimal(1000),
+        product="listed_equity_cash", asset_class="equity_jp",
+        universe_tags=("jp_equity_cash",), is_single_name=True, unit_size=Decimal(100),
+    )
+    order_id, _, verdict = gate_and_record(
+        conn, proposal, nav=Decimal(10_000_000), cash=Decimal(9_000_000),
+        run_id=run.run_id,
+    )
+    assert verdict.verdict == "pass", verdict.reasons
+
+    result, _ = _run(conn, run, llm_config, make_daily_llms)
+    execution = result.stage("execution")
+    assert execution.ok, execution.error
+    assert execution.detail["filled"] == 1 and execution.detail["errors"] == 0
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM trading.orders WHERE id = %s", (order_id,))
+        assert cur.fetchone()[0] == "filled"
+        cur.execute(
+            "SELECT status FROM risk.nav_daily WHERE book_id = 'DEMO_FUND' AND nav_date = %s",
+            (today,),
+        )
+        assert cur.fetchone()[0] == "confirmed"
 
 
 # ── 冪等(同日再実行で二重投稿しない)──────────────────────────────────────────
@@ -93,6 +165,11 @@ def test_daily_kill_switch_skips_posting(
     assert result.stage("morning").detail.get("skipped") == "kill_switch"
     # 分析は走る。
     assert result.stage("analysis").ok
+    # 執行段: 新規執行はスキップ、締め(内部会計・NAV)は走る(T-016)。
+    execution = result.stage("execution")
+    assert execution.ok
+    assert execution.detail.get("orders") == "skipped(kill_switch)"
+    assert execution.detail.get("nav_status") == "confirmed"
     # 朝刊 embed は投入されない。
     with conn.cursor() as cur:
         cur.execute(
