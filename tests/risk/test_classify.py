@@ -712,12 +712,14 @@ def test_loader_rejects_duplicate_symbols(tmp_path):
         load_curated_universe(path)
 
 
-def test_shipped_jim_universe_is_wellformed_but_unapproved():
-    """同梱の jim-curated.yaml は**未承認**なので読み込みが拒否される(fail-closed)。
+def test_shipped_jim_universe_is_wellformed_and_approved():
+    """同梱の jim-curated.yaml は代表承認済みとして読み込める(2026-08-04 承認)。
 
-    承認前に反映されないことがこのファイルの安全性の要であるため、状態そのものを固定する。
-    承認時にはこのテストを「読み込めること + 全エントリに rationale があること」へ
-    書き換える(承認がコード変更として残る)。
+    未承認時代の前身テストは「読み込み拒否」を固定していた(fail-closed の要)。
+    代表の明示承認(Discord 2026-08-04「売買候補は承認」・PR #99)により状態が変わった
+    ため、本テストは「承認済みの版が正しく読め、内容ハッシュ・承認記録が有効である」
+    ことを固定する。承認を取り消す場合は approved_at/approved_by を null に戻し、
+    このテストを前身の形に戻すこと(取消もコード変更として残る)。
     """
     path = _REPO_ROOT / "config" / "universe" / "jim-curated.yaml"
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -729,8 +731,10 @@ def test_shipped_jim_universe_is_wellformed_but_unapproved():
     assert raw["content_sha256"] == curated_content_digest(
         str(raw["criterion"]), list(raw["entries"])
     )
-    with pytest.raises(CuratedUniverseError, match="未承認"):
-        load_curated_universe(path)
+    universe = load_curated_universe(path)
+    assert len(universe.entries) == 35
+    assert str(raw["approved_by"]) == "representative"
+    assert str(raw["approved_at"]) == "2026-08-04"
 
 
 def test_universe_config_is_a_protected_area():
