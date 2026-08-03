@@ -5,12 +5,9 @@
 # 冪等: 何度再実行してもよい。git 導入・監査用 clone 作成・ランナー/unit 設置だけを行う。
 #
 # 構成判断(定款第5〜6条・独立役員審査 2 回の指摘を反映):
-#   - A-18 は VM(ryza-bot)上の独立 timer で走らせ、結果 embed は press.outbox 経由で #運営 へ届く
+#   - Cloud Run 版 ops-weekly は checkout も VM 内 DB も持たないため A-18 は恒久スキップになる。
+#     A-18 は VM(ryza-bot)上の独立 timer で走らせ、結果 embed は press.outbox 経由で #運営 へ届く
 #     (--always-report で所見ゼロでも毎週1通 = ハートビート)。
-#     当初の理由は「Cloud Run 版 ops-weekly には checkout も VM 内 DB も無い」だったが、
-#     2026-08-04 に ops-weekly 自体が VM の systemd timer へ移った後も**この分離は維持する**:
-#     週次から稼働コード(/opt/ryza)を対象に走らせ直すと、下記の監査 clone 分離が無意味になる。
-#     ops-weekly 側は A18_REPO_PATH を設定しない(= ダイジェストの A-18 行はスキップのまま)。
 #   - 監査対象は /opt/ryza(rsync コピー・.git なし)ではなく**監査専用 clone /opt/ryza-audit**。
 #     実行のたびに GitHub origin/main を fetch する — デプロイ経路(rsync)から独立させ、
 #     「稼働コードの改竄が監査対象まで汚染する」経路を断つ。
@@ -28,7 +25,7 @@ PROJECT="${PROJECT:-ryza-main}"
 ZONE="${ZONE:-us-west1-a}"
 VM="${VM:-ryza-bot}"
 REPO="${REPO:-klonyapin/ryza}"
-# 週次ジョブ ops-weekly(VM の ryza-ops-weekly.timer・月曜 01:00 UTC)の後、独立に走る。
+# Cloud Run 版 ops-weekly(月曜 01:00 UTC)の後、独立に走る。
 A18_ONCALENDAR="${A18_ONCALENDAR:-Mon *-*-* 01:40:00 UTC}"
 DATABASE_URL="${RYZA_DATABASE_URL:-postgresql://ryza:ryza@localhost:5432/ryza}"
 

@@ -762,19 +762,26 @@ reminders:
       type: issue_create
       title: "BOARDROOM_AUDIT を ops-weekly の実行環境に配線する(形骸化監査の独立した検出点)"
       labels: [impl, governance]
-      body: "(完了済み)2026-08-04 に ops/deploy-ops-weekly.sh を Cloud Run Job + Cloud Scheduler から GCE VM(ryza-bot)の systemd timer 経路へ移し、/etc/ryza/ops-weekly.env に BOARDROOM_AUDIT=1 を配線した。Cloud Run に env を足す案は DB(VM 内 PostgreSQL)に届かず毎週『失敗: 接続不能』になるだけのため採らなかった(Cloud SQL 移行が前提)。旧 Cloud Scheduler / Cloud Run Job は同スクリプトが撤去する — 残置すると当週ダイジェストの冪等マーカーを DB 無し版が先に確定させ、本配線が静かに無効化されるため。実デプロイの実行と実 Issue での確認は ops-weekly-vm-cutover-verify に引き継いだ。"
-    status: done # 2026-08-04 実装(VM systemd 経路へ移設 + BOARDROOM_AUDIT=1)。実デプロイ確認は後続リマインダー
+      body: "(完了済み)2026-08-04 に **A-18-6(決議の批判経由)**として src/ryza/audit/a18.py へ実装した。ops-weekly 側の実行環境は変更していない。経緯: 当初 ops/deploy-ops-weekly.sh を GCE VM の systemd timer へ移す案を実装したが、独立役員審査(docs/reviews/ops-weekly-vm-independent-review.md)が重大2件(監査が可変の稼働コード /opt/ryza から走る・env の1行削除で『スキップ』= 移設前と同一表示に化ける)と、より小さい代替案(d)を指摘した。設計リード裁定により(d)を採用し移設は撤回。A-18 は既に(1)監査専用 clone /opt/ryza-audit から走り(2)--always-report のハートビートを持ち(3)press.outbox 経由で #運営 に届くため、統制目的(確認を外す当人から独立した検出点)を実行基盤を動かさずに達成できる。週次ダイジェストの『決議の批判経由』行は報告先(A-18-6)への参照表記にし、『スキップ』の常設をやめた(無害化が正常表示に化けるのを防ぐ)。ops-weekly の BOARDROOM_AUDIT opt-in 実装は DB へ届く環境向けに残置。"
+    status: done # 2026-08-04 A-18-6 として実装(VM 移設は審査を受けて撤回・代替案(d)採用)
 
-  - id: ops-weekly-vm-cutover-verify
-    what: "ops-weekly の VM 移設を実デプロイし、週次ダイジェストに『決議の批判経由』の実値が出ることを実測する"
+  # 【取下げ・発効前の草案】ops-weekly-vm-cutover-verify — VM 移設を前提にした検証リマインダー
+  # だったが、移設そのものが独立役員審査を受けて撤回されたため前提が消滅した(2026-08-04)。
+  # 未発火・未マージのまま取り下げる(履歴としてこの注記のみ残す)。取下げ理由は上記
+  # boardroom-audit-wiring の body と docs/reviews/ops-weekly-vm-independent-review.md の
+  # 設計リード裁定に記録済み。なお審査 中-6 が指摘した自己参照(移設の検証を移設対象の
+  # 週次ジョブ自身が発火させる循環)も、この取下げにより解消する。
+
+  - id: gcp-iam-inventory
+    what: "GCP プロジェクトレベル IAM の棚卸し(広すぎる付与・旧経路の残滓を洗う)"
     conditions:
       - type: date_after
-        date: "2026-08-11"
+        date: "2026-08-17"
     action:
       type: issue_create
-      title: "ops-weekly の VM 移設を実デプロイし、形骸化監査の行を実測で確認する"
-      labels: [impl, governance]
-      body: "boardroom-audit-wiring の実装分(2026-08-04)は**コードとデプロイスクリプトまで**であり、GCP への適用は未実施である(gcloud 実行は設計リード担当)。実施内容: ①`GITHUB_REPO=klonyapin/ryza ./ops/deploy-ops-weekly.sh` を実行する(guard_git_state により作業ツリー clean かつ HEAD == origin/main が必要)。②旧 Cloud Scheduler `ops-weekly-trigger` と Cloud Run Job `ops-weekly` が削除されたことを確認する — 残っていると DB 無し版が先に当週ダイジェストを確定させ、配線が静かに無効化される。③`sudo systemctl start ryza-ops-weekly.service` を手動実行し、週次ダイジェスト Issue のコメントに `### 決議の批判経由:` が『スキップ(BOARDROOM_AUDIT 未配線)』ではなく実値(件数・連続数、閾値到達時は ⚠)で出ることを確認する。④`journalctl -u ryza-ops-weekly` に Secret 取得・DB 接続の失敗が無いことを確認する。⑤失敗経路の確認として `ryza-ops-weekly-fail.service` を1回手動起動し、#運営 へ通知が届くこと(press.outbox 経由)を確認する。確認できたら本リマインダーを done にし、site/data.js と config/roadmap.yaml の稼働記述が VM 経路になっていることを見直すこと。"
+      title: "GCP IAM の棚卸し: プロジェクトレベル付与と旧デプロイ経路の残滓"
+      labels: [ops]
+      body: "ops-weekly VM 移設審査(2026-08-04・低)が旧経路の IAM 残滓を指摘した。移設自体は撤回したため当該残滓は発生しないが、**既存の**付与を棚卸しする必要は残る。ops/deploy-ops-weekly.sh は `roles/run.invoker` と `roles/bigquery.dataViewer` を **プロジェクトレベル**でデフォルト Compute SA に付けており(--condition=None)、他の deploy スクリプトにも同種の付与がある。実施内容: ①`gcloud projects get-iam-policy ryza-main` を取り、SA ごとの付与を一覧化する。②プロジェクトレベルで足りている付与のうちリソースレベル(Cloud Run サービス単位・データセット単位)へ絞れるものを特定する。③使われていない付与(廃止した経路のもの)と、Artifact Registry の未使用イメージを洗う。④デフォルト Compute SA を全ジョブで共用している構成そのもの(1つの SA が漏れると全経路に及ぶ)の是非を評価し、判断材料を出す。**結論は『分離する/しない』ではなく、現状の棚卸し結果と分離コストの見積りを出すこと。** 変更を伴う場合、deploy スクリプトは保護領域(deploy_path)であり独立役員審査+承認記録の手続を経ること。"
     status: pending
 
   - id: critic-input-window-decision-visibility

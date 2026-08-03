@@ -1,6 +1,6 @@
 """A-18 規則⇔実装トレーサビリティ監査(定款第6条・config/governance.yaml controls)。
 
-5つの検査を実行し、構造化 dict を返す:
+6つの検査を実行し、構造化 dict を返す:
 
   A-18-1 保護領域突合   … `protected_areas` の glob に触れた発効日以後のコミットを列挙し、
                           (a) ``Approved:`` トレーラ (b) GitHub マージ PR 経由(Merge pull request
@@ -24,6 +24,25 @@
                           発効」と定めるが、**outbox への投入は配送ではない** — 配送が止まれば
                           「発効したが誰も知らない」状態が続く(独立役員審査 重要-3)。
                           DB 接続がある実行でのみ動く
+  A-18-6 決議の批判経由   … 「批判を経ない決議」(``governance.minute_resolutions`` の
+                          ``confirmed_without_critic`` が true=鮮度なしを確認して通した、
+                          または NULL=鮮度の判定不能)の直近件数・連続数を集計し、
+                          ``boardroom.CONFIRMATION_STREAK_ALERT`` 件連続または走査窓内
+                          ``CONFIRMATION_COUNT_ALERT`` 件で警告する。DB 接続がある実行でのみ動く
+
+**A-18-6 をここに置く理由**(ops-weekly VM 移設審査 2026-08-04 の代替案(d)・設計リード裁定):
+この指標は決議精緻化審査(2026-08-03)が新設した統制で、当初は週次ジョブ ops-weekly の
+ダイジェストに載せる設計だった。しかし ops-weekly は Cloud Run Job で VM 内 PostgreSQL に
+届かず、配線には実行基盤の移設が要る。移設案は「監査が可変の稼働コード ``/opt/ryza`` から
+走る」「env の1行削除が『未配線』= 移設前と同一表示に化ける」という2つの重大な穴を生んだ。
+A-18 は既に(1)監査専用 clone ``/opt/ryza-audit`` から走り、(2)``--always-report`` の
+ハートビートを持ち、(3)``press.outbox`` 経由で #運営 に届く。同じ統制目的(**確認を外す当人
+から独立した検出点**)を、これらの性質を作り直さずに達成できるため A-18 側に載せる。
+
+なお本検査は ``config/governance.yaml`` の statement に対応を持たない(05-governance §6-5 は
+「懸念ゼロ回答の連続」「付議なし期間」を挙げるが本指標そのものは挙げていない — その趣旨に
+連なる**同型の指標**として新設されたものである)。条文に書かれていない統制を書かれているかの
+ように引くと版と実装の対応を追う A-18-1/2 の突合が狂うため、根拠条文としては引用しない。
 
 **read-only 原則**: 本モジュールは検査と警告(``press.outbox`` の ops チャンネルへの embed 投入)
 のみを行い、修正・巻き戻し・コミットは一切行わない。
@@ -824,6 +843,37 @@ def check_unnotified_deemed(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# A-18-6 決議の批判経由(形骸化の監査)
+# ────────────────────────────────────────────────────────────────────────────
+def check_resolution_bypass(conn: Any) -> dict[str, Any]:
+    """A-18-6: 「批判を経ない決議」の直近件数・連続数を集計する(read-only)。
+
+    集計そのものは ``governance.boardroom`` の統制ロジック(走査窓・閾値・表示行)を
+    再利用する — 監査側で閾値を再定義すると、UI・監査の二重定義が静かにずれる。
+    ``boardroom`` は psycopg を直接使うため遅延インポートする(本モジュールは git と
+    設定ファイルだけで動く実行経路を持つ)。
+
+    Returns:
+        ``line``(運用レポート1行)と内訳・``alert``(⚠ 条件に達したか)を持つ dict。
+    """
+    from ryza.governance.boardroom import (
+        confirmation_status_line,
+        resolution_confirmation_stats,
+    )
+
+    stats = resolution_confirmation_stats(conn)
+    return {
+        "scanned": stats.scanned,
+        "confirmed": stats.confirmed,
+        "undetermined": stats.undetermined,
+        "bypassed": stats.bypassed,
+        "streak": stats.streak,
+        "alert": stats.alert,
+        "line": confirmation_status_line(stats),
+    }
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # 本体・報告
 # ────────────────────────────────────────────────────────────────────────────
 def run_a18(
@@ -850,8 +900,10 @@ def run_a18(
     direct_pushes, fp_checked = check_direct_pushes(repo_path, since_commit=pr_since_commit)
     unnotified: list[dict[str, Any]] = []
     untracked_deemed = 0
+    resolution_bypass: dict[str, Any] | None = None
     if conn is not None:
         unnotified, untracked_deemed = check_unnotified_deemed(conn)
+        resolution_bypass = check_resolution_bypass(conn)
     return {
         "as_of": datetime.now(UTC).isoformat(),
         "since_commit": since_commit,
@@ -867,6 +919,7 @@ def run_a18(
         "decision_refs_verified": conn is not None,
         "trailer_findings": trailer_findings,
         "unnotified_deemed": unnotified,
+        "resolution_bypass": resolution_bypass,
         # 既知の限界は毎回開示する(独立役員審査条件)+ 個別の注記(登録漏れ・鮮度)。
         "notes": [
             *_coverage_notes(gov),
@@ -875,7 +928,7 @@ def run_a18(
             *_unverified_inheritance_notes(inherited),
             *([] if conn is not None else [
                 "DB 接続なしの実行のため Approved トレーラの承認記録(否認済みか)と"
-                "みなし承認の通知配送(A-18-5)は未照合"
+                "みなし承認の通知配送(A-18-5)・決議の批判経由(A-18-6)は未照合"
             ]),
             *_trailer_notes(trailer_findings),
             *([] if not untracked_deemed else [
@@ -917,12 +970,17 @@ def has_findings(result: dict[str, Any]) -> bool:
     照合できない参照(裸の数字)だけの所見は notes への開示にとどめ、報告の要否は
     変えない。様式の不備であって統制違反ではないため、これで ⚠️ を点けると
     「毎回 ⚠️」になり本物の違反が埋もれる。
+
+    A-18-6(決議の批判経由)は閾値に達したときだけ数える。件数が 0 でない程度では
+    鳴らさないのは同じ理由で、閾値の定義は ``boardroom`` 側(走査窓・連続・累積)に一本化
+    してある。
     """
     return bool(
         result["violations"]
         or result["mismatches"]
         or result["direct_pushes"]
         or result.get("unnotified_deemed")
+        or (result.get("resolution_bypass") or {}).get("alert")
         or vetoed_trailer_findings(result)
     )
 
@@ -1062,6 +1120,23 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
+    # A-18-6: 閾値未満でも**必ず1行載せる**(A-18-5 と同じ流儀 — 「アラートが無い」と
+    # 「そもそも見ていない」を沈黙で同一視させない)。ダッシュボードの決議欄は
+    # 確認を外す当人しか見ないため、独立した検出点はこの行である。
+    bypass = result.get("resolution_bypass")
+    if bypass:
+        fields.append(
+            {
+                "name": (
+                    "⚠️ A-18-6 決議の批判経由(形骸化の疑い)"
+                    if bypass["alert"]
+                    else "A-18-6 決議の批判経由"
+                ),
+                "value": bypass["line"][:1024],
+                "inline": False,
+            }
+        )
+
     vetoed_refs = vetoed_trailer_findings(result)
     if vetoed_refs:
         lines = [
@@ -1186,13 +1261,17 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
     for u in result.get("unnotified_deemed", []):
         print(f"[通知なき発効] decision id={u['decision_id']} {u['proposal_ref']}: {u['reason']}",
               file=sys.stderr)
+    bypass = result.get("resolution_bypass")
+    if bypass and bypass["alert"]:
+        print(f"[決議の批判経由] {bypass['line']}", file=sys.stderr)
     print(
         f"A-18 完了(検査 {result['checked_commits']} コミット, 違反 {len(result['violations'])}, "
         f"PR 承継 {len(result.get('inherited') or [])}, "
         f"受容済み {len(result.get('acknowledged') or [])}, "
         f"不整合 {len(result['mismatches'])}, 宣言 {len(result['declarations'])}, "
         f"直push {len(result['direct_pushes'])}, "
-        f"通知なき発効 {len(result.get('unnotified_deemed', []))})",
+        f"通知なき発効 {len(result.get('unnotified_deemed', []))}, "
+        f"批判を経ない決議 {(result.get('resolution_bypass') or {}).get('bypassed', '未照合')})",
         file=sys.stderr,
     )
     return 1 if has_findings(result) else 0

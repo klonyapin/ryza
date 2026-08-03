@@ -16,9 +16,7 @@ phases:
       - { name: "マイグレーション基盤+帳簿制約", status: done }
       - { name: "記帳/締め/財務諸表(会計エンジン)", status: done }
       - { name: "証憑・リネージ(provenance)", status: done }
-      # 2026-08-04: 形骸化監査(BOARDROOM_AUDIT)が VM 内 PostgreSQL を読むため、
-      # Cloud Run Job + Scheduler から GCE VM の systemd timer へ移設した。
-      - { name: "週次ジョブ ops-weekly(GCE VM + systemd timer)", status: done }
+      - { name: "週次ジョブ ops-weekly(Cloud Run Job+Scheduler)", status: done }
 
   - id: p2
     name: "Phase 2 リサーチ+報道"
