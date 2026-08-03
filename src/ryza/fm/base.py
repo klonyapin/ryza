@@ -40,7 +40,11 @@ from ryza.gate.compliance import GateResult, OrderProposal, PositionState
 from ryza.gate.orders import gate_and_record
 from ryza.ips import IPSConfig, Mandate, load_and_validate
 from ryza.provenance import Run
-from ryza.risk.classify import Classification, classification_pit_status
+from ryza.risk.classify import (
+    Classification,
+    classification_pit_status,
+    recorded_before,
+)
 
 _JST = ZoneInfo("Asia/Tokyo")
 
@@ -71,6 +75,18 @@ class Candidate:
     symbol: str
     asset_class: str  # IPS §8.1 タクソノミー
     classification: Classification
+
+
+@dataclass(frozen=True)
+class UniverseRead:
+    """ユニバース読出しの結果と、**実際に使った読出し経路**(審査 C-20)。
+
+    経路名を結果に同梱するのは、実行サマリの表示のために条件を再導出すると、既定の
+    READ COMMITTED では並行 commit を挟んで実際の読出しと食い違い得るため。
+    """
+
+    candidates: list[Candidate]
+    source: str
 
 
 @dataclass(frozen=True)
@@ -109,33 +125,28 @@ class SubmitResult:
 
 
 # ── 入力読出し(すべて point-in-time)──────────────────────────────────────────
-# 現在値キャッシュ(0015)からの読出し — 履歴経路と等価なときだけ使う高速経路
-# (条件は resolves_from_history)。
-_UNIVERSE_CURRENT_SQL = """
-    SELECT DISTINCT ON (i.instrument_id)
-           i.instrument_id, i.symbol, i.asset_class, i.venue,
-           c.universe_tags, c.instrument_flags, c.is_single_name,
-           c.product, c.unit_size
-    FROM market.instrument_classification c
-    JOIN market.instruments i ON i.instrument_id = c.instrument_id
-    WHERE c.universe_tags && %(tags)s
-      AND c.as_of <= %(as_of)s
-      AND i.valid_from <= %(as_of)s
-      AND (i.valid_to IS NULL OR i.valid_to > %(as_of)s)
-    ORDER BY i.instrument_id, i.valid_from DESC
-    LIMIT %(limit)s
-"""
-
-# 追記オンリー履歴(0026)からの読出し — リプレイ(過去 as_of)の正。
+# ユニバースの読出しは**常に**追記オンリー履歴(0026)から行う(審査 C-17)。
+# 現在値キャッシュ(0015)を「当日は等価だから」と併用する設計は破綻する: 現在値行の
+# as_of は上書き更新で巻き戻り得るため、等価性を現在値表自身から判定できない。
+# 走査は1日1回で DISTINCT ON 1 段の差は性能上の意味を持たず、経路を1本にする方が
+# 「判断に使った分類」の説明可能性で勝る。
+#
+# 時間軸は2つ(bitemporal — 審査 C-16):
+#   as_of        <= 判断時点         … その分類が有効になっていたか
+#   created_at   <  判断時点の当日終端 … その分類がその時点で**記録されていた**か
+# 後者が無いと、今日 1 行追記するだけで過去のリプレイ結果が変わる。
+#
 # **タグ照合は「as_of 時点で最新の行」を選んだ後に効かせる**: 先に絞ると、タグが後から
 # 付いた銘柄の古い行が拾われ、分類の変更が過去に漏れる(look-ahead — 審査 C-4)。
+UNIVERSE_SOURCE = "history"
+
 _UNIVERSE_HISTORY_SQL = """
     WITH latest AS (
         SELECT DISTINCT ON (instrument_id)
                instrument_id, universe_tags, instrument_flags, is_single_name,
                product, unit_size
         FROM market.instrument_classification_history
-        WHERE as_of <= %(as_of)s
+        WHERE as_of <= %(as_of)s AND created_at < %(recorded_before)s
         ORDER BY instrument_id, as_of DESC, history_id DESC
     )
     SELECT DISTINCT ON (i.instrument_id)
@@ -157,60 +168,30 @@ def is_replay(as_of: datetime) -> bool:
     return as_of.astimezone(_JST).date() < datetime.now(tz=_JST).date()
 
 
-def _has_newer_classification(conn: psycopg.Connection, as_of: datetime) -> bool:
-    """判断時点より**後**に確定した分類があるか(現在値キャッシュが等価でない条件)。"""
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT EXISTS (SELECT 1 FROM market.instrument_classification WHERE as_of > %s)",
-            (as_of,),
-        )
-        return bool(cur.fetchone()[0])
-
-
-def resolves_from_history(conn: psycopg.Connection, *, as_of: datetime) -> bool:
-    """分類を履歴経路で解決するか。**現在値キャッシュは等価なときだけ使う**。
-
-    現在値キャッシュ(0015)は銘柄あたり1行しか持たないため、判断時点より後に確定した
-    分類が1件でもあると、その銘柄は ``as_of <= 判断時点`` のフィルタで丸ごと落ちる
-    (= 当時の分類があったのに候補から静かに消える — 審査 C-4 の①)。過去日でなくとも
-    (同日中の再分類・risk 段が fm 段の直前に書いた分類)この条件は起こり得るので、
-    日付だけで経路を決めない。
-    """
-    return is_replay(as_of) or _has_newer_classification(conn, as_of)
-
-
 def load_universe(
-    conn: psycopg.Connection,
-    mandate: Mandate,
-    *,
-    as_of: datetime,
-    limit: int = 500,
-    use_history: bool | None = None,
-) -> list[Candidate]:
-    """マンデートのユニバースに属する現行銘柄(決定論分類つき)を返す。
+    conn: psycopg.Connection, mandate: Mandate, *, as_of: datetime, limit: int = 500
+) -> UniverseRead:
+    """マンデートのユニバースに属する銘柄(その時点の決定論分類つき)を返す。
 
     分類の**行がある銘柄のみ**が対象(行なし=未分類=ゲートが fail-closed で block
-    する — T-015 の設計)。
+    する — T-015 の設計)。読出しは常に追記オンリー履歴から bitemporal に行う
+    (経路の選択は無い — 審査 C-17。理由は ``_UNIVERSE_HISTORY_SQL`` 上のコメント)。
 
-    経路は2つある(独立役員審査 T-017 C-4 の是正):
-
-    - **リプレイ(過去 as_of)**: ``market.instrument_classification_history``(0026)
-      から「as_of 時点で最新の分類」を引く。現在値表を ``as_of <= 判断時点`` で
-      フィルタする旧実装は、①分類が後から書かれた銘柄が丸ごと落ちてユニバースが
-      静かに空になる、②分類の**内容**が後から変わってもそれを過去に適用してしまう、
-      の両方を許していた
-    - **通常運転(当日 as_of・判断時点より後の分類が無い)**: 現在値キャッシュ(0015)を
-      引く。この条件下では履歴の最新行と一致するため結果は同じで、DISTINCT ON を1段
-      省ける高速経路になる(等価でないときは ``resolves_from_history`` が履歴へ倒す)
-
-    ``use_history`` を明示すれば経路を固定できる(既定は自動判定)。履歴がその as_of を
-    カバーしているかは ``universe_pit_status`` が別途報告する。
+    返り値は候補と**実際に使った読出し経路**の組(``UniverseRead``)。経路名を実行時に
+    持ち回るのは、サマリ表示のために条件を再導出すると並行 commit 下で実際の読出しと
+    食い違うため(審査 C-20)。履歴がその as_of をカバーしているかは
+    ``universe_pit_status`` が別途報告する。
     """
-    if use_history is None:
-        use_history = resolves_from_history(conn, as_of=as_of)
-    sql = _UNIVERSE_HISTORY_SQL if use_history else _UNIVERSE_CURRENT_SQL
     with conn.cursor() as cur:
-        cur.execute(sql, {"tags": list(mandate.universe), "as_of": as_of, "limit": limit})
+        cur.execute(
+            _UNIVERSE_HISTORY_SQL,
+            {
+                "tags": list(mandate.universe),
+                "as_of": as_of,
+                "recorded_before": recorded_before(as_of),
+                "limit": limit,
+            },
+        )
         rows = cur.fetchall()
     candidates: list[Candidate] = []
     for iid, symbol, asset_class, venue, tags, flags, single, product, unit in rows:
@@ -231,21 +212,26 @@ def load_universe(
                 ),
             )
         )
-    return candidates
+    return UniverseRead(candidates=candidates, source=UNIVERSE_SOURCE)
 
 
-def universe_pit_status(conn: psycopg.Connection, *, as_of: datetime) -> dict[str, Any]:
+def universe_pit_status(
+    conn: psycopg.Connection, *, as_of: datetime, source: str
+) -> dict[str, Any]:
     """ユニバースの point-in-time 保証(E6)の充足状況。**実行サマリに必ず載せる**。
 
     ``covered=True`` は「この as_of の分類が追記オンリー履歴で再現されている」の意で、
     このときだけ E6 の但し書きが外れる(審査 C-4 の裁定の解除条件)。履歴の記録開始
-    (migration 0026 の適用)より前の as_of は ``covered=False`` のままで、
-    ``note`` に未達の理由が入る — 移行前の期間について達成を主張しない。
+    (``min(created_at)``)より前の as_of は ``covered=False`` のままで、``note`` に
+    未達の理由が入る — 移行前の期間について達成を主張しない。
+
+    ``source`` は**呼び出し側が実際の読出しから受け取った経路**を渡す(再導出しない
+    — 審査 C-20)。
     """
     status = classification_pit_status(conn, as_of=as_of)
     return {
         "replay": is_replay(as_of),
-        "source": "history" if resolves_from_history(conn, as_of=as_of) else "current",
+        "source": source,
         "e6_covered": status["covered"],
         "history_since": status["since"],
         "note": status["note"],
@@ -622,9 +608,11 @@ def _order_summary(
 
 
 __all__ = [
+    "UNIVERSE_SOURCE",
     "Candidate",
     "Intent",
     "SubmitResult",
+    "UniverseRead",
     "dedupe_intents",
     "ips_asset_class",
     "is_replay",
@@ -633,7 +621,6 @@ __all__ = [
     "load_positions",
     "load_prices",
     "load_universe",
-    "resolves_from_history",
     "submit_intents",
     "universe_pit_status",
 ]

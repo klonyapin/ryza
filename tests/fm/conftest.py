@@ -164,8 +164,13 @@ def instrument(conn):
 
 
 @pytest.fixture
-def classify(conn, run):
-    """``market.instrument_classification`` に決定論分類を入れる(curated 供給の模擬)。"""
+def classify(conn, run, record_classification_history):
+    """決定論分類を入れる(curated 供給の模擬)。履歴(0026)+現在値の両方を更新する。
+
+    ``recorded_at`` を渡すと「その時刻に記録された」履歴行を作る(既定は as_of と同時刻)。
+    読出しが bitemporal(審査 C-16)になったため、**過去 as_of のリプレイを検証するには
+    記録時刻も当時にしておく必要がある** — 今日記録した分類は当時のリプレイには見えない。
+    """
 
     def _install(
         instrument_id: int,
@@ -176,20 +181,25 @@ def classify(conn, run):
         product: str = "listed_equity_cash",
         unit_size: Decimal | None = Decimal(100),
         as_of: datetime | None = None,
+        recorded_at: datetime | None = None,
     ) -> None:
+        stamp = as_of or (datetime.now(UTC) - timedelta(days=1))
+        c = Classification(
+            universe_tags=universe_tags,
+            instrument_flags=instrument_flags,
+            is_single_name=is_single_name,
+            product=product,
+            unit_size=unit_size,
+        )
+        # 既定は「当時に記録された」= as_of と同時刻。本番の書込経路は created_at を
+        # 申告できないため、テスト専用フィクスチャで先に履歴行を置く。
+        record_classification_history(
+            conn, instrument_id, c,
+            run_id=run.run_id, as_of=stamp, created_at=recorded_at or stamp,
+        )
+        # 現在値表を更新する(同内容・同 as_of なので履歴への二重追記は起きない)。
         upsert_classification(
-            conn,
-            instrument_id,
-            Classification(
-                universe_tags=universe_tags,
-                instrument_flags=instrument_flags,
-                is_single_name=is_single_name,
-                product=product,
-                unit_size=unit_size,
-            ),
-            run_id=run.run_id,
-            source="curated",
-            as_of=as_of or (datetime.now(UTC) - timedelta(days=1)),
+            conn, instrument_id, c, run_id=run.run_id, source="curated", as_of=stamp,
         )
 
     return _install

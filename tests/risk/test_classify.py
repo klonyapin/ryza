@@ -191,14 +191,20 @@ def test_history_appends_only_on_change(conn, run_id):
     assert rows[1][0] == ["jp_equity_cash", "liquid_equity"]
 
 
-def test_classification_at_past_as_of_ignores_later_change(conn, run_id):
+def test_classification_at_past_as_of_ignores_later_change(
+    conn, run_id, record_classification_history
+):
     """**look-ahead 排除**: 過去 as_of は変更前の分類を見る(不変原則4)。"""
     inst = _insert_instrument(conn, symbol="H3.T", asset_class="equity", venue="TSE")
     t1 = datetime.now(UTC) - timedelta(days=30)
     t2 = datetime.now(UTC) - timedelta(days=10)
-    upsert_classification(conn, inst, _tagged("jp_equity_cash"), run_id=run_id, as_of=t1)
-    upsert_classification(
-        conn, inst, _tagged("jp_equity_cash", "liquid_equity"), run_id=run_id, as_of=t2
+    # 当時に記録された分類(記録時刻 = 知識時点)。
+    record_classification_history(
+        conn, inst, _tagged("jp_equity_cash"), run_id=run_id, as_of=t1, created_at=t1
+    )
+    record_classification_history(
+        conn, inst, _tagged("jp_equity_cash", "liquid_equity"),
+        run_id=run_id, as_of=t2, created_at=t2,
     )
 
     before = load_classification_at(conn, inst, as_of=t1 - timedelta(days=1))
@@ -209,6 +215,114 @@ def test_classification_at_past_as_of_ignores_later_change(conn, run_id):
 
     after = load_classification_at(conn, inst, as_of=datetime.now(UTC))
     assert after is not None and "liquid_equity" in after.universe_tags
+
+
+def test_read_ignores_rows_recorded_after_the_judgment_time(
+    conn, run_id, record_classification_history
+):
+    """**審査 C-16**: 今日追記した行は過去の判断時点からは見えない(bitemporal)。
+
+    追記オンリーは「追記による過去の書き換え」を止めない。時間軸を 2 本にして初めて
+    「今日 1 行足すだけで過去のリプレイが変わる」経路が塞がる。
+    """
+    inst = _insert_instrument(conn, symbol="H5.T", asset_class="equity", venue="TSE")
+    t30 = datetime.now(UTC) - timedelta(days=30)
+    replay = datetime.now(UTC) - timedelta(days=20)
+    record_classification_history(
+        conn, inst, _tagged("jp_equity_cash"), run_id=run_id, as_of=t30, created_at=t30
+    )
+    assert load_classification_at(conn, inst, as_of=replay) == _tagged("jp_equity_cash")
+
+    # 25 日前を主張する行を今日追記する。
+    record_classification_history(
+        conn, inst, _tagged(), run_id=run_id,
+        as_of=datetime.now(UTC) - timedelta(days=25), created_at=datetime.now(UTC),
+    )
+    assert load_classification_at(conn, inst, as_of=replay) == _tagged("jp_equity_cash")
+    # 今日の判断からは見える(記録済みの最新知識)。
+    assert load_classification_at(conn, inst, as_of=datetime.now(UTC)) == _tagged()
+
+
+def test_future_as_of_is_rejected(conn, run_id):
+    """未来の知識時点は受け付けない(CHECK as_of <= created_at — 審査 C-16)。"""
+    inst = _insert_instrument(conn, symbol="H6.T", asset_class="equity", venue="TSE")
+    with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+        upsert_classification(
+            conn, inst, _tagged("jp_equity_cash"),
+            run_id=run_id, as_of=datetime.now(UTC) + timedelta(days=1),
+        )
+
+
+def test_recorded_at_cannot_be_declared_by_the_writer(conn, run_id):
+    """**審査 C-19**: created_at は申告値ではなく DB が刻む(カバレッジの偽装を塞ぐ)。"""
+    inst = _insert_instrument(conn, symbol="H7.T", asset_class="equity", venue="TSE")
+    old = datetime(2000, 1, 1, tzinfo=UTC)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO market.instrument_classification_history
+                (instrument_id, universe_tags, instrument_flags, is_single_name,
+                 product, unit_size, source, as_of, run_id, created_at)
+            VALUES (%s, '{}', '{}', true, 'listed_equity_cash', 100, 'curated', %s, %s, %s)
+            RETURNING created_at
+            """,
+            (inst, old, run_id, old),
+        )
+        stamped = cur.fetchone()[0]
+    assert stamped > datetime.now(UTC) - timedelta(minutes=5)  # 申告した 2000 年ではない
+
+
+def test_coverage_comes_from_history_data_not_from_schema_migrations(conn, run_id):
+    """**審査 C-19**: カバレッジは履歴表のデータ由来で、改竄検知のない表に依存しない。
+
+    ``meta.schema_migrations`` は追記オンリー保護が無く、UPDATE 1 文で「400 日前から
+    E6 達成」と偽装できた。履歴表由来なら、同じ UPDATE はカバレッジを動かさない
+    (履歴表側の created_at は UPDATE 自体が拒まれる)。
+    """
+    inst = _insert_instrument(conn, symbol="H8.T", asset_class="equity", venue="TSE")
+    upsert_classification(conn, inst, _tagged("jp_equity_cash"), run_id=run_id)
+    since = history_coverage_since(conn)
+    assert since is not None
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE meta.schema_migrations SET applied_at = now() - interval '400 days'"
+        )
+    assert history_coverage_since(conn) == since  # 影響を受けない
+
+    _expect_rejected(
+        conn,
+        "UPDATE market.instrument_classification_history "
+        "SET created_at = now() - interval '400 days'",
+        psycopg.errors.RaiseException,
+    )
+    assert history_coverage_since(conn) == since
+
+
+def test_backdated_correction_is_not_swallowed(conn, run_id):
+    """**審査 C-18**: 圧縮の比較対象は「その as_of で有効な行」— 訂正が無音で消えない。
+
+    t1=A / t2=AB のあとに t1.5=AB の訂正を入れると、全体最新(AB)と比べる実装では
+    「内容が同じ」として捨てられ、t1.5 の分類は A のまま残っていた。
+    """
+    inst = _insert_instrument(conn, symbol="H9.T", asset_class="equity", venue="TSE")
+    t1 = datetime.now(UTC) - timedelta(days=30)
+    t2 = datetime.now(UTC) - timedelta(days=10)
+    t15 = datetime.now(UTC) - timedelta(days=20)
+    a, ab = _tagged("jp_equity_cash"), _tagged("jp_equity_cash", "liquid_equity")
+    upsert_classification(conn, inst, a, run_id=run_id, as_of=t1)
+    upsert_classification(conn, inst, ab, run_id=run_id, as_of=t2)
+
+    upsert_classification(conn, inst, ab, run_id=run_id, as_of=t15)
+    rows = _history(conn, inst)
+    assert len(rows) == 3
+    assert [r[1] for r in rows] == [t1, t2, t15]
+    # 訂正は記録されている(読出しに現れるのは bitemporal の第2軸を満たしてから)。
+    assert rows[2][0] == ["jp_equity_cash", "liquid_equity"]
+
+    # 同じ as_of でその時点の内容と同一なら、やはり追記しない(圧縮は生きている)。
+    upsert_classification(conn, inst, ab, run_id=run_id, as_of=t15)
+    assert len(_history(conn, inst)) == 3
 
 
 def test_history_is_append_only(conn, run_id):
@@ -230,10 +344,12 @@ def test_history_is_append_only(conn, run_id):
     assert len(_history(conn, inst)) == 1
 
 
-def test_pit_status_uncovered_before_history_starts(conn):
+def test_pit_status_uncovered_before_history_starts(conn, run_id):
     """履歴の記録開始より前の as_of は E6 未達のまま(移行前を達成と偽らない)。"""
+    inst = _insert_instrument(conn, symbol="HA.T", asset_class="equity", venue="TSE")
+    upsert_classification(conn, inst, _tagged("jp_equity_cash"), run_id=run_id)
     since = history_coverage_since(conn)
-    assert since is not None, "0026 が未適用(または migration のファイル名が変わった)"
+    assert since is not None, "履歴に記録が1件も無い(0026 が未適用の可能性)"
 
     covered = classification_pit_status(conn, as_of=since + timedelta(seconds=1))
     assert covered["covered"] is True and covered["note"] is None

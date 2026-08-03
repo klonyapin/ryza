@@ -201,7 +201,8 @@ def test_jim_duplicate_intents_produce_one_order(
 
     ips, mandates = load_and_validate()
     mandate = mandates[jim.FM]
-    candidates = {c.instrument_id: c for c in base.load_universe(conn, mandate, as_of=as_of)}
+    universe = base.load_universe(conn, mandate, as_of=as_of).candidates
+    candidates = {c.instrument_id: c for c in universe}
     result = base.submit_intents(
         conn, run, intents,
         mandate=mandate, max_slots=cfg.max_slots, candidates=candidates,

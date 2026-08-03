@@ -1,13 +1,10 @@
 -- 0026_classification_history.sql
 -- 銘柄分類の point-in-time 履歴化(独立役員審査 T-017 C-4 の是正 — E6 の前提)。
 --
--- 採番の注意(設計リード宛): 本ファイルは 0025 までを既定として 0026 を仮置きする。
--- 統合時に番号が衝突する場合は再採番してよい(内容は番号に依存しない)。ただし
--- **ファイル名の `classification_history` は変えないこと** — アプリ層
--- (`src/ryza/risk/classify.py` の ``history_coverage_since``)は
--- `meta.schema_migrations.filename` をこの語で引いて「履歴の記録開始時点」を決める。
--- 名前を変えるとカバレッジが不明になり、E6 の但し書きが恒久的に外れなくなる
--- (安全側に倒れるが、テスト `tests/risk/test_classify.py` が検出する)。
+-- 採番の注意(審査 C-21): **再採番は初回適用前に限る**。ランナー(`src/ryza/db/migrate.py`)
+-- はファイル名先頭 4 桁の version 文字列で適用済みを冪等判定するため、既に適用された
+-- 環境で番号を変えると「未適用の別 migration」と見なされ、CREATE TABLE が失敗する。
+-- 適用済み環境がある状態で衝突が判明した場合は、番号を変えずに後続 migration で調整する。
 --
 -- 問題(審査 C-4): `market.instrument_classification`(0015)は instrument_id 主キーの
 -- **上書き型**で、分類の履歴を持たない。過去 as_of のリプレイでは「当時の分類」を
@@ -30,13 +27,24 @@
 --      0023 で指摘した自前基準の未達を繰り返さない)。バックフィル行は現在値表の
 --      run_id を引き継ぐため制約を満たす
 --   4. **既存行はバックフィルする**が、それで過去が復元できたと主張はしない。
---      移行前の改訂履歴は物理的に存在しないため、**カバレッジ開始時点 = 本 migration の
---      applied_at** とし、それより前の as_of のリプレイには「E6 未達」の但し書きを
---      アプリ層が自動で付ける(`risk.classify.classification_pit_status`)。
+--      移行前の改訂履歴は物理的に存在しないため、**カバレッジ開始時点 = 履歴表の
+--      `min(created_at)`**(= バックフィルを行った本 migration の適用時刻)とし、それより
+--      前の as_of のリプレイには「E6 未達」の但し書きをアプリ層が自動で付ける
+--      (`risk.classify.classification_pit_status`)。**カバレッジの根拠を
+--      `meta.schema_migrations` ではなく本表のデータに置く**のは、schema_migrations が
+--      追記オンリー保護を持たず `UPDATE 1 文`で E6 の達成主張を偽装できるため(審査 C-19)。
 --      バックフィル行は `backfilled = true` で識別できる(再構成 vs 実時刻の記録)
 --   5. **同一 (instrument_id, as_of) の重複は許す**(UNIQUE を張らない)。同じ知識時点に
 --      対する後日の訂正は正当な追記であり、読出しは `as_of DESC, history_id DESC` で
 --      決定論に解決する(後に書かれた行が勝つ — market.bars の as_of と同じ流儀)
+--   6. **bitemporal**(審査 C-16): `as_of`(その分類が有効になった知識時点)と
+--      `created_at`(実際に記録された時刻)の 2 軸を持ち、読出しは両方で絞る。
+--      `created_at` は BEFORE INSERT トリガで `now()` に固定し、`CHECK (as_of <= created_at)`
+--      で「未来の知識時点」と「記録より前に有効化された分類」を拒む。これにより
+--      **今日 1 行追記して過去のリプレイ結果を変えることができない**(追記オンリー
+--      トリガは追記による改変を止められない — 改変は UPDATE ではなく追記で成立する)。
+--      過去の分類を真に取り込む必要が生じたときは、トリガを明示的に外す監査つき
+--      migration で行う(規約ではなく制約で決着させる — 議論規約4)
 --
 -- 保護領域(定款第5条): スキーマ変更のため独立役員審査+みなし承認手続の対象。
 
@@ -56,12 +64,18 @@ CREATE TABLE market.instrument_classification_history (
     as_of            timestamptz NOT NULL,   -- **この分類が有効になった知識時点**
     run_id           bigint NOT NULL REFERENCES meta.runs (run_id),
     backfilled       boolean NOT NULL DEFAULT false,  -- 本 migration による再構成行
-    created_at       timestamptz NOT NULL DEFAULT now()  -- 実際に記録された時刻
+    -- 実際に記録された時刻(トリガで clock_timestamp() に固定 — 下の注記参照)。
+    created_at       timestamptz NOT NULL DEFAULT clock_timestamp(),
+    -- 知識時点は記録時刻を追い越せない(= 未来日付の as_of を拒む・審査 C-16)。
+    CONSTRAINT classification_history_as_of_not_future CHECK (as_of <= created_at)
 );
 
 -- 「as_of 時点で最新の分類」を銘柄ごとに引く経路(DISTINCT ON)。
 CREATE INDEX instrument_classification_history_pit_idx
     ON market.instrument_classification_history (instrument_id, as_of DESC, history_id DESC);
+-- bitemporal 読出しの第2軸(「その時点で記録されていた行」への絞り込み)。
+CREATE INDEX instrument_classification_history_recorded_idx
+    ON market.instrument_classification_history (created_at);
 -- universe_tags の GIN は張らない: タグ照合は「as_of 時点で最新の行」を選んだ**後**に
 -- 効かせる(先に絞ると、タグが後から付いた銘柄を過去に混ぜる = look-ahead になる)。
 
@@ -88,6 +102,28 @@ BEGIN
 END;
 $$;
 
+-- created_at は「実際に記録された時刻」であり、書き手の申告値ではない(審査 C-19)。
+-- E6 のカバレッジ判定(min(created_at))はこの列に依存するため、INSERT 時に固定する。
+-- 固定しなければ、古い created_at を持つ行を 1 行 INSERT するだけでカバレッジを
+-- 遡って広げられる(= 達成していない期間の E6 達成を主張できる)。
+--
+-- **now() ではなく clock_timestamp()**: now() はトランザクション開始時刻を返すため、
+-- 「トランザクションを開始 → 途中で as_of = 現在時刻を作って書く」という通常の呼び出し
+-- (日次ジョブはトランザクションを長く保つ)で as_of > created_at となり、下の CHECK が
+-- 正当な書込を弾いてしまう。記録時刻は実際の壁時計であるべきで、それが CHECK の意図
+-- (未来の知識時点を拒む)とも一致する。
+CREATE FUNCTION market.stamp_recorded_at() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER instrument_classification_history_stamp_recorded_at
+    BEFORE INSERT ON market.instrument_classification_history
+    FOR EACH ROW EXECUTE FUNCTION market.stamp_recorded_at();
+
 CREATE TRIGGER instrument_classification_history_no_mutation
     BEFORE UPDATE OR DELETE ON market.instrument_classification_history
     FOR EACH ROW EXECUTE FUNCTION market.forbid_mutation();
@@ -104,11 +140,14 @@ REVOKE UPDATE, DELETE, TRUNCATE ON market.instrument_classification_history FROM
 -- 移行前の改訂は復元できない。ここで写せるのは「移行時点の現在値」だけであり、
 -- それを過去に適用すると look-ahead になり得る。したがって as_of < 本 migration の
 -- applied_at のリプレイは E6 未達として表示し続ける(アプリ層が自動判定)。
+-- as_of は clock_timestamp() で頭打ちにする: 旧スキーマは未来日付の as_of を拒まなかったため、
+-- そのまま写すと CHECK (as_of <= created_at) に触れて migration 自体が失敗する。
+-- 「遅くとも移行時点には知っていた」と解釈するのが最も正直な丸め方である。
 INSERT INTO market.instrument_classification_history
     (instrument_id, universe_tags, instrument_flags, is_single_name, product,
      unit_size, source, as_of, run_id, backfilled)
 SELECT instrument_id, universe_tags, instrument_flags, is_single_name, product,
-       unit_size, source, as_of, run_id, true
+       unit_size, source, least(as_of, clock_timestamp()), run_id, true
 FROM market.instrument_classification;
 
 -- ────────────────────────────────────────────────────────────────────────────
@@ -119,13 +158,24 @@ COMMENT ON TABLE market.instrument_classification_history IS
     'リプレイ・バックテストは本表から「as_of 時点で最新の分類」を引く。'
     'market.instrument_classification は同内容の現在値キャッシュ(通常運転の高速経路)。';
 COMMENT ON COLUMN market.instrument_classification_history.as_of IS
-    'この分類が有効になった知識時点。読出しは as_of <= 判断時点 の最新行(同着は history_id 降順)。';
+    'この分類が有効になった知識時点。読出しは as_of <= 判断時点 の最新行(同着は history_id 降順)'
+    'かつ created_at が判断時点の当日中(JST)までの行のみ(bitemporal — 審査 C-16)。';
 COMMENT ON COLUMN market.instrument_classification_history.backfilled IS
     'true=0026 が現在値表から再構成した行(移行前の改訂履歴は存在しない)。'
     'false=分類確定と同時に記録された行。E6 を主張できるのは本 migration の '
     'applied_at 以降の as_of のみ。';
 COMMENT ON COLUMN market.instrument_classification_history.created_at IS
-    '実際に記録された時刻。backfilled 行では as_of より大きく乖離する。';
+    '実際に記録された時刻(BEFORE INSERT トリガで now() に固定 — 書き手の申告値ではない)。'
+    'E6 のカバレッジ(min(created_at))の根拠であり、backfilled 行では as_of と大きく乖離する。';
+
+COMMENT ON FUNCTION market.stamp_recorded_at IS
+    '記録時刻を clock_timestamp() に固定する(申告値を受け付けない)。古い created_at の '
+    '1 行 INSERT で E6 カバレッジを遡って広げる経路を塞ぐ — 審査 C-19。'
+    'now() はトランザクション開始時刻のため、長いトランザクション中の正当な書込を'
+    'CHECK が弾いてしまう。';
+COMMENT ON CONSTRAINT classification_history_as_of_not_future
+    ON market.instrument_classification_history IS
+    '知識時点は記録時刻を追い越せない(未来日付の as_of を拒む — 審査 C-16)。';
 COMMENT ON COLUMN market.instrument_classification_history.run_id IS
     '分類を書いたジョブ実行(0013 の全表 run_id 必須)。バックフィル行は現在値表から継承。';
 

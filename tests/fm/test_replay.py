@@ -33,19 +33,18 @@ def replay_as_of() -> datetime:
 def _assert_e6_disclosure(conn, result: dict, as_of: datetime) -> None:
     """リプレイ結果は E6(point-in-time ユニバース)の充足状況を必ず持つ(審査 C-4)。
 
-    但し書きが外れる条件は「分類履歴が as_of をカバーしていること」だけである。
-    移行(0026)より前の as_of では未達表示のまま — 期待値を固定せず、カバレッジと
-    一致することを検証する(テスト DB の適用時刻に依存させない)。
+    本テストの分類は**当時に記録された**(``recorded_at`` を as_of に合わせた)ため、
+    履歴は as_of をカバーしており但し書きは外れる。CI では migration が毎回新規適用
+    されるため「カバー済みリプレイ」の経路が一度も通らない、という審査 C-21 の指摘に
+    対応して、ここは分岐で吸収せず ``e6_covered=True`` を固定する(未カバー側は
+    tests/fm/test_universe_pit.py が固定する)。
     """
     status = result["pit_universe"]
     since = history_coverage_since(conn)
-    assert since is not None
+    assert since is not None and as_of >= since
     assert status["replay"] is True and status["source"] == "history"
-    assert status["e6_covered"] == (as_of >= since)
-    if status["e6_covered"]:
-        assert status["note"] is None
-    else:
-        assert "E6" in status["note"]
+    assert status["e6_covered"] is True
+    assert status["note"] is None
 
 
 def _ben_cfg(**overrides) -> BenConfig:

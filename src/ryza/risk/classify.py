@@ -7,13 +7,17 @@
 
 **point-in-time(不変原則4・E6 — 独立役員審査 T-017 C-4 の是正)**: 分類は
 ``market.instrument_classification_history``(0026・追記オンリー)にも同一
-トランザクションで追記する。0015 の表は**現在値キャッシュ**(通常運転の高速経路)、
-履歴表が**過去 as_of の正**である。リプレイは ``load_classification_at`` /
-``ryza.fm.base.load_universe`` 経由で「as_of 時点で最新の分類」を引く。
+トランザクションで追記する。**判断に使う分類は常に履歴表から引く**(C-17):
+0015 の表は表示・運用確認のための現在値キャッシュであり、判断経路の入力にはしない。
 
-履歴が記録され始めたのは 0026 の適用時点であり、それより前の改訂は物理的に存在
-しない。``classification_pit_status`` はこの境界を判定し、カバー外の as_of には
-「E6 未達」の但し書きを返す(移行前の期間について達成を主張しない — 正直さ)。
+読出しは **bitemporal**(C-16): ``as_of <= 判断時点`` かつ ``created_at`` が判断時点の
+当日(JST)中までに記録された行だけを見る。片方(as_of)だけで絞ると、今日 1 行
+追記するだけで過去のリプレイ結果を変えられてしまう — 追記オンリーは「追記による
+改変」を止めないため、時間軸の制約でしか塞げない。
+
+``classification_pit_status`` は履歴の記録開始時点(``min(created_at)`` — 表自身の
+データ。改竄検知のない ``meta.schema_migrations`` には依存しない・C-19)を境界に、
+カバー外の as_of へ「E6 未達」の但し書きを返す(移行前の期間について達成を主張しない)。
 
 完全性の設計(T-014 審査条件7の残り半分 — 「空 vs 未取得」の区別):
 
@@ -41,27 +45,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import psycopg
 
 RULES_VERSION = "rules:v1"
 
-# 分類履歴(0026)の migration をファイル名で引くための語。連番ではなくファイル名で
-# 引くのは、統合時の再採番でカバレッジ判定が壊れないようにするため(0026 冒頭の注記)。
-HISTORY_MIGRATION_MARKER = "classification_history"
+_JST = ZoneInfo("Asia/Tokyo")
 
 # カバー外の as_of に付ける但し書き(リプレイ・バックテスト結果に必ず添える)。
 E6_UNCOVERED_NOTE = (
     "E6(point-in-time ユニバース)未達: 銘柄分類の追記オンリー履歴は {since} 以降のみ。"
-    "この as_of は移行前のため、当時の分類ではなく移行時点の分類(現在の知識)を"
-    "見ている可能性がある(独立役員審査 T-017 C-4)"
+    "この as_of は記録開始より前のため、当時のユニバースを再現できていない"
+    "(独立役員審査 T-017 C-4)"
 )
 E6_NO_HISTORY_NOTE = (
-    "E6(point-in-time ユニバース)未達: 銘柄分類の履歴表が未適用(migration 0026)。"
-    "ユニバースは現在値のみで構成されている"
+    "E6(point-in-time ユニバース)未達: 銘柄分類の履歴に記録が1件も無い。"
+    "ユニバースは空であり、当時の分類は再現できない"
 )
 
 # 上場市場 → 地域の決定論対応(銘柄マスタ venue 語彙)。
@@ -129,10 +132,25 @@ def _row_to_classification(row: tuple[Any, ...]) -> Classification:
     )
 
 
+def recorded_before(as_of: datetime) -> datetime:
+    """as_of の当日(JST)の終端 = bitemporal 読出しで許す記録時刻の上限(排他)。
+
+    「その判断時点で**既に記録されていた**分類だけを見る」ための第2の時間軸(審査 C-16)。
+    日次ジョブは1日1回・同一営業日の中で as_of を進めながら走るため、境界を時刻ではなく
+    JST 日の終端に置く(同日中に記録された分類はその日の判断で使えたと見なす)。
+    """
+    next_day = as_of.astimezone(_JST).date() + timedelta(days=1)
+    return datetime.combine(next_day, time(0, 0), tzinfo=_JST)
+
+
 def load_classification(
     conn: psycopg.Connection, instrument_id: int
 ) -> Classification | None:
-    """保存済み分類(現在値)を読む。**None = 未取得**(ゲートはタグ空で fail-closed block)。"""
+    """現在値キャッシュを読む。**判断経路では使わない**(表示・運用確認用 — 審査 C-17)。
+
+    **None = 未取得**(ゲートはタグ空で fail-closed block)。point-in-time の正は
+    ``load_classification_at``(履歴表)である。
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -148,9 +166,10 @@ def load_classification(
 def load_classification_at(
     conn: psycopg.Connection, instrument_id: int, *, as_of: datetime
 ) -> Classification | None:
-    """**as_of 時点で最新の**分類を履歴表から読む(リプレイの正 — 不変原則4)。
+    """**as_of 時点で知られていた最新の**分類を履歴表から読む(リプレイの正)。
 
-    現在値表ではなく履歴表を引くため、「後から付いた分類」を過去に遡って見ない。
+    bitemporal(審査 C-16): ``as_of <= 判断時点`` かつ ``created_at < 判断時点の当日終端``。
+    後者が無いと、今日バックデート追記した 1 行が過去のリプレイ結果を変えてしまう。
     行が無ければ None(その時点では未分類 — ゲートは fail-closed で block する)。
     同一 as_of の訂正は後に書かれた行(history_id 降順)が勝つ。
     """
@@ -159,30 +178,29 @@ def load_classification_at(
             """
             SELECT universe_tags, instrument_flags, is_single_name, product, unit_size
             FROM market.instrument_classification_history
-            WHERE instrument_id = %s AND as_of <= %s
+            WHERE instrument_id = %s AND as_of <= %s AND created_at < %s
             ORDER BY as_of DESC, history_id DESC LIMIT 1
             """,
-            (instrument_id, as_of),
+            (instrument_id, as_of, recorded_before(as_of)),
         )
         row = cur.fetchone()
     return None if row is None else _row_to_classification(row)
 
 
 def history_coverage_since(conn: psycopg.Connection) -> datetime | None:
-    """分類履歴が**追記オンリーで記録され始めた時点**(= 0026 の適用時刻)。
+    """分類履歴が**記録され始めた時点**(履歴表の ``min(created_at)``)。
 
-    これより前の as_of については改訂履歴が物理的に存在しない(0026 のバックフィルは
-    移行時点の現在値を写しただけ)。したがって E6 を主張できる下限がこの時点になる。
-    履歴 migration が未適用なら None。
+    これより前の as_of については、当時の分類がそもそも記録されていない(0026 の
+    バックフィルは移行時点の現在値を写しただけで、移行前の改訂は物理的に存在しない)。
+    したがって E6 を主張できる下限がこの時点になる。履歴が空なら None。
+
+    根拠を**履歴表自身のデータ**に置くのは、``meta.schema_migrations`` が追記オンリー
+    保護を持たず ``UPDATE`` 1 文で E6 の達成主張を偽装できるため(審査 C-19)。本表は
+    UPDATE/DELETE/TRUNCATE をトリガで拒み、``created_at`` は INSERT トリガが ``now()`` に
+    固定するので、古い記録時刻を持つ行を後から作ることもできない。
     """
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT min(applied_at) FROM meta.schema_migrations
-            WHERE filename LIKE %s
-            """,
-            (f"%{HISTORY_MIGRATION_MARKER}%",),
-        )
+        cur.execute("SELECT min(created_at) FROM market.instrument_classification_history")
         row = cur.fetchone()
     return None if row is None else row[0]
 
@@ -206,20 +224,25 @@ def classification_pit_status(
     }
 
 
-def _latest_history_payload(
-    conn: psycopg.Connection, instrument_id: int
+def _effective_history_payload(
+    conn: psycopg.Connection, instrument_id: int, as_of: datetime
 ) -> tuple[Any, ...] | None:
-    """履歴表の最新行の内容(比較用)。同内容の再分類で履歴を膨らませないために使う。"""
+    """**その as_of 時点で有効な**履歴行の内容(圧縮の比較対象 — 審査 C-18)。
+
+    全体で最新の行と比べると、バックデートした訂正(``as_of`` が最新行より古い書込)が
+    「内容が最新行と同じ」だけの理由で無音で捨てられ、当該時点の分類が古いまま残る。
+    比較対象は「今この as_of を読んだら返る行」でなければならない。
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT universe_tags, instrument_flags, is_single_name, product,
                    unit_size, source
             FROM market.instrument_classification_history
-            WHERE instrument_id = %s
+            WHERE instrument_id = %s AND as_of <= %s
             ORDER BY as_of DESC, history_id DESC LIMIT 1
             """,
-            (instrument_id,),
+            (instrument_id, as_of),
         )
         return cur.fetchone()
 
@@ -239,16 +262,21 @@ def upsert_classification(
     残ると「現在値はあるが当時の分類が無い」状態になり、リプレイのユニバースが静かに
     欠ける(審査 C-4)。commit は呼び出し側の責務。
 
-    内容(タグ・フラグ・product・unit_size・source)が履歴の最新行と同一なら追記は
-    しない — 日次スイープの再実行で履歴が同内容の行で膨れるのを避ける。現在値表の
-    as_of / run_id は毎回更新するため、「いつ最後に確認したか」は現在値表が持つ。
+    内容(タグ・フラグ・product・unit_size・source)が**その as_of 時点で有効な行**と
+    同一なら追記はしない — 日次スイープの再実行で履歴が同内容の行で膨れるのを避ける
+    (比較対象を全体の最新行にするとバックデート訂正が無音で消える — 審査 C-18)。
+    現在値表の as_of / run_id は毎回更新するため、「いつ最後に確認したか」は現在値表が持つ。
+
+    履歴行の ``created_at`` は DB 側が ``now()`` に固定する(申告できない)。したがって
+    バックデートした as_of の書込は**過去のリプレイ結果を変えない** — 読出しが
+    bitemporal だからである(審査 C-16)。
     """
     stamp = as_of or datetime.now(UTC)
     payload = (
         list(c.universe_tags), list(c.instrument_flags), c.is_single_name,
         c.product, c.unit_size, source,
     )
-    previous = _latest_history_payload(conn, instrument_id)
+    previous = _effective_history_payload(conn, instrument_id, stamp)
     changed = previous is None or tuple(previous) != payload
     with conn.cursor() as cur:
         if changed:
@@ -337,7 +365,6 @@ def classify_current_instruments(conn: psycopg.Connection, *, run_id: int) -> di
 __all__ = [
     "E6_NO_HISTORY_NOTE",
     "E6_UNCOVERED_NOTE",
-    "HISTORY_MIGRATION_MARKER",
     "RULES_VERSION",
     "Classification",
     "classification_pit_status",
@@ -346,5 +373,6 @@ __all__ = [
     "history_coverage_since",
     "load_classification",
     "load_classification_at",
+    "recorded_before",
     "upsert_classification",
 ]

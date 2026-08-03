@@ -389,10 +389,12 @@ def run_ben(
         mandates = mandates or loaded_mandates
     mandate = mandates[FM]
 
-    universe = base.load_universe(conn, mandate, as_of=as_of)
+    read = base.load_universe(conn, mandate, as_of=as_of)
+    universe = read.candidates
     # E6 の充足状況。**空ユニバースの理由**でもある(履歴が as_of をカバーしていない
-    # なら「静かに空」ではなく未カバーとして表示される — 審査 C-4)。
-    pit = base.universe_pit_status(conn, as_of=as_of)
+    # なら「静かに空」ではなく未カバーとして表示される — 審査 C-4)。source は実際に
+    # 使った読出し経路(再導出しない — 審査 C-20)。
+    pit = base.universe_pit_status(conn, as_of=as_of, source=read.source)
     if not universe:
         return {"universe": 0, "pit_universe": pit, "skipped": "ユニバースが空(分類待ち)"}
     candidates = {c.instrument_id: c for c in universe}

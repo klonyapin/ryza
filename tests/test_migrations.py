@@ -160,6 +160,9 @@ def test_classification_history_guards_exist_and_are_enabled(conn):
     assert set(triggers) == {
         "instrument_classification_history_no_mutation",
         "instrument_classification_history_no_truncate",
+        # 記録時刻の固定(E6 カバレッジの偽装防止 — 審査 C-19)。テストは PIT 検証の
+        # ためにこの 1 本だけを一時的に外すので、無効のまま残らないことを見る。
+        "instrument_classification_history_stamp_recorded_at",
     }
     assert all(state == "O" for state in triggers.values()), triggers
 
