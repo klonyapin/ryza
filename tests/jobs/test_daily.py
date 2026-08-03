@@ -7,9 +7,10 @@ Kill Switch ゲートを、ローカル DB + ``DryRunProvider``(実 API を呼�
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 
-from ryza.bot import killswitch
+from ryza.bot import COLOR_FLASH, COLOR_NORMAL, killswitch
 from ryza.fm.config import BenConfig
 from ryza.fm.theses import quarantine_thesis, record_thesis
 from ryza.ingest.jquants import JQuantsAuthError
@@ -207,8 +208,7 @@ def test_daily_kill_switch_skips_posting(
 # ── FM 段(T-017)の配線: Jim の提案がゲートを通り同日に約定する ─────────────────
 def _seed_jim_universe(conn, run) -> int:
     """Jim のユニバース銘柄(curated 分類)+末日にゴールデンクロスする日足を仕込む。"""
-    from datetime import date, time, timedelta
-    from decimal import Decimal
+    from datetime import time, timedelta
     from zoneinfo import ZoneInfo
 
     from ryza.risk.classify import Classification, upsert_classification
@@ -419,6 +419,41 @@ def test_mass_quarantine_thresholds():
     )
     assert daily._is_mass_quarantine({"today": 1, "total": 10, "theses_total": 100})
     assert not daily._is_mass_quarantine({"today": 1, "total": 1, "theses_total": 100})
+
+
+# ── 確定 NAV の書き換え通知(独立審査 再-7)──────────────────────────────────
+def _restatement(day: date, age: int, *, missing: bool = False) -> dict:
+    return {
+        "date": day, "nav_before": Decimal(10_000_000), "nav_after": Decimal(15_000_000),
+        "status": "confirmed", "restated": True, "late_entries": True,
+        "age_business_days": age, "nav_daily_missing": missing,
+    }
+
+
+def test_restatement_embed_is_urgent_only_for_old_days():
+    """しきい値より古い日の書き換えだけを urgent 色・タイトルにする(決定論ルール)。"""
+    as_of = datetime(2026, 8, 4, 10, 0, tzinfo=UTC)
+    threshold = daily.RESTATEMENT_URGENT_BUSINESS_DAYS
+
+    recent = daily._build_restatement_embed(
+        [_restatement(date(2026, 8, 3), threshold)], as_of=as_of
+    )
+    assert recent["color"] == COLOR_NORMAL and "🚨" not in recent["title"]
+
+    old = daily._build_restatement_embed(
+        [_restatement(date(2026, 7, 20), threshold + 1)], as_of=as_of
+    )
+    assert old["color"] == COLOR_FLASH and "🚨" in old["title"]
+    assert f"{threshold} 営業日より古い" in old["description"]
+
+
+def test_restatement_embed_surfaces_unsynced_nav_daily():
+    """nav_daily が追随できなかった日は embed 本文で名指しする(黙って乖離させない)。"""
+    embed = daily._build_restatement_embed(
+        [_restatement(date(2026, 8, 3), 1, missing=True)],
+        as_of=datetime(2026, 8, 4, 10, 0, tzinfo=UTC),
+    )
+    assert "risk 側は未追随" in embed["fields"][0]["value"]
 
 
 # ── 失敗許容: 一段が落ちても後段は走る ──────────────────────────────────────────

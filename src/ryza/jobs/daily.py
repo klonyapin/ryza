@@ -77,6 +77,7 @@ from ryza.fm.config import BenConfig
 from ryza.fm.jim import run_jim
 from ryza.fm.theses import quarantine_stats
 from ryza.ips import load_and_validate
+from ryza.ledger.closing import RESTATEMENT_URGENT_BUSINESS_DAYS, urgent_restatements
 from ryza.preprocess.embed import HashingEmbedder
 from ryza.preprocess.runner import run_preprocess
 from ryza.press.config import PressConfig
@@ -359,6 +360,53 @@ def _quarantine_field(stats: dict[str, int]) -> dict[str, Any]:
     return {"name": "検疫(FM 提案)", "value": value[:1024], "inline": False}
 
 
+def _build_restatement_embed(
+    restated: list[dict[str, Any]], *, as_of: datetime
+) -> dict[str, Any]:
+    """確定 NAV の書き換え(restatement)通知(#運営)。照合ブレイクと同格の専用 embed。
+
+    再締めは「既に確定・報告した NAV を後から動かす」操作である(独立審査 重要-2 の
+    是正は同時に過去改変の経路でもある)。実行サマリの 1 行に混ぜず独立フィールドで
+    出し、``RESTATEMENT_URGENT_BUSINESS_DAYS`` より古い日が含まれるときは urgent 扱いで
+    色とタイトルを変える(上限や承認は設けない — 是正を止めるより可視化を優先する)。
+    """
+    jst_str = as_of.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
+    urgent = urgent_restatements(restated)
+    fields = [
+        {
+            "name": f"{r['date']}(締め {r['age_business_days']} 回前)",
+            "value": (
+                f"NAV {r['nav_before']} → {r['nav_after']}"
+                f"(status={r['status']} 据え置き / 建玉明細は無効化)"
+                + ("\n⚠️ nav_daily に行が無く risk 側は未追随" if r["nav_daily_missing"] else "")
+            )[:1024],
+            "inline": False,
+        }
+        for r in restated[:10]  # embed の field 上限対策(件数は description に出す)
+    ]
+    return {
+        "title": (
+            f"🚨 確定 NAV の書き換え {jst_str}" if urgent
+            else f"📝 NAV の再締め訂正 {jst_str}"
+        ),
+        "description": (
+            f"締めの後に立った仕訳を取り込み、確定済み NAV を {len(restated)} 日ぶん"
+            "書き換えた(水位検出)。status は締め時点の照合の結論のため据え置き、"
+            "detail に restated / positions_stale を記録している。"
+            + (
+                f"\n**うち {len(urgent)} 日は "
+                f"{RESTATEMENT_URGENT_BUSINESS_DAYS} 営業日より古い既報値の書き換え** — "
+                "遅延記帳の原因を確認すること。"
+                if urgent else ""
+            )
+        ),
+        "color": COLOR_FLASH if urgent else COLOR_NORMAL,
+        "fields": fields,
+        "author": org.author_for_role("audit"),
+        "footer": {"text": DISCLAIMER},
+    }
+
+
 def _build_quarantine_alert(stats: dict[str, int], *, as_of: datetime) -> dict[str, Any]:
     """mass-quarantine の警告 embed(#運営)。照合ブレイクと同じ扱いで別途投入する。"""
     jst_str = as_of.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
@@ -553,6 +601,16 @@ def run_daily(
         )
         detail["nav"] = str(close_result["nav"])
         detail["nav_status"] = close_result["status"]
+        # 確定 NAV の書き換え(restatement)は照合ブレイクと同格の事象として**専用 embed**
+        # で出す。実行サマリの 1 行に混ぜると ✅ 付きで埋もれ [:1024] で切られる
+        # (navflow 重要-4 と同じ欠陥 — 独立審査 再-7)。サマリ側は件数だけに留める。
+        restated = [r for r in close_result["reclose"] if r["restated"]]
+        if restated:
+            detail["restated_days"] = len(restated)
+            enqueue(
+                conn, channel_ops,
+                _build_restatement_embed(restated, as_of=as_of), run.run_id,
+            )
         if breaks:
             detail["breaks"] = len(breaks)
             enqueue(conn, channel_ops, _build_breaks_embed(breaks, as_of=as_of), run.run_id)

@@ -7,13 +7,20 @@ E2E: gate_and_record(pass)→ runner → run_demo_close → risk.nav_daily 更�
 
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import date, datetime, time
 from decimal import Decimal
 
 from ryza.execution.close import reconcile_executions, run_demo_close
 from ryza.execution.demo import DemoBroker
 from ryza.execution.runner import run_pending
 from ryza.gate.orders import advance_order_status, record_execution
+from ryza.ledger import posting
+from ryza.risk.engine import book_returns
+from ryza.risk.navflow import (
+    load_nav_flow_data,
+    recon_invalidated_days,
+    recon_invalidated_note,
+)
 
 from .conftest import JST, make_test_config
 
@@ -76,6 +83,308 @@ def test_close_end_to_end_confirmed(conn, run_id, passed_order, insert_bar, toda
         )
         snap = cur.fetchone()
     assert (Decimal(snap[0]), snap[1]) == (Decimal("9999936.00"), "confirmed")
+
+
+# ── 再締め: 審査シナリオ G と再審査の対照実験 ─────────────────────────────────
+# 独立審査 重要-2 / 再-1(docs/reviews/risk-navflow-rollforward-independent-review.md):
+# 締めが走った**後**に同じ日付で立った仕訳は当日のスナップショットに入らない。navflow は
+# その仕訳を当日の flow_eop として NAV から引くため、当日に偽の下振れ・翌日に同額の偽の
+# 上振れという ±X% の対が立つ。判定は必ず book_returns(観測量)で行う — NAV 値だけを
+# 固定すると窓境界の偽リターンを「仕様」として固定してしまう(再審査の指摘)。
+_G_DAYS = [date(2026, 9, d) for d in range(1, 7)]  # シード出資(8/2・8/3)より後
+
+
+def _post_contribution(conn, run_id, day, amount: Decimal) -> None:
+    """指定日付で出資を記帳する(navflow が外部フローとして拾う拠出資本勘定)。"""
+    posting.post_entry(
+        conn,
+        book_id="DEMO_FUND",
+        entry_date=day,
+        description="テスト用の出資(締め後)",
+        lines=[
+            {"account_id": "cash", "debit": amount, "currency": "JPY"},
+            {"account_id": "capital", "credit": amount, "currency": "JPY"},
+        ],
+        evidence={"kind": "decision", "payload": {"test": "reclose"}, "source": "test"},
+        run_id=run_id,
+        posted_by="test.execution",
+    )
+
+
+def _returns(conn) -> list[float]:
+    """navflow の NAV 点から帳簿リターン(外部フロー調整済み TWR)を測る。"""
+    return book_returns(load_nav_flow_data(conn, "DEMO_FUND").points)
+
+
+def _close(conn, run_id, day):
+    return run_demo_close(conn, book_id="DEMO_FUND", date=day, run_id=run_id)
+
+
+def test_reclose_resolves_false_return_pair(conn, run_id):
+    """シナリオ G: 締め後の同日出資 → 翌日の締めで ±50% の偽リターン対が消える。"""
+    d0, d1, d2 = _G_DAYS[0], _G_DAYS[1], _G_DAYS[2]
+    _close(conn, run_id, d0)
+    _close(conn, run_id, d1)
+    _post_contribution(conn, run_id, d1, Decimal(5_000_000))  # ← d1 の締めの後に立つ
+    # 出資が NAV に入らないまま flow_eop だけ引かれる = 偽の −50%(不具合の再現)。
+    assert _returns(conn) == [-0.5]
+
+    result = _close(conn, run_id, d2)
+    assert _returns(conn) == [0.0, 0.0]
+    restated = [r for r in result["reclose"] if r["restated"]]
+    assert [(r["date"], r["nav_before"], r["nav_after"]) for r in restated] == [
+        (d1, Decimal(10_000_000), Decimal(15_000_000))
+    ]
+    assert restated[0]["age_business_days"] == 1  # 締め 1 回前 = urgent ではない
+
+
+def test_reclose_catches_entries_older_than_any_fixed_window(conn, run_id):
+    """再審査 再-1 の対照実験: 固定窓 N=3 なら窓外に落ちる古い遅延仕訳も水位で拾う。
+
+    d0〜d4 を締めた**後**に d1 付けの出資が立つ(4 営業日遅れの記帳)。固定窓 N=3 の
+    実装は d2〜d4 だけを書き換えて d1 を残すため、窓境界に恒久的な +50% を作った
+    (審査実測 ``[-0.5, +0.5, 0, 0, 0]``)。水位検出は d1 以降すべてを stale と判定する。
+    """
+    days = _G_DAYS[:5]
+    for day in days:
+        _close(conn, run_id, day)
+    _post_contribution(conn, run_id, days[1], Decimal(5_000_000))
+    assert _returns(conn) == [-0.5, 0.0, 0.0, 0.0]  # 窓外の偽リターン(修正前)
+
+    result = _close(conn, run_id, _G_DAYS[5])
+    assert _returns(conn) == [0.0, 0.0, 0.0, 0.0, 0.0]  # 窓の縁が存在しない
+    restated = [r["date"] for r in result["reclose"] if r["restated"]]
+    assert restated == days[1:]  # d0 は出資日より前なので対象外
+
+
+def test_reclose_advances_watermark_for_nav_neutral_entries(conn, run_id):
+    """再審査 再-4: NAV 中立の遅延仕訳でも水位を進め、翌日以降の再検出を止める。"""
+    d0, d1, d2 = _G_DAYS[0], _G_DAYS[1], _G_DAYS[2]
+    _close(conn, run_id, d0)
+    # 資産の振替のみ(現金 → 証券・手数料ゼロ)= NAV は動かないが仕訳は立つ。
+    posting.post_entry(
+        conn, book_id="DEMO_FUND", entry_date=d0,
+        description="NAV 中立の遅延記帳(テスト)",
+        lines=[
+            {"account_id": "securities", "debit": Decimal(1000), "currency": "JPY",
+             "instrument_id": 1},
+            {"account_id": "cash", "credit": Decimal(1000), "currency": "JPY"},
+        ],
+        evidence={"kind": "decision", "payload": {"test": "neutral"}, "source": "test"},
+        run_id=run_id, posted_by="test.execution",
+    )
+
+    first = _close(conn, run_id, d1)
+    detected = [r for r in first["reclose"] if r["date"] == d0]
+    assert len(detected) == 1
+    assert detected[0]["late_entries"] is True
+    assert detected[0]["restated"] is False  # NAV は動いていない
+    assert detected[0]["watermark_after"] > detected[0]["watermark_before"]
+
+    # 2 回目の締めでは水位が最新なので同じ日を再検出しない(偽検出の永続化を防ぐ)。
+    second = _close(conn, run_id, d2)
+    assert [r["date"] for r in second["reclose"]] == []
+
+
+def test_reclose_invalidates_stale_positions_detail(conn, run_id):
+    """再審査 再-2/再-3: 訂正した日の建玉明細は残さず、restated の事実を書く。"""
+    d0, d1 = _G_DAYS[0], _G_DAYS[1]
+    _close(conn, run_id, d0)
+    _post_contribution(conn, run_id, d0, Decimal(5_000_000))
+    _close(conn, run_id, d1)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, detail FROM ledger.nav_snapshots "
+            "WHERE book_id = 'DEMO_FUND' AND snap_date = %s",
+            (d0,),
+        )
+        status, detail = cur.fetchone()
+    assert status == "confirmed"  # status は締め時点の照合の結論(据え置き)
+    assert detail["restated"] is True  # restated はその後の会計訂正
+    assert detail["positions_stale"] is True and "positions" not in detail
+    assert detail["mtm_not_reapplied"] is True
+    assert Decimal(detail["assets"]) == Decimal(15_000_000)  # 集計値は訂正後に揃う
+
+    # risk.nav_daily 側も同じ扱い(建玉・価格を落とし、元の run を残す)。
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT nav, detail, run_id FROM risk.nav_daily "
+            "WHERE book_id = 'DEMO_FUND' AND nav_date = %s",
+            (d0,),
+        )
+        nav, nd_detail, row_run_id = cur.fetchone()
+    assert Decimal(nav) == Decimal(15_000_000)
+    assert "positions" not in nd_detail and nd_detail["positions_stale"] is True
+    assert nd_detail["reclose"][0]["previous_run_id"] == run_id
+    assert row_run_id == run_id
+
+
+def test_reclose_keeps_recon_valid_for_capital_only_delay(conn, run_id):
+    """拠出資本だけが遅れた日は照合の結論を動かさない(recon_invalidated を立てない)。"""
+    d0, d1 = _G_DAYS[0], _G_DAYS[1]
+    _close(conn, run_id, d0)
+    _post_contribution(conn, run_id, d0, Decimal(5_000_000))
+
+    result = _close(conn, run_id, d1)
+    item = next(r for r in result["reclose"] if r["date"] == d0)
+    assert item["restated"] is True and item["recon_invalidated"] is False
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT detail FROM ledger.nav_snapshots "
+            "WHERE book_id = 'DEMO_FUND' AND snap_date = %s",
+            (d0,),
+        )
+        assert "recon_invalidated" not in cur.fetchone()[0]
+
+
+def test_reclose_invalidates_recon_when_trade_entries_are_late(
+    conn, run_id, passed_order, insert_bar
+):
+    """遅延**約定**が混じった日は照合結論を無効化する(再-2 の裁定)。
+
+    ``status`` 列は語彙を動かさず confirmed のまま、``recon_invalidated`` を機械可読で
+    立てる。リスク日次はこの日を breaks 相当として urgent に上げる。
+    """
+    d0, d1 = _G_DAYS[0], _G_DAYS[1]
+    insert_bar(1, d0, close=Decimal(1000), volume=Decimal(1_000_000))
+    first = _close(conn, run_id, d0)
+    assert first["status"] == "confirmed"
+
+    # 締めの後に d0 付けの約定が記帳される(_record_unrecorded_fills と同じ経路)。
+    posting.post_fill(
+        conn, book_id="DEMO_FUND", instrument_id=1, side="buy",
+        qty=Decimal(100), price=Decimal(1000), fee=Decimal(0),
+        entry_date=d0, run_id=run_id, fill_id=999_001, source="test",
+    )
+    insert_bar(1, d1, close=Decimal(1000), volume=Decimal(1_000_000))
+
+    result = _close(conn, run_id, d1)
+    item = next(r for r in result["reclose"] if r["date"] == d0)
+    assert item["recon_invalidated"] is True
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, detail FROM ledger.nav_snapshots "
+            "WHERE book_id = 'DEMO_FUND' AND snap_date = %s",
+            (d0,),
+        )
+        status, detail = cur.fetchone()
+    assert status == "confirmed"  # 列の語彙は動かさない
+    assert detail["recon_invalidated"] is True
+    assert detail["positions_stale"] is True
+
+    # risk.nav_daily 側にも写り、navflow 経由でリスク・ダッシュボードから読める。
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT detail FROM risk.nav_daily "
+            "WHERE book_id = 'DEMO_FUND' AND nav_date = %s",
+            (d0,),
+        )
+        assert cur.fetchone()[0]["recon_invalidated"] is True
+    points = load_nav_flow_data(conn, "DEMO_FUND").points
+    point = next(p for p in points if p.day == d0)
+    assert point.recon_invalidated is True and point.status == "confirmed"
+    assert point.recon_invalidated_by_run == run_id  # 鮮度判定の手がかり(新-2)
+    assert recon_invalidated_days(points, by_run=run_id) == [d0]
+    assert "新たに無効化された日" in (
+        recon_invalidated_note(recon_invalidated_days(points), fresh=True) or ""
+    )
+
+
+def _post_late_entry(conn, run_id, day, lines, description):
+    posting.post_entry(
+        conn, book_id="DEMO_FUND", entry_date=day, description=description, lines=lines,
+        evidence={"kind": "decision", "payload": {"test": "late"}, "source": "test"},
+        run_id=run_id, posted_by="test.execution",
+    )
+
+
+def test_recon_invalidation_follows_position_lines_not_account_category(conn, run_id):
+    """判定は行レベルの建玉性で行う(独立審査 新-1 の 4 ケース分離)。
+
+    仕訳単位で「拠出資本に触れない仕訳か」を見る述語は両方向に誤る:
+    現物拠出(securities 借 / capital 貸)は建玉が増えるのに拠出資本行を持つため漏れ、
+    費用アクルーアルは建玉を動かさないのに拠出資本に触れないだけで無効判定になる。
+    """
+    d0, d1 = _G_DAYS[0], _G_DAYS[1]
+    _close(conn, run_id, d0)
+    # 現物拠出: 1 仕訳に capital 行を含むが、建玉(instrument_id 付き)は増える。
+    _post_late_entry(
+        conn, run_id, d0,
+        [
+            {"account_id": "securities", "debit": Decimal(1_000_000), "currency": "JPY",
+             "instrument_id": 1},
+            {"account_id": "capital", "credit": Decimal(1_000_000), "currency": "JPY"},
+        ],
+        "現物拠出(遅延記帳)",
+    )
+    result = _close(conn, run_id, d1)
+    item = next(r for r in result["reclose"] if r["date"] == d0)
+    assert item["restated"] is True
+    assert item["recon_invalidated"] is True  # 建玉が動いた → 照合結論は無効
+
+
+def test_recon_invalidation_ignores_expense_accruals(conn, run_id):
+    """費用アクルーアル(建玉を動かさない)は照合結論を無効化しない(新-1 の逆方向)。"""
+    d0, d1 = _G_DAYS[0], _G_DAYS[1]
+    _close(conn, run_id, d0)
+    _post_late_entry(
+        conn, run_id, d0,
+        [
+            {"account_id": "interest_expense", "debit": Decimal(500), "currency": "JPY"},
+            {"account_id": "cash", "credit": Decimal(500), "currency": "JPY"},
+        ],
+        "支払利息の遅延アクルーアル",
+    )
+    result = _close(conn, run_id, d1)
+    item = next(r for r in result["reclose"] if r["date"] == d0)
+    assert item["restated"] is True  # NAV は動く
+    assert item["recon_invalidated"] is False  # が、建玉は動いていない
+
+
+def test_reclose_fills_watermark_for_snapshots_without_entries(conn, run_id):
+    """仕訳が 1 本も無い日も初回パスで水位を埋め、恒久 stale を止める(新-4)。"""
+    old_day = date(2020, 1, 6)  # シード仕訳(2026)より前 = entry_date <= old_day が空
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ledger.nav_snapshots (book_id, snap_date, nav, status, detail)
+            VALUES ('DEMO_FUND', %s, 0, 'confirmed', '{}'::jsonb)
+            """,
+            (old_day,),
+        )
+    first = _close(conn, run_id, _G_DAYS[0])
+    assert old_day in [r["date"] for r in first["reclose"]]
+
+    second = _close(conn, run_id, _G_DAYS[1])
+    assert old_day not in [r["date"] for r in second["reclose"]]  # 2 回目は対象外
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT detail FROM ledger.nav_snapshots "
+            "WHERE book_id = 'DEMO_FUND' AND snap_date = %s",
+            (old_day,),
+        )
+        detail = cur.fetchone()[0]
+    assert detail["producer"]["input_refs"]["ledger.journal_entries.max_entry_id"] == 0
+    # 締めのたびに 1 件ずつ伸びない(元の行に producer が無いため履歴も生えない)。
+    assert detail.get("producer_history", []) == []
+
+
+def test_reclose_reports_missing_nav_daily_row(conn, run_id):
+    """nav_snapshots だけ動いて nav_daily の行が無い日は、合成せず痕跡を返す。"""
+    d0, d1 = _G_DAYS[0], _G_DAYS[1]
+    _close(conn, run_id, d0)
+    with conn.cursor() as cur:  # 執行段を経ていない日を模す
+        cur.execute("DELETE FROM risk.nav_daily WHERE nav_date = %s", (d0,))
+    _post_contribution(conn, run_id, d0, Decimal(5_000_000))
+
+    result = _close(conn, run_id, d1)
+    restated = [r for r in result["reclose"] if r["restated"]]
+    assert restated[0]["nav_daily_missing"] is True
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM risk.nav_daily WHERE nav_date = %s", (d0,))
+        assert cur.fetchone()[0] == 0  # 合成しない(執行照合を経ていない confirmed を作らない)
 
 
 def test_close_no_positions_confirms_seed_nav(conn, run_id, today_jst):
