@@ -39,15 +39,29 @@ CREATE TABLE ops.org_icon_checks (
     last_modified   text,
     first_seen_at   timestamptz NOT NULL DEFAULT now(),  -- この指紋を最初に観測した時刻
     last_checked_at timestamptz NOT NULL DEFAULT now(),  -- 最後に検査した時刻(成否問わず)
-    last_error      text                                 -- 直近の失敗理由(成功で NULL に戻す)
+    last_error      text,                                -- 直近の失敗理由(成功で NULL に戻す)
+    -- 失敗の**種別**(例外型名)。重複通知の抑止はこの列で行う(追補審査 C-16)。理由文言に
+    -- 時刻・リクエスト ID 等が混じる配信元では全文一致の抑止が効かず、毎日同じ障害を
+    -- 報告し続けて読まれなくなる。文言そのものは last_error に残るので情報は失われない。
+    last_error_kind text,
+    -- 検査時点で見えていた ops.org_icon_override_log の最大 id(追補審査 C-13)。
+    -- URL 変更を「代表が指示したもの」と認めるには、**この位置より後に積まれた**指示記録が
+    -- 要る。時刻ではなく id を基準にするのは、now() がトランザクション開始時刻で固定される
+    -- (同一トランザクション内では進まない)ため順序の判定に使えないからである。
+    -- IDENTITY の id は追記オンリー表の上で単調に増え、順序を一意に表す。
+    override_log_id bigint NOT NULL DEFAULT 0
 );
 
 CREATE TABLE ops.org_icon_check_events (
     id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     member_id   text NOT NULL,
-    -- changed = 指紋が変わった(すり替えの疑い)/ error = 到達不能・画像でない
+    -- changed = 同じ URL の指紋が変わった(すり替えの疑い)/ error = 到達不能・画像でない
     -- / cleared = 失敗が解消した(error の終端。沈黙で復旧を表現しない)
-    event       text NOT NULL CHECK (event IN ('changed', 'error', 'cleared')),
+    -- / url_unverified = URL 自体が変わったのに、それを指示した記録が見つからない
+    --   (追補審査 C-13。ops.org_icon_overrides に書ける主体は URL 差し替えで指紋比較を
+    --    素通りできるため、「URL 変更=代表の意図」を無検証で信じない)
+    event       text NOT NULL
+                CHECK (event IN ('changed', 'error', 'cleared', 'url_unverified')),
     icon_url    text NOT NULL,
     before_json jsonb,                       -- 変化前の指紋(changed のみ。初回観測は NULL)
     after_json  jsonb,                       -- 変化後の指紋(changed / cleared)
@@ -85,5 +99,10 @@ COMMENT ON COLUMN ops.org_icon_checks.icon_url IS
     '検査した実効 URL(台帳 config/org.yaml、または 0020 の上書きが勝った後の値)。';
 COMMENT ON COLUMN ops.org_icon_checks.last_error IS
     '直近の検査失敗理由。成功すると NULL に戻り、その遷移は cleared イベントとして残る。';
+COMMENT ON COLUMN ops.org_icon_checks.last_error_kind IS
+    '直近の検査失敗の種別(例外型名)。error イベントの重複抑止はこの列で判定する(C-16)。';
+COMMENT ON COLUMN ops.org_icon_checks.override_log_id IS
+    '検査時点の ops.org_icon_override_log の最大 id。URL 変更の指示記録はこの id より後の'
+    'ものだけを有効とする(A→B→A の往復を古い記録で正当化させない・C-13)。';
 COMMENT ON TABLE ops.org_icon_check_events IS
     'アイコン URL の指紋変化・検査失敗の追記オンリー台帳(0033)。';

@@ -697,6 +697,10 @@ reminders:
     #   ①migrations/0033(ops.org_icon_checks / org_icon_check_events)②src/ryza/ops/icon_revalidate.py
     #   ③Bot の 18:00 JST ループへ配線(週次指定を**日次**に強めた — 検査は 9 件の HEAD、通知は遷移が
     #     あった日だけなので騒音は増えず、検知から通知までのラグが7日→1日に縮む)
+    # 独立役員 追補審査(2026-08-04)で塞いだ迂回路: C-12 障害中のすり替え(失敗時も指紋を温存し復旧時に
+    #   必ず比較。1日 404 を返してから差し替える手が通らない)、C-13 URL ごとの差し替え(URL 変更を
+    #   org_icon_override_log の**前回検査より後の**記録と突合。記録が無ければ url_unverified で
+    #   通知し、台帳で説明できないものは urgent)、C-14 失敗 Run の別接続記録、C-16 抑止を例外型名へ正規化。
     # **受容した残存リスク**: 指紋は配信元が名乗るヘッダであり、UA/IP で応答を出し分ける配信元
     #   (クローキング)には無力。これを塞げるのは再ホストだけで、法的整理により採らない。爆風半径は
     #   独立役員審査 0020 が「中」と評価(非公開サーバー・閲覧者は代表のみ)。恒久解は権利処理済みの
@@ -734,10 +738,18 @@ reminders:
     #   **除去を投入時へ移すだけでは足りない**と判断し、embed_json への再混入を CHECK 制約
     #     (outbox_embed_has_no_internal_keys_check)で禁じた — enqueue を通さない書込経路
     #     (例 src/ryza/ingest/freshness.py の直接 INSERT)が strip を忘れても DB が書込時に落とす。
-    #     制約は **NOT VALID**(既存行は評価しない): press.outbox は配送済みの投稿記録=証跡であり
-    #     遡って書き換えない。列が NULL の既存行は org.resolve_author が embed 内の旧キーへ
-    #     フォールバックする(後方互換。tests/bot/test_outbox.py で検証)。
-    status: done # 2026-08-04 0032 で列分離+CHECK 制約。既存行は NULL のまま従来経路
+    #     制約は **NOT VALID**(既存行は評価しない): press.outbox の**送済**行は配送済みの投稿記録
+    #     =証跡であり遡って書き換えない。
+    #   **独立役員 追補審査 C-11(2026-08-04)で是正**: NOT VALID は「既存行を検証しない」だけで
+    #     既存行への **UPDATE には効く**。未送の legacy 行を残すと、配送成功後の mark_sent(UPDATE)が
+    #     CheckViolation で落ち、deliver_pending がバッチごと rollback → 5秒ごとに同じメッセージを
+    #     送り続ける(承認・KS 通報を含む「送信は高々1回」の破壊+配送の恒久詰まり)。したがって
+    #     0032 は**未送行のみ**を backfill する(embed から内部キーを外し列へ移す)。未送行は
+    #     「まだ出していないキューの状態」であって出した記録ではないため証跡論は及ばない。
+    #     送済行は不改変のまま残り、mark_sent が二度と UPDATE しない(WHERE sent_at IS NULL)ため
+    #     CHECK にも当たらない。旧キーが残る送済行の配送側フォールバックは維持
+    #     (org.resolve_author。tests/bot/test_outbox.py で再現→解消を対照検証)。
+    status: done # 2026-08-04 0032 で列分離+CHECK 制約+未送行の backfill(C-11)
 
   - id: resolution-critic-recency
     what: "決議の決定論チェックを『最終代表発言以降に独立役員が発言したか』へ精緻化し、確認付き決議の連続を監査アラート対象にする(独立役員 再確認審査 懸念A)"

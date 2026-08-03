@@ -417,8 +417,12 @@ class RyzaBot(commands.Bot):
         (``icon_revalidate.run_revalidation``)ため、頻度を上げても増える騒音は無く、
         すり替えの検知から通知までのラグだけが最大7日から1日に縮む。
 
-        **失敗は握る**。外部サイトへの HTTP を伴う検査であり、これで Bot の常駐ループを
-        落とすと配送・Kill Switch 操作まで巻き添えになる(0020 C-2 と同じ判断)。
+        **失敗は握る。ただし黙って消さない**(独立役員 追補審査 C-14)。外部サイトへの HTTP を
+        伴う検査であり、例外で Bot の常駐ループを落とすと配送・Kill Switch 操作まで巻き添えに
+        なる(0020 C-2 と同じ判断)。一方で、例外時は同じ接続の rollback で ``meta.runs`` の
+        開始行ごと消えるため、握るだけでは「静寂=変化なし」と「静寂=そもそも動いていない」が
+        区別できなくなる — 本ジョブが「遷移が無い日は投稿しない」設計を採る根拠が、失敗した
+        日にこそ崩れる。したがって失敗は**別接続(autocommit)**で failed の Run として残す。
         """
         try:
             with connect() as conn:
@@ -428,8 +432,24 @@ class RyzaBot(commands.Bot):
                 r.finish("success")
                 conn.commit()
             log.info("アイコン再検証: %s", result.as_runtime())
-        except Exception:  # noqa: BLE001 - 再検証の失敗で常駐ループを死なせない
+        except Exception as exc:  # noqa: BLE001 - 再検証の失敗で常駐ループを死なせない
             log.exception("アイコン再検証でエラー")
+            self._record_failed_run("bot.icon_revalidate", exc)
+
+    def _record_failed_run(self, job: str, exc: BaseException) -> None:
+        """握った例外を failed の Run として**別接続**に残す(追補審査 C-14)。
+
+        失敗した接続はトランザクションがアボートしており、そこへ書いても rollback で
+        消える。``conn`` を渡さない ``start_run`` は autocommit 接続を自前で開いて各文を
+        即時確定し、``finish`` で閉じる。この記録自体が失敗しても(DB 断など)ログだけ
+        残して常駐ループは続ける — 記録のために Bot を落とさない。
+        """
+        try:
+            r = start_run(job)
+            r.record_runtime({"error": f"{type(exc).__name__}: {exc}"[:500]})
+            r.finish("failed")
+        except Exception:  # noqa: BLE001 - 失敗の記録に失敗しても落とさない
+            log.exception("失敗 Run の記録にも失敗した: %s", job)
 
     @daily_report.before_loop
     async def _before_daily(self) -> None:

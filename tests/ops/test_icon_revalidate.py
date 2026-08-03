@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from ryza import org
+from ryza.bot import COLOR_FLASH, COLOR_NORMAL
 from ryza.db.conn import connect
 from ryza.ops import icon_revalidate
 from ryza.provenance import start_run
@@ -26,8 +27,15 @@ _FP_B = org.IconFingerprint(content_type="image/png", content_length=2048, etag=
 
 @pytest.fixture
 def conn(migrated_db):
-    """rollback で隔離する接続。"""
+    """rollback で隔離する接続。
+
+    先に1文実行してトランザクションを開いておく — ``org.set_icon_override`` が使う
+    ``conn.transaction()`` は、未開始なら BEGIN して脱出時に COMMIT してしまい隔離が
+    効かなくなる(既に開始済みなら SAVEPOINT として振る舞う)。
+    tests/ops/test_org_icon_overrides.py と同じ理由。
+    """
     c = connect()
+    c.execute("SELECT 1")
     try:
         yield c
     finally:
@@ -114,11 +122,17 @@ def test_changed_is_reported_once_then_becomes_the_new_baseline(conn):
     assert len(_events(conn)) == 1
 
 
-def test_url_change_is_rebaselined_not_reported(conn):
-    """URL 自体の差し替えは代表の意図した操作(0020 の履歴に残る)。すり替えではない。"""
+def test_authorized_url_change_is_rebaselined_not_reported_as_change(conn):
+    """指示記録のある URL 差し替えは「変化」ではなく再基準化として扱う。
+
+    0020 の履歴に残る代表の操作であり、すり替えではない。新しい URL の指紋が新しい基準に
+    なる(記録が無い場合は C-13 の url_unverified になる — 別テスト)。
+    """
     icon_revalidate.revalidate(conn, prober=_prober(_FP_A), urls={_MEMBER: _URL})
+    org.set_icon_override(conn, _MEMBER, _URL2, "representative")
     result = icon_revalidate.revalidate(conn, prober=_prober(_FP_B), urls={_MEMBER: _URL2})
     assert result.events == []
+    assert result.changed == []
     assert _events(conn) == []
     base = _baseline(conn)
     assert base["icon_url"] == _URL2 and base["fingerprint"] == _FP_B
@@ -135,6 +149,29 @@ def test_probe_failure_is_recorded_once(conn):
     assert second.events == []
     assert len(_events(conn)) == 1
     assert _baseline(conn)["last_error"].startswith("IconUrlError")
+
+
+def test_error_dedup_is_by_exception_kind_not_message(conn):
+    """抑止は例外**型名**で行う(追補審査 C-16)。文言が毎回揺れても増殖しない。"""
+    urls = {_MEMBER: _URL}
+    for i in range(3):
+        icon_revalidate.revalidate(
+            conn,
+            prober=_prober(org.IconUrlError(f"到達できない(request-id: {i})")),
+            urls=urls,
+        )
+    assert len(_events(conn)) == 1
+    # 文言そのものは現在値に残る(情報は失われない)。
+    assert "request-id: 2" in _baseline(conn)["last_error"]
+
+
+def test_different_exception_kind_is_reported_again(conn):
+    """型が変われば別の障害。抑止しない。"""
+    urls = {_MEMBER: _URL}
+    icon_revalidate.revalidate(conn, prober=_prober(org.IconUrlError("到達不能")), urls=urls)
+    result = icon_revalidate.revalidate(conn, prober=_prober(OSError("socket 断")), urls=urls)
+    assert [e.event for e in result.events] == ["error"]
+    assert [r[0] for r in _events(conn)] == ["error", "error"]
 
 
 def test_recovery_after_failure_emits_cleared(conn):
@@ -155,6 +192,110 @@ def test_failure_keeps_previous_fingerprint_as_baseline(conn):
     icon_revalidate.revalidate(conn, prober=_prober(_FP_A), urls=urls)
     icon_revalidate.revalidate(conn, prober=_prober(org.IconUrlError("x")), urls=urls)
     assert _baseline(conn)["fingerprint"] == _FP_A
+
+
+# ── C-12: 障害中のすり替えを「復旧」に化けさせない ──────────────────────────
+def test_swap_during_outage_is_reported_as_change_not_plain_recovery(conn):
+    """1日 404 を返してから差し替えても、復旧時に温存指紋と比較して検知する。"""
+    urls = {_MEMBER: _URL}
+    icon_revalidate.revalidate(conn, prober=_prober(_FP_A), urls=urls)
+    icon_revalidate.revalidate(conn, prober=_prober(org.IconUrlError("404")), urls=urls)
+    result = icon_revalidate.revalidate(conn, prober=_prober(_FP_B), urls=urls)
+
+    assert {e.event for e in result.events} == {"cleared", "changed"}
+    changed = result.changed[0]
+    assert changed.before == _FP_A.as_dict() and changed.after == _FP_B.as_dict()
+    # 通常色の「復旧」1通に化けない。
+    assert icon_revalidate.build_report_embed(result)["color"] == COLOR_FLASH
+    assert "内容が変わっている" in result.cleared[0].detail
+    assert [r[0] for r in _events(conn)] == ["error", "cleared", "changed"]
+
+
+def test_recovery_without_change_is_not_a_warning(conn):
+    """障害中に中身が変わっていなければ、通常色の復旧のままにする(過剰警告を出さない)。"""
+    urls = {_MEMBER: _URL}
+    icon_revalidate.revalidate(conn, prober=_prober(_FP_A), urls=urls)
+    icon_revalidate.revalidate(conn, prober=_prober(org.IconUrlError("404")), urls=urls)
+    result = icon_revalidate.revalidate(conn, prober=_prober(_FP_A), urls=urls)
+    assert [e.event for e in result.events] == ["cleared"]
+    assert icon_revalidate.build_report_embed(result)["color"] == COLOR_NORMAL
+
+
+def test_error_before_any_success_does_not_fake_a_change(conn):
+    """一度も成功観測が無い(全項目 NULL の)基準を「変化」と誤検知しない。"""
+    urls = {_MEMBER: _URL}
+    icon_revalidate.revalidate(conn, prober=_prober(org.IconUrlError("初回から死亡")), urls=urls)
+    result = icon_revalidate.revalidate(conn, prober=_prober(_FP_A), urls=urls)
+    assert [e.event for e in result.events] == ["cleared"]
+    assert result.changed == []
+
+
+# ── C-13: 指示記録の無い URL 変更を検知する ──────────────────────────────────
+def _set_override(conn, url: str) -> None:
+    """代表の差し替えを模す(0020 の書込ヘルパ = 現在値+追記オンリー履歴)。"""
+    org.set_icon_override(conn, _MEMBER, url, "representative")
+
+
+def test_url_change_without_any_record_is_urgent(conn):
+    """DB に書ける主体が URL を差し替えただけの状態 — 検知機構の迂回そのもの。"""
+    icon_revalidate.revalidate(conn, prober=_prober(_FP_A), urls={_MEMBER: _URL})
+    result = icon_revalidate.revalidate(conn, prober=_prober(_FP_B), urls={_MEMBER: _URL2})
+
+    assert [e.event for e in result.events] == ["url_unverified"]
+    assert result.urgent is True
+    assert result.url_unverified[0].before == {"icon_url": _URL}
+    assert _events(conn)[0][0] == "url_unverified"
+
+
+def test_url_change_with_override_log_record_is_accepted(conn):
+    """代表の差し替え(0020 の履歴に残る)は再基準化するだけで通知しない。"""
+    icon_revalidate.revalidate(conn, prober=_prober(_FP_A), urls={_MEMBER: _URL})
+    _set_override(conn, _URL2)
+    result = icon_revalidate.revalidate(conn, prober=_prober(_FP_B), urls={_MEMBER: _URL2})
+    assert result.events == []
+    assert _baseline(conn)["icon_url"] == _URL2
+
+
+def test_round_trip_url_change_is_not_authorized_by_the_old_record(conn):
+    """A→B→A の往復。B への指示記録は A へ戻す操作を正当化しない(窓=前回検査以降)。"""
+    _set_override(conn, _URL)
+    icon_revalidate.revalidate(conn, prober=_prober(_FP_A), urls={_MEMBER: _URL})
+    _set_override(conn, _URL2)
+    icon_revalidate.revalidate(conn, prober=_prober(_FP_B), urls={_MEMBER: _URL2})
+    # 攻撃者が override_log を残さずに URL を A へ戻す(A の set 記録は前回検査より前)。
+    result = icon_revalidate.revalidate(conn, prober=_prober(_FP_A), urls={_MEMBER: _URL})
+    assert [e.event for e in result.events] == ["url_unverified"]
+    assert result.urgent is True
+
+
+def test_url_change_back_to_the_ledger_value_warns_but_is_not_urgent(conn):
+    """台帳(config/org.yaml)の値への変更は git 経路。報告はするが緊急にはしない。"""
+    ledger_url = org.members()[_MEMBER].icon_url
+    icon_revalidate.revalidate(conn, prober=_prober(_FP_A), urls={_MEMBER: _URL})
+    result = icon_revalidate.revalidate(
+        conn, prober=_prober(_FP_B), urls={_MEMBER: ledger_url}
+    )
+    assert [e.event for e in result.events] == ["url_unverified"]
+    assert result.url_unverified[0].after["source"] == "ledger"
+    assert result.urgent is False
+
+
+def test_reset_record_authorizes_return_to_the_ledger_value(conn):
+    """上書きの解除(reset)で台帳値へ戻るのは正規の操作。通知しない。"""
+    ledger_url = org.members()[_MEMBER].icon_url
+    _set_override(conn, _URL)
+    icon_revalidate.revalidate(conn, prober=_prober(_FP_A), urls={_MEMBER: _URL})
+    org.clear_icon_override(conn, _MEMBER, "representative")
+    result = icon_revalidate.revalidate(
+        conn, prober=_prober(_FP_B), urls={_MEMBER: ledger_url}
+    )
+    assert result.events == []
+
+
+def test_first_observation_of_a_url_is_not_flagged(conn):
+    """初回観測は比較対象が無い。照合の対象外にする(全メンバーが毎回警告にならない)。"""
+    result = icon_revalidate.revalidate(conn, prober=_prober(_FP_A), urls={_MEMBER: _URL2})
+    assert result.events == []
 
 
 # ── 報告(#運営)─────────────────────────────────────────────────────────────
@@ -189,7 +330,9 @@ def test_run_revalidation_enqueues_report_on_change(conn, run_id):
     assert author_member_id == org.member_for_role(icon_revalidate.REPORT_ROLE).id
     assert org.AUTHOR_MEMBER_KEY not in embed_json["author"]
     assert any(_MEMBER in f["name"] for f in embed_json["fields"])
-    assert result.as_runtime() == {"checked": 1, "changed": 1, "errors": 0, "cleared": 0}
+    assert result.as_runtime() == {
+        "checked": 1, "changed": 1, "errors": 0, "cleared": 0, "url_unverified": 0
+    }
 
 
 def test_report_embed_is_flash_colored_only_for_changes(conn):
