@@ -92,11 +92,12 @@ def test_ingest_daily_quotes_writes_bars_with_lineage(conn, run, store):
         )
         assert cur.fetchone()[0] == 2
 
-    # 各バーに証憑リネージ辺。
+    # 各バーに証憑リネージ辺(共有 DB の既存辺と区別するため自 run に絞る)。
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM meta.lineage_edges "
-            "WHERE from_kind='bars' AND to_kind='evidence'"
+            "WHERE from_kind='bars' AND to_kind='evidence' AND run_id=%s",
+            (run.run_id,),
         )
         assert cur.fetchone()[0] == 2
 
@@ -112,7 +113,8 @@ def test_ingest_daily_quotes_maps_v2_ohlcv(conn, run, store):
         cur.execute(
             "SELECT open, high, low, close, volume FROM market.bars b "
             "JOIN market.instruments i USING (instrument_id) "
-            "WHERE i.symbol='7203.T' AND b.source='jquants'"
+            "WHERE i.symbol='7203.T' AND b.source='jquants' AND b.run_id=%s",
+            (run.run_id,),
         )
         assert cur.fetchone() == (100, 110, 95, 105, 1000)
 
@@ -125,7 +127,10 @@ def test_ingest_daily_quotes_idempotent(conn, run, store):
     assert r1["written"] == 2
     assert r2["written"] == 0  # 同一 PK は増えない
     with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM market.bars WHERE source='jquants'")
+        cur.execute(
+            "SELECT count(*) FROM market.bars WHERE source='jquants' AND run_id=%s",
+            (run.run_id,),
+        )
         assert cur.fetchone()[0] == 2
 
 
