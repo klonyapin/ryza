@@ -1036,17 +1036,22 @@ def page_approvals(conn) -> None:
         st.markdown(f":red[{line}]" if oldest >= 48 else line)
         st.caption("48h 超過はみなし承認の期限(定款第3条)に触れる可能性がある。")
 
-    st.subheader("承認・決定の履歴(governance.decisions)")
+    st.subheader("承認・決定の現状(governance.current_decisions)")
     decisions = queries.fetch_decisions(conn, limit=50)
     if not decisions:
         st.info("決定記録はまだない(Discord 承認 UI・みなし承認が書く)")
     else:
         df = _df(decisions)
-        df.insert(0, "区分", df["decision"].map(lambda d: "みなし" if d == "deemed" else "明示"))
+        # 「否認済み」を先頭列に出す: 代表が否認した承認を承認済みのまま見せないため
+        # (独立役員審査 0021 C-5)。区分はみなし/明示の別(deemed_ratio の前提)。
+        df.insert(0, "状態", df["is_vetoed"].map(lambda v: "否認済み" if v else "有効"))
+        df.insert(1, "区分", df["decision"].map(lambda d: "みなし" if d == "deemed" else "明示"))
+        vetoed = int(df["is_vetoed"].sum())
         st.caption(
             f"直近 {len(df)} 件(みなし {int((df['区分'] == 'みなし').sum())} / "
-            f"明示 {int((df['区分'] == '明示').sum())})— "
-            "みなし承認は通知と同時発効・代表はいつでも否認可(定款第3条 v0.4)"
+            f"明示 {int((df['区分'] == '明示').sum())}・うち否認済み {vetoed})— "
+            "みなし承認は通知と同時発効・代表はいつでも否認可(定款第3条 v0.4)。"
+            "否認は取消(revert_commit)と派生効果の #運営 報告を伴う"
         )
         st.dataframe(df, use_container_width=True, hide_index=True)
 

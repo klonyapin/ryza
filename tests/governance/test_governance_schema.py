@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from ryza.db.conn import connect
+from ryza.governance import personas
 from ryza.governance.decisions import RESERVED_KIND_BY_MATTER
 from ryza.governance.personas import assume_role, recent_stances, record_stance
 from ryza.provenance import start_run
@@ -259,13 +260,60 @@ def test_stance_source_defaults_to_direct(conn, run_id):
     conn.rollback()
 
 
-def test_unknown_source_rejected(conn, run_id):
-    """語彙外の出所は CHECK で拒否(出所不明の行を作らせない)。"""
-    with pytest.raises(psycopg.errors.CheckViolation):
+def test_unknown_source_rejected_before_insert(conn, run_id):
+    """語彙外の出所は INSERT 前に弾く(独立役員審査 0021 C-6 の対称化)。
+
+    DB の CHECK が一次統制であることは変わらないが、CheckViolation は
+    トランザクションを中断させ、同一トランザクションで議事録を書いている
+    役員室の書込を巻き添えにする。
+    """
+    with pytest.raises(ValueError, match="未知の stance 出所"):
         record_stance(
             conn, role="cio", kind="claim", summary="出所不明",
             run_id=run_id, source="hallway",
         )
+    # トランザクションが中断していない = 続けて正常な記録ができる。
+    assert record_stance(
+        conn, role="cio", kind="claim", summary="正常記録", run_id=run_id
+    ) > 0
+    conn.rollback()
+
+
+def test_unknown_source_rejected_by_schema(conn, run_id):
+    """アプリ検証を迂回しても CHECK が最後の防衛線(一次統制はスキーマ側)。"""
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            cur.execute(
+                """
+                INSERT INTO governance.stances (role, kind, summary, run_id, source)
+                VALUES ('cio', 'claim', '出所不明', %s, 'hallway')
+                """,
+                (run_id,),
+            )
+    conn.rollback()
+
+
+def test_blind_mode_is_allowlist_not_denylist(conn, run_id):
+    """盲検は allowlist — 語彙に後から足された出所は自動的に載らない(C-6)。
+
+    denylist(会議由来を除外)だと、新しい出所を足した者・source の指定を忘れた
+    書き手の双方が「盲検に載る」側へ倒れる(fail-open)。盲検の穴は静かに開いて
+    気付かれないため、未知の出所は載せない側へ倒す。
+    """
+    assert set(personas.BLIND_INCLUDED_SOURCES) <= set(personas.SOURCES)
+    # allowlist に無い既知の出所(committee)は載らない。
+    unlisted = [s for s in personas.SOURCES if s not in personas.BLIND_INCLUDED_SOURCES]
+    assert unlisted, "allowlist が全出所を含むなら盲検が機能していない"
+    for source in unlisted:
+        record_stance(
+            conn, role="independent_officer", kind="claim",
+            summary=f"{source} 由来の主張", run_id=run_id, source=source,
+        )
+    got = recent_stances(
+        conn, "independent_officer", limit=50,
+        include_sources=personas.BLIND_INCLUDED_SOURCES,
+    )
+    assert got == []
     conn.rollback()
 
 
@@ -308,7 +356,7 @@ def test_blind_mode_does_not_resurrect_retracted_stances(conn, run_id):
         run_id=run_id, retracts=sid, source="office_chat",
     )
     got = recent_stances(
-        conn, "cio", limit=50, exclude_sources=("office_chat", "committee")
+        conn, "cio", limit=50, include_sources=personas.BLIND_INCLUDED_SOURCES
     )
     assert [s.stance_id for s in got] == []
     conn.rollback()
@@ -438,8 +486,27 @@ def test_reserved_matters_cover_governance_yaml(conn):
         )
         row = cur.fetchone()
     assert row is not None, "decisions_deemed_not_reserved_check が存在しない"
-    for matter, kind in RESERVED_KIND_BY_MATTER.items():
-        assert f"'{kind}'" in row[0], f"{matter} の kind={kind} が CHECK に無い"
+    # 双方向で突合する(独立役員審査 0021 C-11)。部分文字列検査だけでは
+    # 「CHECK 側にだけ余分な kind がある」= 実際には禁止されていない専決事項が
+    # あるのに Python 側が気付かない、という片方向の漏れを検出できない。
+    assert _constraint_kind_set(row[0]) == set(RESERVED_KIND_BY_MATTER.values()), (
+        f"CHECK の kind 集合 {_constraint_kind_set(row[0])} と "
+        f"RESERVED_KIND_BY_MATTER {set(RESERVED_KIND_BY_MATTER.values())} が一致しない"
+    )
+
+
+def _constraint_kind_set(constraint_def: str) -> set[str]:
+    """``CHECK (... kind <> ALL (ARRAY['a'::text, ...]))`` から kind 集合を取り出す。
+
+    PostgreSQL は ``NOT IN (...)`` を ``<> ALL (ARRAY[...])`` に正規化して保存する。
+    ``decision`` 側の比較値 ``'deemed'`` は ARRAY の外にあるため混入しない。
+    """
+    array_part = constraint_def[constraint_def.index("ARRAY[") + len("ARRAY["):]
+    array_part = array_part[: array_part.index("]")]
+    return {
+        item.strip().split("::")[0].strip().strip("'")
+        for item in array_part.split(",")
+    }
 
 
 # ── deemed の実行主体はシステム(独立役員審査 C-4)────────────────────────
@@ -464,10 +531,17 @@ def test_explicit_approval_by_representative_still_allowed(conn):
 
 
 # ── 事後否認と現決定 view(0021・定款 v0.4 第3条「いつでも否認できる」)────────
+_CURRENT_COLUMNS = (
+    "effective_decision", "recorded_decision", "is_vetoed", "veto_reason",
+    "revert_commit", "derived_effects_ref", "veto_id", "veto_kind",
+)
+
+
 def _new_veto(
     cur,
     decision_id: int,
     *,
+    kind: str = "veto",
     reason: str = "リスク上限の緩和方向のため否認",
     vetoed_by: str = "999",
     revert_commit: str | None = None,
@@ -476,34 +550,26 @@ def _new_veto(
     cur.execute(
         """
         INSERT INTO governance.decision_vetoes
-            (decision_id, vetoed_by, reason, revert_commit, derived_effects_ref)
-        VALUES (%s, %s, %s, %s, %s)
+            (decision_id, kind, vetoed_by, reason, revert_commit, derived_effects_ref)
+        VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING veto_id
         """,
-        (decision_id, vetoed_by, reason, revert_commit, derived_effects_ref),
+        (decision_id, kind, vetoed_by, reason, revert_commit, derived_effects_ref),
     )
     return cur.fetchone()[0]
 
 
 def _current(cur, proposal_ref: str) -> dict:
     cur.execute(
-        """
-        SELECT effective_decision, recorded_decision, is_vetoed, veto_reason,
-               revert_commit, derived_effects_ref, veto_id
+        f"""
+        SELECT {", ".join(_CURRENT_COLUMNS)}
         FROM governance.current_decisions WHERE proposal_ref = %s
-        """,
+        """,  # noqa: S608 - 固定の列名タプル
         (proposal_ref,),
     )
     row = cur.fetchone()
     assert row is not None, f"現決定に {proposal_ref} が無い"
-    return dict(
-        zip(
-            ("effective_decision", "recorded_decision", "is_vetoed", "veto_reason",
-             "revert_commit", "derived_effects_ref", "veto_id"),
-            row,
-            strict=True,
-        )
-    )
+    return dict(zip(_CURRENT_COLUMNS, row, strict=True))
 
 
 def test_veto_insert_and_view_reflects_it(conn):
@@ -520,13 +586,8 @@ def test_veto_insert_and_view_reflects_it(conn):
     conn.rollback()
 
 
-def test_explicit_approval_can_also_be_vetoed(conn):
-    """否認は deemed 行に限らない(スキーマは全 decision に一般化 — 0021 の設計判断)。
-
-    定款第3条の否認権はみなし承認の文脈で定められているが、明示承認の撤回を
-    スキーマが拒むと証跡が DB の外へ逃げる。否認は効力を弱める方向にしか
-    働かないため、一般化しても 3専決の統制は緩まない。
-    """
+def test_explicit_approval_can_be_vetoed(conn):
+    """明示承認も否認できる(定款は明示承認の撤回を禁じていない)。"""
     with conn.cursor() as cur:
         did = _new_decision(cur, "live-money-veto", "approve", kind="budget")
         assert _new_veto(cur, did, reason="増資額の再検討のため") > 0
@@ -534,18 +595,110 @@ def test_explicit_approval_can_also_be_vetoed(conn):
     conn.rollback()
 
 
-def test_latest_veto_wins_in_view(conn):
-    """1決定に複数行を許し、view は最新行を返す(否認 → 取消完了 を追記で表現)。"""
+@pytest.mark.parametrize("decision", ["reject", "question"])
+def test_reject_and_question_cannot_be_vetoed(conn, decision):
+    """却下・質問は否認できない(独立役員審査 0021 C-2)。
+
+    却下に否認を1行付けると現決定は 'vetoed' を返し、「却下されている」という
+    阻止の根拠が消える。将来この view を読んで発効を止める判定は fail-open で
+    外れる(却下を否認して通す、という抜け道になる)。
+    """
+    with conn.cursor() as cur:
+        did = _new_decision(cur, f"nonvetoable-{decision}", decision)
+        with pytest.raises(psycopg.errors.RaiseException, match="否認できない"):
+            _new_veto(cur, did)
+    conn.rollback()
+
+
+def test_unknown_veto_kind_rejected(conn):
+    """否認行の種別語彙は CHECK で固定(veto|revert_complete|withdrawal)。"""
+    with conn.cursor() as cur:
+        did = _new_decision(cur, "veto-bad-kind", "deemed")
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _new_veto(cur, did, kind="cancel")
+    conn.rollback()
+
+
+def test_withdrawal_clears_vetoed_state(conn):
+    """否認の撤回で現決定は否認前に戻る(誤った decision_id への否認からの復旧)。
+
+    0007 の UNIQUE(proposal_ref) により提案の再記録はできないため、撤回の表現が
+    無いと誤操作からの復旧手段が存在しない(独立役員審査 0021 C-3)。
+    """
+    with conn.cursor() as cur:
+        did = _new_decision(cur, "veto-withdrawn", "deemed")
+        _new_veto(cur, did, reason="誤った対象への否認")
+        assert _current(cur, "veto-withdrawn")["is_vetoed"] is True
+        _new_veto(cur, did, kind="withdrawal", reason="対象取り違えのため否認を撤回")
+        row = _current(cur, "veto-withdrawn")
+    assert row["is_vetoed"] is False
+    assert row["effective_decision"] == "deemed"  # 否認前の効力に戻る
+    assert row["veto_kind"] == "withdrawal"       # 履歴自体は残る
+    conn.rollback()
+
+
+def test_revert_completion_is_appended_not_overwritten(conn):
+    """否認 → 取消完了 を追記で表現し、現決定に最新の取消情報が映る。"""
     with conn.cursor() as cur:
         did = _new_decision(cur, "ips-rev-veto-then-revert", "deemed")
         _new_veto(cur, did, reason="否認(取消未完了)")
         _new_veto(
-            cur, did, reason="否認に伴う取消完了",
+            cur, did, kind="revert_complete", reason="否認に伴う取消完了",
             revert_commit="deadbeef", derived_effects_ref="discord://運営/12345",
         )
         row = _current(cur, "ips-rev-veto-then-revert")
     assert row["revert_commit"] == "deadbeef"
     assert row["derived_effects_ref"] == "discord://運営/12345"
+    assert row["is_vetoed"] is True  # 取消完了は否認を解除しない
+    conn.rollback()
+
+
+def test_uninformative_append_does_not_erase_existing_values(conn):
+    """情報の無い追記が既記録を消さない(独立役員審査 0021 C-4)。
+
+    view が行単位で最新1行を採ると、revert_commit を持たない後続の追記
+    (例: 派生効果の追加報告)が記録済みの revert_commit を NULL で覆い隠す。
+    列ごとに「最後に値が入った行」を採ることでこれを防ぐ。
+    """
+    with conn.cursor() as cur:
+        did = _new_decision(cur, "veto-column-wise", "deemed")
+        _new_veto(cur, did, reason="否認")
+        _new_veto(
+            cur, did, kind="revert_complete", reason="取消完了",
+            revert_commit="cafebabe",
+        )
+        # revert_commit を持たない追記(派生効果だけの報告)。
+        _new_veto(
+            cur, did, kind="revert_complete", reason="派生効果の追加報告",
+            derived_effects_ref="discord://運営/777",
+        )
+        row = _current(cur, "veto-column-wise")
+    assert row["revert_commit"] == "cafebabe"          # 消えない
+    assert row["derived_effects_ref"] == "discord://運営/777"
+    conn.rollback()
+
+
+def test_view_order_is_by_veto_id_not_timestamp(conn):
+    """最新行の判定は veto_id 単独(独立役員審査 0021 C-10)。
+
+    vetoed_at は呼び出し側が任意の値を渡せるため、過去日時の行を後から追記すると
+    「最新の追記」と「最新の時刻」が食い違う。追記オンリー表で最後に書かれた行を
+    一意に決めるのは IDENTITY だけ。
+    """
+    with conn.cursor() as cur:
+        did = _new_decision(cur, "veto-stale-timestamp", "deemed")
+        _new_veto(cur, did, reason="否認")
+        # 過去日時を持つ撤回行を後から追記する。時刻順なら否認が最新に見える。
+        cur.execute(
+            """
+            INSERT INTO governance.decision_vetoes
+                (decision_id, kind, vetoed_by, reason, vetoed_at)
+            VALUES (%s, 'withdrawal', '999', '撤回', now() - interval '10 days')
+            """,
+            (did,),
+        )
+        row = _current(cur, "veto-stale-timestamp")
+    assert row["is_vetoed"] is False  # 後から書かれた撤回が勝つ
     conn.rollback()
 
 
@@ -598,6 +751,30 @@ def test_vetoes_are_append_only(conn):
             cur.execute(
                 "DELETE FROM governance.decision_vetoes WHERE veto_id = %s", (vid,)
             )
+    conn.rollback()
+
+
+def test_decisions_are_append_only(conn):
+    """承認記録そのものが UPDATE / DELETE 不可(独立役員審査 0021 C-1)。
+
+    0021 が別表化を選んだ根拠は「decisions を UPDATE すると `Approved:` トレーラが
+    指す承認記録の意味が遡及改変される」ことにある。原本が可変のままだと、派生記録
+    (否認)だけを不変にしても証跡性は原本の可変性で決まってしまう(保護の逆転)。
+    """
+    with conn.cursor() as cur:
+        did = _new_decision(cur, "decisions-append-only-1", "approve")
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.RaiseException):
+            cur.execute(
+                "UPDATE governance.decisions SET decision = 'reject' WHERE id = %s",
+                (did,),
+            )
+    conn.rollback()
+    with conn.cursor() as cur:
+        did = _new_decision(cur, "decisions-append-only-2", "approve")
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.RaiseException):
+            cur.execute("DELETE FROM governance.decisions WHERE id = %s", (did,))
     conn.rollback()
 
 

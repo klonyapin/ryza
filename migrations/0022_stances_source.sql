@@ -29,8 +29,15 @@
 --
 -- 'committee' を書き手より先に列挙するのは、**後から足す側が既定の 'direct' で
 -- 済ませてしまう**のを防ぐためである(0019 が未登録 kind='constitution' を禁止側に
--- 先回り列挙したのと同じ動機 — 遅れて開く穴を作らない)。盲検除外集合にも同時に
--- 入れておくので、書き手が現れた時点で自動的に正しく扱われる。
+-- 先回り列挙したのと同じ動機 — 遅れて開く穴を作らない)。
+--
+-- ── 盲検は allowlist(独立役員審査 0021 C-6)────────────────────────────────
+-- 盲検着任(personas.assume_role(blind=True))が読むのは
+-- ``BLIND_INCLUDED_SOURCES``(現状 'direct' のみ)に**含まれる**出所だけである。
+-- 当初は「会議由来を除外する」denylist だったが、それでは語彙に新しい出所を足した
+-- 者・source の指定を忘れた書き手の双方が、既定で盲検に載る側へ倒れる(fail-open)。
+-- 未知の出所は「盲検に載せない」側へ倒すのが安全側であり、盲検の穴は静かに開いて
+-- 気付かれないため、明示的に許可した出所だけを読む。
 --
 -- ── 既存行の扱い ────────────────────────────────────────────────────────────
 -- 既存行は DEFAULT 'direct' のまま据え置く。理由は2つ:
@@ -57,10 +64,11 @@ CREATE INDEX IF NOT EXISTS stances_role_source_idx
 
 COMMENT ON COLUMN governance.stances.source IS
     'direct(個別レビュー・単独記録。既定)|office_chat(役員室チャット)|committee(正式会議体)。'
-    '会議由来(office_chat・committee)は代表・他役職の発言を聞いた文脈で形成されるため、'
-    '盲検レビューの着任(personas.assume_role(blind=True)— 議論規約3)では読み込まない。';
+    '会議由来(office_chat・committee)は代表・他役職の発言を聞いた文脈で形成される。'
+    '盲検レビューの着任(personas.assume_role(blind=True)— 議論規約3)は allowlist 方式で、'
+    'personas.BLIND_INCLUDED_SOURCES に列挙された出所(現状 direct のみ)しか読まない。';
 
 COMMENT ON TABLE governance.stances IS
     '役職ごとの主張・懸念の要約(追記オンリー)。着任時に直近 N 件を読み込む(05 §2 永続記憶)。'
     '正本は minutes。訂正は retraction 行の追記で表現。'
-    'source が会議由来の行は盲検着任から除外される(0022)。';
+    '盲検着任は source の allowlist(personas.BLIND_INCLUDED_SOURCES)に載る行のみ読む(0022)。';
