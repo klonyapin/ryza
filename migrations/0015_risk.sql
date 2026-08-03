@@ -79,7 +79,36 @@ CREATE TRIGGER limits_state_guard
     BEFORE UPDATE OR DELETE ON risk.limits_state
     FOR EACH ROW EXECUTE FUNCTION risk.guard_limits_state();
 
-REVOKE DELETE ON risk.limits_state FROM PUBLIC;
+-- TRUNCATE は行トリガを迂回する(独立役員審査 2026-08-03 実証)ため文トリガで封鎖する。
+-- dd_hard 保持行が1件でもあれば TRUNCATE 不可。台帳(events)は監査証跡のため無条件不可。
+CREATE FUNCTION risk.forbid_truncate_limits_state() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM risk.limits_state WHERE dd_hard) THEN
+        RAISE EXCEPTION
+            'dd_hard 保持行が存在するため risk.limits_state の TRUNCATE は禁止(IPS §3.2 復帰条項)';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER limits_state_no_truncate
+    BEFORE TRUNCATE ON risk.limits_state
+    FOR EACH STATEMENT EXECUTE FUNCTION risk.forbid_truncate_limits_state();
+
+CREATE FUNCTION risk.forbid_truncate_events() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'risk.limits_state_events の TRUNCATE は禁止(追記オンリーの監査証跡)';
+END;
+$$;
+
+CREATE TRIGGER limits_state_events_no_truncate
+    BEFORE TRUNCATE ON risk.limits_state_events
+    FOR EACH STATEMENT EXECUTE FUNCTION risk.forbid_truncate_events();
+
+REVOKE DELETE, TRUNCATE ON risk.limits_state FROM PUBLIC;
+REVOKE TRUNCATE ON risk.limits_state_events FROM PUBLIC;
 
 -- ────────────────────────────────────────────────────────────────────────────
 -- market.instrument_classification: 銘柄マスタ由来の決定論分類(ゲート入力の正)
@@ -109,7 +138,10 @@ COMMENT ON COLUMN risk.limits_state_events.metrics IS
 
 COMMENT ON FUNCTION risk.guard_limits_state IS
     'dd_hard true→false は解除キー(GUC ryza.dd_hard_release=book_id)なしでは禁止。'
-    '行 DELETE は無条件禁止。解除キーを立てるのは risk.state.release_dd_hard のみ。';
+    'dd_hard 保持中の行 DELETE は禁止(false 行の削除は可)。'
+    '解除キーを立てるのは risk.state.release_dd_hard のみ。';
+COMMENT ON FUNCTION risk.forbid_truncate_limits_state IS
+    'TRUNCATE は行トリガを迂回するため文トリガで封鎖(dd_hard 保持行があれば不可)。';
 
 COMMENT ON TABLE market.instrument_classification IS
     '銘柄マスタ由来の決定論分類(ゲート G-1/G-2 入力の正)。行なし=未取得(fail-closed)、'

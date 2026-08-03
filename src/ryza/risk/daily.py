@@ -78,13 +78,14 @@ def load_nav_series(conn: psycopg.Connection, book_id: str) -> list[engine.NavPo
 
 
 def load_positions(
-    conn: psycopg.Connection, book_id: str
+    conn: psycopg.Connection, book_id: str, *, as_of: datetime
 ) -> tuple[list[engine.RiskPosition], list[str]]:
     """帳簿の現在ポジション(全ポッド合算・銘柄単位)を時価評価する。
 
-    時価は ``market.bars``(1d)の最新終値×現行銘柄の乗数。時価の無い銘柄は
-    評価から除外し notes に明記する(fail-safe: 落とさず測れる範囲で測り、
-    欠測は隠さない。発注時の欠測はゲート側が fail-closed で block する)。
+    時価は ``market.bars``(1d)の **as_of 以前の**最新終値×現行銘柄の乗数
+    (point-in-time — 不変原則4。過去日付での再実行に未来バーを混入させない)。
+    時価の無い銘柄は評価から除外し notes に明記する(fail-safe: 落とさず測れる
+    範囲で測り、欠測は隠さない。発注時の欠測はゲート側が fail-closed で block する)。
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -106,9 +107,10 @@ def load_positions(
             SELECT DISTINCT ON (instrument_id) instrument_id, close
             FROM market.bars
             WHERE instrument_id = ANY(%s) AND timeframe = '1d' AND close IS NOT NULL
+              AND ts <= %s
             ORDER BY instrument_id, ts DESC, as_of DESC
             """,
-            (ids,),
+            (ids, as_of),
         )
         prices = {r[0]: Decimal(r[1]) for r in cur.fetchall()}
         cur.execute(
@@ -154,10 +156,11 @@ def load_instrument_returns(
                 WHERE instrument_id = ANY(%s) AND timeframe = '1d'
                   AND close IS NOT NULL
                   AND ts >= %s - make_interval(days => %s)
+                  AND ts <= %s
                 ORDER BY instrument_id, ts, as_of DESC
             ) b ORDER BY instrument_id, ts
             """,
-            (instrument_ids, as_of, _RETURN_LOOKBACK_DAYS),
+            (instrument_ids, as_of, _RETURN_LOOKBACK_DAYS, as_of),
         )
         rows = cur.fetchall()
     closes: dict[int, list[tuple[Any, Decimal]]] = {}
@@ -304,7 +307,7 @@ def run_risk_daily(
             oid = enqueue(conn, channel_ops, embed, run.run_id, urgent=True)
             detail[book_id] = {"status": "no_nav", "report_outbox_id": oid}
             continue
-        positions, notes = load_positions(conn, book_id)
+        positions, notes = load_positions(conn, book_id, as_of=as_of)
         returns = load_instrument_returns(
             conn, [p.instrument_id for p in positions], as_of=as_of
         )
@@ -314,8 +317,13 @@ def run_risk_daily(
             positions, state.nav, _load_cash(conn, book_id), ips
         )
         embed = build_risk_embed(book_id, state, effective, usage, ips, as_of=as_of)
+        # urgent: フラグ到達に加え、保有ありの ES 測定空白(判定保留)も要確認として上げる。
         oid = enqueue(
-            conn, channel_ops, embed, run.run_id, urgent=any(effective.values())
+            conn,
+            channel_ops,
+            embed,
+            run.run_id,
+            urgent=any(effective.values()) or state.es95.deferred,
         )
         detail[book_id] = {
             "status": "measured",

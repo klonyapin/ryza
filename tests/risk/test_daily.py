@@ -6,8 +6,15 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
+
 from ryza.gate.orders import gate_and_record
-from ryza.risk.daily import load_nav_series, run_risk_daily
+from ryza.risk.daily import (
+    load_instrument_returns,
+    load_nav_series,
+    load_positions,
+    run_risk_daily,
+)
 
 _AS_OF = datetime(2030, 2, 1, 0, 0, tzinfo=UTC)
 
@@ -151,6 +158,67 @@ def test_insufficient_data_noted_in_report(conn, run_id):
     embed, _ = _reports(conn)[0]
     notes = next(f for f in embed["fields"] if f["name"] == "注記")
     assert "データ不足 2/20営業日" in notes["value"]
+
+
+# ── point-in-time(不変原則4): as_of 以降のバーを測定に混入させない ─────────────
+def _seed_instrument_position_bars(conn, run_id, *, closes, book="DEMO_FUND"):
+    """銘柄+ポジション+日次バー(closes: {ts(datetime): close})を仕込む。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO market.instruments (symbol, asset_class, venue, currency, valid_from)
+            VALUES ('PIT.T', 'equity', 'TSE', 'JPY', now())
+            RETURNING instrument_id
+            """
+        )
+        inst = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO trading.positions
+                (book_id, fm, instrument_id, asset_class, qty, avg_cost, run_id)
+            VALUES (%s, 'ben', %s, 'equity_jp', 100, 1000, %s)
+            """,
+            (book, inst, run_id),
+        )
+        for ts, close in closes.items():
+            cur.execute(
+                """
+                INSERT INTO market.bars
+                    (instrument_id, ts, timeframe, close, source, as_of, run_id)
+                VALUES (%s, %s, '1d', %s, 'test', %s, %s)
+                """,
+                (inst, ts, Decimal(str(close)), ts, run_id),
+            )
+    return inst
+
+
+def test_load_positions_ignores_future_bars(conn, run_id):
+    inst = _seed_instrument_position_bars(
+        conn,
+        run_id,
+        closes={
+            datetime(2030, 1, 30, 6, tzinfo=UTC): 1000,
+            datetime(2030, 2, 5, 6, tzinfo=UTC): 9999,  # as_of より未来
+        },
+    )
+    positions, notes = load_positions(conn, "DEMO_FUND", as_of=_AS_OF)
+    pos = next(p for p in positions if p.instrument_id == inst)
+    assert pos.value == Decimal(100) * Decimal(1000)  # 未来バー(9999)を使わない
+    assert notes == []
+
+
+def test_load_instrument_returns_ignores_future_bars(conn, run_id):
+    inst = _seed_instrument_position_bars(
+        conn,
+        run_id,
+        closes={
+            datetime(2030, 1, 29, 6, tzinfo=UTC): 100,
+            datetime(2030, 1, 30, 6, tzinfo=UTC): 110,
+            datetime(2030, 2, 5, 6, tzinfo=UTC): 220,  # as_of より未来
+        },
+    )
+    returns = load_instrument_returns(conn, [inst], as_of=_AS_OF)
+    assert list(returns[inst].values()) == [pytest.approx(0.10)]  # 未来リターンなし
 
 
 # ── ゲート(T-014)との結合: エンジンが立てたフラグで block ─────────────────────

@@ -98,8 +98,9 @@ def _returns_map(instrument_id, values, *, start=date(2029, 1, 1)):
 
 
 def test_es95_no_positions_is_zero():
-    result = es95([], Decimal(10_000_000), {})
+    result = es95([], Decimal(10_000_000), {}, min_obs=20)
     assert result.adopted == 0.0 and result.n_obs == 0
+    assert not result.deferred and result.excluded == ()
 
 
 def test_es95_historical_fixed_value():
@@ -107,7 +108,7 @@ def test_es95_historical_fixed_value():
     # = (0.02+0.01)/2 = 1.5%。パラメトリック(σ=0.003455·2.0627=0.71%)より大きい。
     positions = [RiskPosition(1, "equity_jp", Decimal(5_000_000))]
     rets = _returns_map(1, [0.0] * 38 + [-0.04, -0.02])
-    result = es95(positions, Decimal(10_000_000), rets)
+    result = es95(positions, Decimal(10_000_000), rets, min_obs=20)
     assert result.n_obs == 40
     assert result.historical == pytest.approx(0.015)
     assert result.parametric == pytest.approx(0.007127, rel=1e-3)
@@ -118,22 +119,55 @@ def test_es95_parametric_dominates():
     # ±1% 交互(σ=1%)→ param = 0.01·φ(z95)/0.05 = 2.0627% > hist 1%。大きい方を採用。
     positions = [RiskPosition(1, "equity_jp", Decimal(10_000_000))]
     rets = _returns_map(1, [0.01, -0.01] * 20)
-    result = es95(positions, Decimal(10_000_000), rets)
+    result = es95(positions, Decimal(10_000_000), rets, min_obs=20)
     assert result.historical == pytest.approx(0.01)
     assert result.parametric == pytest.approx(0.0206271, rel=1e-4)
     assert result.adopted == result.parametric
 
 
-def test_es95_uses_common_dates_only():
-    # 片方の銘柄にしか無い日付は使わない(欠測日の混入で分散を歪めない)。
+def test_es95_excludes_short_series_and_measures_rest():
+    # 短系列(10 < 20)の銘柄は除外し、残部(30 観測)で測定する(審査条件2の縮退)。
     positions = [
         RiskPosition(1, "equity_jp", Decimal(5_000_000)),
         RiskPosition(2, "equity_us", Decimal(5_000_000)),
     ]
     rets = _returns_map(1, [0.0] * 30)
     rets.update(_returns_map(2, [0.0] * 10))
-    result = es95(positions, Decimal(10_000_000), rets)
-    assert result.n_obs == 10
+    result = es95(positions, Decimal(10_000_000), rets, min_obs=20)
+    assert result.excluded == (2,)
+    assert result.n_obs == 30  # 除外により全体の判定保留化を防ぐ
+    assert not result.deferred  # 除外は 2 銘柄中 1 = 過半ではない
+
+
+def test_es95_deferred_when_excluded_majority():
+    # 除外が過半(1/1)→ 判定保留。
+    positions = [RiskPosition(1, "equity_jp", Decimal(5_000_000))]
+    rets = _returns_map(1, [0.0] * 10)
+    result = es95(positions, Decimal(10_000_000), rets, min_obs=20)
+    assert result.excluded == (1,) and result.deferred
+    assert result.n_obs == 0 and result.adopted == 0.0
+
+
+def test_es95_deferred_when_holdings_but_no_returns():
+    # 保有ありでリターン系列なし → 0 を「リスクなし」と読ませない(判定保留)。
+    positions = [RiskPosition(1, "equity_jp", Decimal(5_000_000))]
+    result = es95(positions, Decimal(10_000_000), {}, min_obs=20)
+    assert result.deferred and result.n_obs == 0
+
+
+def test_es95_common_dates_within_included_only():
+    # 測定対象銘柄同士では共通日で測る(20+20 観測・共通 15 日 → n_obs=15)。
+    from datetime import date as _date
+
+    positions = [
+        RiskPosition(1, "equity_jp", Decimal(5_000_000)),
+        RiskPosition(2, "equity_us", Decimal(5_000_000)),
+    ]
+    rets = _returns_map(1, [0.0] * 20, start=_date(2029, 1, 1))
+    rets.update(_returns_map(2, [0.0] * 20, start=_date(2029, 1, 6)))
+    result = es95(positions, Decimal(10_000_000), rets, min_obs=20)
+    assert result.excluded == ()
+    assert result.n_obs == 15
 
 
 # ── evaluate のフラグ境界(vol / es)──────────────────────────────────────────
@@ -170,14 +204,43 @@ def test_es_exceeded_boundary(ips):
     assert state.es_exceeded
 
 
-def test_es_flag_suppressed_when_es_obs_insufficient(ips):
+def test_es_flag_suppressed_and_deferred_when_series_short(ips):
+    # 唯一の保有銘柄が短系列(10 < 20)→ 除外=過半 → 判定保留+urgent 注記。
     series = constant_growth_series(25, rate="1.001")
     positions = [RiskPosition(1, "equity_jp", Decimal(1_000_000))]
-    rets = _returns_map(1, [-0.9] * 10)  # ES 観測 10 < 20
+    rets = _returns_map(1, [-0.9] * 10)
     state = evaluate(series, positions, rets, ips)
-    assert state.es95.adopted > 0.03
-    assert not state.es_exceeded
-    assert any("ES 観測 10日" in n for n in state.notes)
+    assert state.es95.deferred and not state.es_exceeded
+    assert any("除外" in n for n in state.notes)
+    assert any("【要確認】" in n for n in state.notes)
+
+
+def test_es_note_required_when_holdings_but_no_returns(ips):
+    # (審査条件2a)n_obs=0 かつ保有あり → 沈黙せず必ず注記+判定保留。
+    series = constant_growth_series(25, rate="1.001")
+    positions = [RiskPosition(1, "equity_jp", Decimal(1_000_000))]
+    state = evaluate(series, positions, {}, ips)
+    assert state.es95.deferred and not state.es_exceeded
+    assert any("ES 測定不能" in n for n in state.notes)
+
+
+def test_es_partial_exclusion_still_flags_on_remainder(ips):
+    # 除外が過半でなければ残部で測定しフラグは有効(全体の判定保留化を防ぐ)。
+    series = constant_growth_series(25, rate="1.001")
+    nav = series[-1].nav
+    positions = [
+        RiskPosition(1, "equity_jp", Decimal(1_000_000)),
+        RiskPosition(2, "equity_us", Decimal(100_000)),
+    ]
+    rets = _returns_map(1, [0.0] * 38 + [-0.9, -0.7])
+    rets.update(_returns_map(2, [0.0] * 5))  # 短系列 → 除外(1/2 = 過半ではない)
+    state = evaluate(series, positions, rets, ips)
+    assert state.es95.excluded == (2,)
+    assert not state.es95.deferred
+    w = float(Decimal(1_000_000) / nav)
+    assert state.es95.historical == pytest.approx(w * 0.8, rel=1e-6)
+    assert state.es_exceeded  # 残部の測定でフラグ有効
+    assert any("除外" in n for n in state.notes)
 
 
 def test_no_positions_no_es_flag(ips):

@@ -124,6 +124,36 @@ def test_limits_state_delete_allowed_when_not_latched(conn, run_id):
         assert cur.rowcount == 1
 
 
+def test_limits_state_truncate_blocked_while_dd_hard(conn, run_id):
+    """TRUNCATE は行トリガを迂回する(独立役員審査で実証)ため文トリガで封鎖。"""
+    upsert_limits_state(
+        conn, "DEMO_FUND", make_state(dd_hard=True), as_of=_AS_OF, run_id=run_id
+    )
+    with pytest.raises(errors.RaiseException, match="TRUNCATE は禁止"):
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE risk.limits_state CASCADE")
+    assert _row(conn)[1] is True  # dd_hard は残っている
+
+
+def test_limits_state_truncate_allowed_when_not_latched(conn, run_id):
+    """dd_hard 保持行が無ければ TRUNCATE 可(ラッチと無関係な整理は妨げない)。"""
+    upsert_limits_state(conn, "DEMO_FUND", make_state(), as_of=_AS_OF, run_id=run_id)
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE risk.limits_state")
+    assert _row(conn) is None
+
+
+def test_events_truncate_always_blocked(conn, run_id):
+    """台帳の TRUNCATE は無条件禁止(追記オンリーの監査証跡)。"""
+    upsert_limits_state(conn, "DEMO_FUND", make_state(), as_of=_AS_OF, run_id=run_id)
+    with pytest.raises(errors.RaiseException, match="TRUNCATE は禁止"):
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE risk.limits_state_events")
+
+
 def test_release_dd_hard_committee_path(conn, run_id):
     """委員会の明示操作(actor・reason 必須)だけが解除できる。台帳に記録が残る。"""
     upsert_limits_state(

@@ -64,12 +64,20 @@ class RiskPosition:
 
 @dataclass(frozen=True)
 class ESResult:
-    """日次 ES(95%)の計算結果(NAV 比・正の値=損失側)。"""
+    """日次 ES(95%)の計算結果(NAV 比・正の値=損失側)。
+
+    測定空白の縮退(独立役員審査 2026-08-03 条件2): リターン系列が ``min_obs`` に
+    満たない銘柄は測定から**除外して残部で測定**し ``excluded`` に列挙する(1銘柄の
+    データ不足で全体が判定保留化するのを防ぐ)。除外が保有銘柄の過半、または保有が
+    あるのに観測ゼロのときは ``deferred=True``(判定保留 — フラグは立てず urgent 注記)。
+    """
 
     historical: float | None  # ヒストリカル法(観測不足なら None)
     parametric: float | None  # パラメトリック併算
     adopted: float  # 採用値 = max(両者)。ポジション無し/観測ゼロは 0
     n_obs: int  # ポートフォリオ・リターンの観測数
+    excluded: tuple[int, ...] = ()  # 短系列のため測定から除外した instrument_id
+    deferred: bool = False  # 判定保留(除外が過半/保有ありで観測ゼロ)
 
 
 @dataclass(frozen=True)
@@ -131,12 +139,16 @@ def es95(
     positions: Sequence[RiskPosition],
     nav: Decimal,
     instrument_returns: Mapping[int, Mapping[date, float]],
+    *,
+    min_obs: int,
 ) -> ESResult:
     """日次 ES(95%)を NAV 比で返す(ヒストリカル+パラメトリック併算、大きい方を採用)。
 
-    現在ポジションのウェイト(value/NAV・符号付き)を、**全保有銘柄のリターンが揃う日**
+    現在ポジションのウェイト(value/NAV・符号付き)を、**測定対象銘柄のリターンが揃う日**
     だけで構成したポートフォリオ・リターン系列に適用する(欠測日の混入で分散を歪めない)。
-    ポジションが無い間は 0(指示書)。
+    リターン系列が ``min_obs`` 未満の銘柄は除外して残部で測定する(縮退 — ``ESResult``
+    docstring)。除外分のエクスポージャーは測定に含まれない(過小方向)ため、除外は
+    必ず注記され、過半に達したら判定保留(``deferred``)。ポジションが無い間は 0(指示書)。
     """
     if nav <= 0:
         return ESResult(None, None, 0.0, 0)
@@ -149,17 +161,25 @@ def es95(
     if not weights:
         return ESResult(None, None, 0.0, 0)
 
-    series_by_id = {i: instrument_returns.get(i, {}) for i in weights}
+    # 縮退: 短系列(min_obs 未満)の銘柄は除外して残部で測定する(審査条件2)。
+    included = {
+        i: instrument_returns.get(i, {})
+        for i in weights
+        if len(instrument_returns.get(i, {})) >= min_obs
+    }
+    excluded = tuple(sorted(set(weights) - set(included)))
+    deferred = len(excluded) > len(weights) / 2
     common_days: set[date] | None = None
-    for rets in series_by_id.values():
+    for rets in included.values():
         days_set = set(rets)
         common_days = days_set if common_days is None else common_days & days_set
     port: list[float] = []
     for d in sorted(common_days or ()):
-        port.append(sum(w * series_by_id[i][d] for i, w in weights.items()))
+        port.append(sum(w * included[i][d] for i, w in weights.items() if i in included))
     n = len(port)
     if n == 0:
-        return ESResult(None, None, 0.0, 0)
+        # 保有があるのに観測ゼロ = 測定空白。値 0 を「リスクなし」と読ませない(判定保留)。
+        return ESResult(None, None, 0.0, 0, excluded=excluded, deferred=True)
 
     # ヒストリカル: 下位 5% テイル(最低1観測)の平均損失。
     k = max(1, int(n * _ALPHA))
@@ -169,7 +189,7 @@ def es95(
     mean = sum(port) / n
     var = sum((r - mean) ** 2 for r in port) / n
     param = math.sqrt(var) * _PHI_Z95 / _ALPHA
-    return ESResult(hist, param, max(hist, param), n)
+    return ESResult(hist, param, max(hist, param), n, excluded=excluded, deferred=deferred)
 
 
 def evaluate(
@@ -193,19 +213,33 @@ def evaluate(
     days = hl.realized_vol_ewma_days
     sufficient = n >= days
     vol = ewma_vol(returns, days=days)
-    es = es95(positions, series[-1].nav, instrument_returns)
+    es = es95(positions, series[-1].nav, instrument_returns, min_obs=days)
 
     notes = list(extra_notes)
     if not sufficient:
         notes.append(f"データ不足 {n}/{days}営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)")
-    if es.n_obs and es.n_obs < days:
+    if es.excluded:
+        notes.append(
+            f"ES: 短系列(<{days}営業日)のため測定から除外: "
+            f"instruments {list(es.excluded)}(残部で測定 — 除外分は過小方向)"
+        )
+    if es.deferred:
+        # 保有があるのに測定空白/除外が過半 — 判定保留は urgent 注記(審査条件2)。
+        if es.n_obs == 0:
+            notes.append("【要確認】ES 測定不能(保有ありだがリターン系列なし)— 判定保留")
+        else:
+            notes.append("【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)")
+    elif es.n_obs and es.n_obs < days:
         notes.append(f"ES 観測 {es.n_obs}日 < {days}営業日 — ES フラグは判定保留(fail-safe)")
 
     dd_soft = dd >= Decimal(str(hl.dd_soft_limit))
     dd_hard = dd >= Decimal(str(hl.dd_hard_limit))
     vol_exceeded = sufficient and vol is not None and vol > hl.realized_vol_limit
     es_exceeded = (
-        sufficient and es.n_obs >= days and es.adopted > hl.daily_es95_nav_max
+        sufficient
+        and not es.deferred
+        and es.n_obs >= days
+        and es.adopted > hl.daily_es95_nav_max
     )
     return RiskState(
         as_of_day=series[-1].day,
