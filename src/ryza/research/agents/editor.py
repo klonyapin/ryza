@@ -18,9 +18,10 @@ import psycopg
 
 from ryza.provenance import Run, record
 from ryza.research.agents.base import (
+    build_system_prompt,
     build_user_prompt,
+    fenced_json,
     load_current,
-    load_persona,
     save_report,
 )
 from ryza.research.llm import StructuredLLM
@@ -102,14 +103,23 @@ def analyze(
         task=task,
         view=view, docs=[],
         extra={
+            # 下流レポートの scores は**過去の LLM 出力**であり、その文字列値は元をたどれば
+            # 取込文書の本文に由来する(注入の再持ち込み経路)。エージェント名・report_id は
+            # こちらの決定論データなのでフェンス外、scores だけを囲む(審査 C-13)。
             "agent_reports": [
-                {"agent": r.agent, "report_id": r.report_id, "scores": r.scores}
+                {
+                    "agent": r.agent,
+                    "report_id": r.report_id,
+                    "scores": fenced_json(
+                        r.scores, tag=f"agent_report report_id={r.report_id}"
+                    ),
+                }
                 for r in reports
             ],
         },
     )
     result = llm.complete(
-        system=load_persona(AGENT), user=prompt, schema=EDITOR_SCHEMA,
+        system=build_system_prompt(AGENT), user=prompt, schema=EDITOR_SCHEMA,
         task_type="analysis.editor", model_tier=MODEL_TIER, model=model,
     )
     # editor の refs は下流レポートが参照した doc_id の総和を既定にする。

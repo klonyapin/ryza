@@ -12,11 +12,11 @@ import psycopg
 
 from ryza.provenance import Run
 from ryza.research.agents.base import (
+    build_system_prompt,
     build_user_prompt,
     fetch_triage_docs,
     load_current,
     load_document_bodies,
-    load_persona,
     save_report,
 )
 from ryza.research.llm import StructuredLLM
@@ -58,7 +58,7 @@ def analyze(
         extra={"held_ids": held_ids or [], "watchlist_ids": watchlist_ids},
     )
     result = llm.complete(
-        system=load_persona(AGENT), user=prompt, schema=MICRO_SCHEMA,
+        system=build_system_prompt(AGENT), user=prompt, schema=MICRO_SCHEMA,
         task_type="analysis.micro", model_tier=MODEL_TIER, model=model,
     )
     input_refs = _resolve_refs(result.content, docs)
