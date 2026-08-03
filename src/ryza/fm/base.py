@@ -12,11 +12,12 @@ FM(Ben・Jim)は **Intent(採否)** だけを作る。本モジュールが、
 
 設計上の判断:
 
-- **資産クラスの導出** ``ips_asset_class``: ゲートが要求する IPS §8.1 タクソノミー
-  (equity_jp 等)は ``market.instrument_classification``(0015)に列が無いため、
-  銘柄マスタの ``asset_class``×``venue`` から決定論で導く。分類できない銘柄は候補から
-  落とす(fail-closed。ゲートに投げても G-F で block される)。分類列そのものを
-  0015 に足すのは保護領域スキーマの変更で T-017 の範囲外 — 引き継ぎ事項とする
+- **資産クラスは分類表から読むだけ**: ゲートが要求する IPS §8.1 タクソノミー
+  (equity_jp 等)は ``market.instrument_classification``(+0026 履歴)の
+  ``asset_class`` 列(0028 で追加)が正であり、書くのは ``risk/classify.py`` のみ。
+  以前は本モジュールが銘柄マスタから読出しのたびに導出しており分類の正が2箇所に
+  分かれていた(reminder fm-asset-class-taxonomy-column で解消)。**NULL = 分類不能**の
+  銘柄は候補から落とす(fail-closed。ゲートに投げても G-F で block される)
 - **NAV・現金は会計から読む**: NAV は ``ledger.nav_snapshots`` の as_of 以前の最新、
   現金は ``cash`` 勘定の残高。値が無ければ ``None`` のままゲートへ渡し、ゲートが
   fail-closed で block する(FM 側で「たぶん大丈夫」を作らない)
@@ -48,24 +49,6 @@ from ryza.risk.classify import (
 
 _JST = ZoneInfo("Asia/Tokyo")
 
-# 銘柄マスタ(market.instruments)の asset_class×venue → IPS §8.1 タクソノミー。
-# 決定論の対応表。ここに無い組み合わせは分類不能として候補から落とす(fail-closed)。
-_JP_EQUITY_VENUES = frozenset({"TSE"})
-_US_EQUITY_VENUES = frozenset({"NYSE", "NASDAQ"})
-
-
-def ips_asset_class(asset_class: str, venue: str) -> str | None:
-    """銘柄マスタの分類 → IPS §8.1 資産クラス。分類できなければ None。"""
-    if asset_class == "equity":
-        if venue in _JP_EQUITY_VENUES:
-            return "equity_jp"
-        if venue in _US_EQUITY_VENUES:
-            return "equity_us"
-        return None
-    if asset_class == "fx":
-        return "fx"
-    return None
-
 
 @dataclass(frozen=True)
 class Candidate:
@@ -73,7 +56,7 @@ class Candidate:
 
     instrument_id: int
     symbol: str
-    asset_class: str  # IPS §8.1 タクソノミー
+    asset_class: str  # IPS §8.1 タクソノミー(分類表の asset_class 列 — 0028)
     classification: Classification
 
 
@@ -144,15 +127,15 @@ _UNIVERSE_HISTORY_SQL = """
     WITH latest AS (
         SELECT DISTINCT ON (instrument_id)
                instrument_id, universe_tags, instrument_flags, is_single_name,
-               product, unit_size
+               product, unit_size, asset_class
         FROM market.instrument_classification_history
         WHERE as_of <= %(as_of)s AND created_at < %(recorded_before)s
         ORDER BY instrument_id, as_of DESC, history_id DESC
     )
     SELECT DISTINCT ON (i.instrument_id)
-           i.instrument_id, i.symbol, i.asset_class, i.venue,
+           i.instrument_id, i.symbol,
            l.universe_tags, l.instrument_flags, l.is_single_name,
-           l.product, l.unit_size
+           l.product, l.unit_size, l.asset_class
     FROM latest l
     JOIN market.instruments i ON i.instrument_id = l.instrument_id
     WHERE l.universe_tags && %(tags)s
@@ -194,10 +177,12 @@ def load_universe(
         )
         rows = cur.fetchall()
     candidates: list[Candidate] = []
-    for iid, symbol, asset_class, venue, tags, flags, single, product, unit in rows:
-        ips_class = ips_asset_class(asset_class, venue)
+    for iid, symbol, tags, flags, single, product, unit, ips_class in rows:
         if ips_class is None:
-            continue  # 資産クラス分類不能 → 候補にしない(fail-closed)
+            # 資産クラス未分類(0028 の列が NULL)→ 候補にしない(fail-closed)。
+            # ゲート G-F も「タクソノミーに無い」で block するが、そこまで運ぶと
+            # 分類の欠落が block 理由に埋もれるため、ユニバース段で落とす。
+            continue
         candidates.append(
             Candidate(
                 instrument_id=int(iid),
@@ -209,6 +194,7 @@ def load_universe(
                     is_single_name=single,
                     product=product,
                     unit_size=None if unit is None else Decimal(unit),
+                    asset_class=ips_class,
                 ),
             )
         )
@@ -614,7 +600,6 @@ __all__ = [
     "SubmitResult",
     "UniverseRead",
     "dedupe_intents",
-    "ips_asset_class",
     "is_replay",
     "load_nav_and_cash",
     "load_pending_orders",

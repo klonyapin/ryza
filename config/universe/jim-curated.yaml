@@ -1,0 +1,182 @@
+# curated ユニバース: Jim の流動性タグ(liquid_equity)
+#
+# 用途: config/mandates/jim.yaml の universe([liquid_equity, etf, index_futures])のうち
+#       **liquid_equity** に属する銘柄を明示列挙する。決定論ルール
+#       (src/ryza/risk/classify.py)は流動性・時価総額系タグを付けない — 母集団データ
+#       (売買代金の分位など)が要るため。タグが供給されるまで Jim のユニバースは空で
+#       あり、それは fail-closed の設計どおりの挙動である(タグを緩めて埋めてはならない)。
+# 反映: uv run python -m ryza.risk.classify --curated-universe config/universe/jim-curated.yaml
+#       付与は market.instrument_classification(+0026 履歴)へ書かれ、point-in-time で
+#       「いつからその銘柄が liquid_equity だったか」を再現できる。
+# 手順の正: docs/ops/fm-curated-universe.md
+#
+# ── 選定基準(criterion の根拠)────────────────────────────────────────────────
+# 流動性の**本来の**定義は売買代金の実測(例: 直近60営業日の中央値 ≥ ¥10億)である。
+# 現時点の market.bars は Jim 起動前の履歴が十分に貯まっておらず、実測で母集団を切ると
+# 「データが薄い銘柄が流動性で落ちる」のではなく「取込が薄い銘柄が落ちる」ことになる。
+# したがって初版は**代理基準**を使う:
+#
+#   日経平均株価(日経225)の構成銘柄であり、かつ東証プライム市場に上場する内国普通株式
+#
+# 日経225 は日本経済新聞社が「市場流動性」とセクターバランスを選定基準として構成銘柄を
+# 選ぶ株価指数であり(出典: 日本経済新聞社「日経平均株価 算出要領」の銘柄選定基準)、
+# 流動性データを自前で持たない段階の代理指標として妥当である。**代理基準であること自体が
+# 弱点**(構成銘柄の入替は年1回の定期見直しに従うため、流動性の劣化への追随が遅い)なので、
+# 売買代金の実測に置き換える課題を ops/reminders.yaml に登録している
+# (fm-liquid-equity-measured-turnover)。
+#
+# ── この版でカバーしないもの ──────────────────────────────────────────────────
+# - **etf / index_futures タグは供給しない**。ETF はレバレッジ/インバース該当(IPS §5 の
+#   禁止フラグ)を銘柄マスタから決定論で否定できず、「フラグなし」を主張すると fail-open
+#   になる。先物は指数/金利/商品の別がマスタに無い。情報源を決めてから別ファイルで供給する
+#   (reminder: fm-etf-futures-curated-classification)
+# - したがって Jim のユニバースは本ファイル反映後も**現物株のみ**である
+#
+# ── 運用上の注意 ──────────────────────────────────────────────────────────────
+# - 構成銘柄は定期見直し(毎年10月)と臨時入替で変わる。**承認時と定期見直し時に、
+#   entries が当時の日経225 構成銘柄であることを必ず突き合わせること**。本ファイルは
+#   その時点の写しであり、日経225 の正ではない
+# - approved_at が null の間、ローダは読み込みを拒否する(未承認のリストでユニバースを
+#   広げない)。承認は投資委員会(代表)。マンデート自体の変更ではないため定款第3条の
+#   3専決には当たらないが、Jim が売買できる母集団を決める設定であるため記録を残す。
+#   本ファイルは config/governance.yaml の protected_areas(area: mandates)に登録されて
+#   おり、変更コミットには `Approved:` トレーラが要る(承認の正はそちら — 審査 C-24)
+# - **銘柄を1行足すことは「Jim が売れる銘柄を1つ増やす」こと**である。rationale の無い
+#   エントリはローダが拒否する
+# - content_sha256 は criterion + 全エントリ(symbol・tags・rationale)の正規化ハッシュ。
+#   1文字でも変えると読み込みが失敗するので、**内容を変えたら version と併せて更新し、
+#   再承認する**(同じ v1 のまま中身を差し替えられないようにするため — 審査 C-25)。
+#   再計算: uv run python -c "import yaml,pathlib;from ryza.risk.classify import
+#   curated_content_digest as d;r=yaml.safe_load(pathlib.Path('config/universe/jim-curated.yaml')
+#   .read_text());print(d(r['criterion'], r['entries']))"
+
+name: jim-liquid-equity
+version: "1"
+criterion: >-
+  日経平均株価(日経225)の構成銘柄であり、かつ東証プライム市場に上場する内国普通株式。
+  売買代金の実測(直近60営業日中央値)が整備されるまでの代理基準。
+manages_tags: [liquid_equity]
+
+# 承認記録(null の間は反映されない)。approved_at は ISO 日付、approved_by は
+# 'representative' 固定(起草者が自分で名乗れない — 審査 C-24)。
+approved_at: null
+approved_by: null
+
+# criterion + entries の正規化 sha256(内容と版の紐付け — 審査 C-25)。
+content_sha256: "69827e5059efb0215d91216cf7df292f6f055efe4478158cd040c7cf31045921"
+
+entries:
+  # 輸送用機器
+  - symbol: "7203.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(輸送用機器)。時価総額最大級で売買代金も国内最上位"
+  - symbol: "7267.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(輸送用機器)"
+  - symbol: "6902.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(輸送用機器 — 自動車部品)"
+  # 電気機器
+  - symbol: "6758.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(電気機器)"
+  - symbol: "6501.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(電気機器)"
+  - symbol: "6503.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(電気機器)"
+  - symbol: "6594.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(電気機器 — モーター)"
+  - symbol: "6861.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(電気機器 — FA センサ)"
+  - symbol: "6954.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(電気機器 — FA)"
+  - symbol: "6981.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(電気機器 — 電子部品)"
+  - symbol: "8035.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(電気機器 — 半導体製造装置)"
+  - symbol: "6857.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(電気機器 — 半導体検査装置)"
+  - symbol: "6146.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(機械 — 半導体後工程装置)"
+  # 化学・医薬品
+  - symbol: "4063.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(化学)"
+  - symbol: "4568.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(医薬品)"
+  - symbol: "4502.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(医薬品)"
+  - symbol: "4519.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(医薬品)"
+  # 銀行・保険
+  - symbol: "8306.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(銀行)。売買代金は国内最上位"
+  - symbol: "8316.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(銀行)"
+  - symbol: "8411.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(銀行)"
+  - symbol: "8766.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(保険)"
+  # 卸売(総合商社)
+  - symbol: "8058.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(卸売 — 総合商社)"
+  - symbol: "8031.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(卸売 — 総合商社)"
+  - symbol: "8001.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(卸売 — 総合商社)"
+  # 情報通信
+  - symbol: "9432.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(情報・通信)"
+  - symbol: "9433.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(情報・通信)"
+  - symbol: "9984.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(情報・通信)。値動きは大きいが売買代金は最上位"
+  - symbol: "6098.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(サービス)"
+  # 小売・サービス・食品
+  - symbol: "9983.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(小売)。日経平均への寄与度が最大級"
+  - symbol: "4661.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(サービス)"
+  - symbol: "2914.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(食料品)"
+  # 精密機器・機械
+  - symbol: "7741.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(精密機器)"
+  - symbol: "6367.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(機械)"
+  # 不動産・陸運
+  - symbol: "8801.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(不動産)"
+  - symbol: "9022.T"
+    tags: [liquid_equity]
+    rationale: "日経225 構成・東証プライム(陸運)"

@@ -41,7 +41,30 @@ def _tagged(*tags: str) -> Classification:
         is_single_name=True,
         product="listed_equity_cash",
         unit_size=Decimal(100),
+        asset_class="equity_jp",
     )
+
+
+def test_asset_class_comes_from_the_classification_column(conn, mandate, instrument, classify):
+    """資産クラスは**分類表の列**(0028)から来る — FM 側で導出しない。"""
+    iid = instrument(symbol="6503.T")
+    classify(iid, universe_tags=("jp_equity_cash",), asset_class="equity_jp")
+    read = base.load_universe(conn, mandate, as_of=datetime.now(UTC))
+    candidate = next(c for c in read.candidates if c.instrument_id == iid)
+    assert candidate.asset_class == "equity_jp"
+    assert candidate.classification.asset_class == "equity_jp"
+
+
+def test_instrument_without_asset_class_is_dropped(conn, mandate, instrument, classify):
+    """資産クラス未分類(列 NULL)の銘柄は候補にしない(fail-closed — 0028)。
+
+    以前は銘柄マスタから導出していたため、分類表に行がありさえすれば資産クラスは
+    必ず埋まった。列に移した以上、「タグは付いているが資産クラスが無い」curated 行が
+    作れる — その場合はゲートまで運ばずユニバース段で落とす。
+    """
+    iid = instrument(symbol="6504.T")
+    classify(iid, universe_tags=("jp_equity_cash",), asset_class=None)
+    assert iid not in _universe_ids(conn, mandate, as_of=datetime.now(UTC))
 
 
 def test_later_classification_change_does_not_leak_into_the_past(

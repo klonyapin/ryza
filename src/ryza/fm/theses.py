@@ -13,7 +13,9 @@
    次回プロンプトの学習材料になる(指示書6・7。governance.stances と同じ思想)
 4. **検疫** ``quarantine_thesis``: 汚染が判明した提案を再注入の対象から外す
    (``trading.fm_theses_quarantine`` — 追記オンリーと両立する封じ込め。fm_theses は
-   書き換えず、読出し側 3 が除外する。独立役員審査 T-017 C-3)
+   書き換えず、読出し側 3 が除外する。独立役員審査 T-017 C-3)。運用の入口は本モジュールの
+   CLI(``python -m ryza.fm.theses --quarantine <id> --reason ...``)で、手順の正は
+   ``docs/ops/fm-quarantine-runbook.md``
 
 証憑参照(evidence_refs)の語彙 — いずれも ``kind`` で分岐する JSON オブジェクト:
 
@@ -29,8 +31,10 @@
 
 from __future__ import annotations
 
+import argparse
+import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -325,6 +329,37 @@ def quarantine_thesis(
         return cur.fetchone()[0]
 
 
+def load_thesis(conn: psycopg.Connection, thesis_id: int) -> ThesisRecord | None:
+    """1件の提案を**検疫の有無にかかわらず**読む(検疫 CLI の確認表示・監査用)。
+
+    再注入経路(``recent_theses`` / ``open_theses_by_instrument``)と違って検疫済みも
+    返すのは、本関数の用途が「これから検疫する対象を人が読む」ことだからである。
+    プロンプトに戻す経路ではない。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT t.thesis_id, t.fm, t.instrument_id, t.direction, t.thesis_md,
+                   t.invalidation_md, t.as_of, o.status, g.verdict, g.reasons
+            FROM trading.fm_theses t
+            LEFT JOIN trading.orders o ON o.thesis_id = t.thesis_id
+            LEFT JOIN compliance.gate_log g ON g.id = o.gate_log_id
+            WHERE t.thesis_id = %s
+            ORDER BY o.id DESC NULLS LAST
+            LIMIT 1
+            """,
+            (thesis_id,),
+        )
+        r = cur.fetchone()
+    if r is None:
+        return None
+    return ThesisRecord(
+        thesis_id=r[0], fm=r[1], instrument_id=r[2], direction=r[3],
+        thesis_md=r[4], invalidation_md=r[5], as_of=r[6],
+        order_status=r[7], gate_verdict=r[8], gate_reasons=r[9],
+    )
+
+
 def is_quarantined(conn: psycopg.Connection, thesis_id: int) -> bool:
     """当該提案が検疫済みか(監査・運用確認用)。"""
     with conn.cursor() as cur:
@@ -468,6 +503,172 @@ def open_theses_by_instrument(
     }
 
 
+# ── 検疫 CLI(運用の入口 — reminder fm-quarantine-runbook)─────────────────────
+# 手動 SQL より安全な入口を作るのが目的である。素の INSERT には
+#   (1) 対象を読まずに thesis_id を打ち間違える(誤検疫は解除できない)
+#   (2) reason / quarantined_by を空文字で通す
+#   (3) 検疫後に「根拠を失った保有」を確認し忘れる
+# の3つの事故があり、いずれもアプリ層でしか止められない。手順の正は
+# docs/ops/fm-quarantine-runbook.md。
+def _render_thesis(record: ThesisRecord, *, quarantined: bool) -> str:
+    """検疫前に人が読む表示(**本文全文**)。要約しない — 誤爆防止が目的のため。"""
+    gate = record.gate_verdict or "(注文なし)"
+    lines = [
+        f"thesis_id : {record.thesis_id}",
+        f"FM        : {record.fm}   direction: {record.direction}",
+        f"instrument: {record.instrument_id}",
+        f"as_of     : {record.as_of.isoformat()}",
+        f"注文/ゲート: {record.order_status or '(注文なし)'} / {gate}",
+        f"検疫済み  : {'はい(この呼び出しは冪等)' if quarantined else 'いいえ'}",
+        "--- thesis_md ---",
+        record.thesis_md,
+        "--- invalidation_md ---",
+        record.invalidation_md,
+    ]
+    return "\n".join(lines)
+
+
+def _open_instruments(conn: psycopg.Connection, fm: str) -> list[int]:
+    """当該 FM の保有銘柄(全帳簿・qty<>0)。検疫の影響確認に使う。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT instrument_id FROM trading.positions "
+            "WHERE fm = %s AND qty <> 0",
+            (fm,),
+        )
+        return sorted(int(r[0]) for r in cur.fetchall())
+
+
+def two_person_actor(by: str | None, confirmed_by: str | None) -> str:
+    """二者確認の実施主体を組み立てる(空・同一値は ``ThesisError`` — 審査 C-26)。
+
+    runbook は「設計リード + 監査の二者確認」を求めているが、宣言だけでは強制にならない
+    — 誤検疫は解除できないため、二者であることは**コードが要求する**必要がある。
+    同一値を拒むのは、1人が両方の欄に自分を書けば二者確認が形骸化するためである。
+    """
+    first = (by or "").strip()
+    second = (confirmed_by or "").strip()
+    if not first:
+        raise ThesisError("--by は必須(検疫を実施した者)")
+    if not second:
+        raise ThesisError(
+            "--confirmed-by は必須(runbook の二者確認 — 設計リードと監査の2名)"
+        )
+    if first == second:
+        raise ThesisError(
+            f"--by と --confirmed-by が同一({first!r})。二者確認は別人でなければ意味がない"
+        )
+    return f"by={first}; confirmed_by={second}"
+
+
+def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行パス
+    """CLI: 提案の検疫(表示 → 確認 → 登録 → 影響と件数の再表示)。
+
+    ``uv run python -m ryza.fm.theses --quarantine <id> --reason "..." --by A --confirmed-by B``
+
+    ``--show`` は表示のみ(検疫しない)。``--yes`` は thesis_id 再入力のプロンプトを省く
+    (対話端末の無い環境向け)が、**二者確認は省けない** — ``--by`` と ``--confirmed-by``
+    は常に必須で、同一値は拒否する(審査 C-26)。
+    """
+    parser = argparse.ArgumentParser(
+        description="FM 提案の検疫(手順: docs/ops/fm-quarantine-runbook.md)"
+    )
+    parser.add_argument("--quarantine", type=int, metavar="THESIS_ID", help="検疫する提案")
+    parser.add_argument("--show", type=int, metavar="THESIS_ID", help="内容の表示のみ")
+    parser.add_argument("--stats", action="store_true", help="検疫件数の表示のみ")
+    parser.add_argument("--reason", help="検疫の理由(何が汚染したか — 必須)")
+    parser.add_argument("--by", dest="quarantined_by", help="実施者(必須)")
+    parser.add_argument(
+        "--confirmed-by", dest="confirmed_by", help="確認者(必須・--by と別人)"
+    )
+    parser.add_argument(
+        "--yes", action="store_true", help="thesis_id 再入力を省く(二者確認は省けない)"
+    )
+    args = parser.parse_args(argv)
+
+    from ryza.db.conn import connect
+    from ryza.provenance import start_run
+
+    if sum(x is not None for x in (args.quarantine, args.show)) + int(args.stats) != 1:
+        parser.error("--quarantine / --show / --stats のいずれか1つを指定してください")
+
+    now = datetime.now(UTC)
+    if args.stats:
+        conn = connect()
+        try:
+            print(quarantine_stats(conn, as_of=now), file=sys.stderr)
+        finally:
+            conn.close()
+        return 0
+
+    if args.show is not None:
+        conn = connect()
+        try:
+            record = load_thesis(conn, args.show)
+            if record is None:
+                print(f"thesis_id={args.show} は存在しません", file=sys.stderr)
+                return 1
+            print(_render_thesis(record, quarantined=is_quarantined(conn, args.show)))
+        finally:
+            conn.close()
+        return 0
+
+    thesis_id = args.quarantine
+    if not (args.reason or "").strip():
+        parser.error("--reason は必須です(何が汚染したかを残す)")
+    try:
+        actor = two_person_actor(args.quarantined_by, args.confirmed_by)
+    except ThesisError as exc:
+        parser.error(str(exc))
+
+    conn = connect()
+    try:
+        record = load_thesis(conn, thesis_id)
+        if record is None:
+            print(f"thesis_id={thesis_id} は存在しません", file=sys.stderr)
+            conn.close()
+            return 1
+        already = is_quarantined(conn, thesis_id)
+        print(_render_thesis(record, quarantined=already))
+        if not args.yes:
+            # 誤爆防止: y/N ではなく thesis_id の再入力を求める(解除できない操作のため)。
+            answer = input("\n上記を検疫します。thesis_id を再入力してください: ").strip()
+            if answer != str(thesis_id):
+                print("入力が一致しないため中止しました", file=sys.stderr)
+                conn.close()
+                return 1
+    except Exception:
+        conn.close()
+        raise
+
+    run = start_run("fm.quarantine", {"thesis_id": thesis_id})
+    try:
+        with conn.transaction():
+            quarantine_id = quarantine_thesis(
+                conn, thesis_id, reason=args.reason,
+                quarantined_by=actor, run_id=run.run_id,
+            )
+            open_ids = _open_instruments(conn, record.fm)
+            orphaned = quarantined_open_instruments(conn, record.fm, open_ids)
+            stats = quarantine_stats(conn, as_of=now)
+        run.finish("success")
+    except Exception:
+        run.finish("failed")
+        raise
+    finally:
+        conn.close()
+
+    print(f"検疫しました: quarantine_id={quarantine_id}", file=sys.stderr)
+    print(f"検疫件数: {stats}", file=sys.stderr)
+    if orphaned:
+        print(
+            "⚠ 建玉の根拠を失った保有があります(降りる条件が読めない状態 — "
+            f"runbook の『影響確認』へ): instrument_id={sorted(orphaned)}",
+            file=sys.stderr,
+        )
+    return 0
+
+
 __all__ = [
     "DIRECTIONS",
     "EVIDENCE_KINDS",
@@ -476,11 +677,18 @@ __all__ = [
     "ThesisError",
     "ThesisRecord",
     "is_quarantined",
+    "load_thesis",
+    "main",
     "open_theses_by_instrument",
     "quarantine_stats",
     "quarantine_thesis",
     "quarantined_open_instruments",
     "record_thesis",
     "recent_theses",
+    "two_person_actor",
     "validate_evidence_refs",
 ]
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI 実行パス
+    raise SystemExit(main())
