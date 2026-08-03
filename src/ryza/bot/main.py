@@ -4,7 +4,8 @@ systemd(Restart=always)で常駐し:
 - 5秒間隔で ``press.outbox`` を配送し(``outbox.deliver_pending``)、続けて開発室
   (``ops.dev_chat``・0024)の未中継発言を #dev へ中継(``devchat.relay_pending``)。
   順序は固定で、非緊急の中継を Kill Switch 通報の配送より前に置かない
-- 18:00 JST に日報を投入(``daily.enqueue_daily``)
+- 18:00 JST に日報を投入(``daily.enqueue_daily``)し、続けてアイコン URL の指紋を
+  再検証(``ops.icon_revalidate`` — 0033。差し替え・到達不能を検知した日だけ #運営 へ)
 - ``#承認`` のボタン押下を ``governance.decisions`` に記録(オーナー検証)。みなし承認の
   発効通知には**否認ボタン**を付け、押下 → 理由入力(モーダル)→ ``governance.notices``
   経由で否認記録+``#運営`` への取消義務リマインドを1トランザクションで書く。同じ配線を
@@ -50,6 +51,7 @@ from ryza.bot.approvals import KINDS, NotOwnerError, parse_proposal, record_deci
 from ryza.bot.daily import JST
 from ryza.db.conn import connect
 from ryza.governance import devchat, notices
+from ryza.ops import icon_revalidate
 from ryza.provenance import start_run
 
 log = logging.getLogger("ryza.bot")
@@ -403,6 +405,31 @@ class RyzaBot(commands.Bot):
             daily_mod.enqueue_daily(conn, now, r.run_id)
             r.finish("success")
             conn.commit()
+        # 日報とは別の Run として分ける(片方の失敗でもう片方を巻き込まない)。
+        # 外向き HTTP を伴うため、DB だけの日報より先に置かない。
+        await asyncio.to_thread(self._revalidate_icons_sync)
+
+    def _revalidate_icons_sync(self) -> None:
+        """アイコン URL の指紋を再検証する(0033・独立役員審査 0020 C-7 の検知側是正)。
+
+        リマインダー ``icon-rehost-storage`` は週次を想定していたが日次で回す。検査は
+        メンバー数(9件)ぶんの HEAD だけで、通知は遷移があった日にしか出ない
+        (``icon_revalidate.run_revalidation``)ため、頻度を上げても増える騒音は無く、
+        すり替えの検知から通知までのラグだけが最大7日から1日に縮む。
+
+        **失敗は握る**。外部サイトへの HTTP を伴う検査であり、これで Bot の常駐ループを
+        落とすと配送・Kill Switch 操作まで巻き添えになる(0020 C-2 と同じ判断)。
+        """
+        try:
+            with connect() as conn:
+                r = start_run("bot.icon_revalidate", conn=conn)
+                result = icon_revalidate.run_revalidation(conn, r.run_id)
+                r.record_runtime(result.as_runtime())
+                r.finish("success")
+                conn.commit()
+            log.info("アイコン再検証: %s", result.as_runtime())
+        except Exception:  # noqa: BLE001 - 再検証の失敗で常駐ループを死なせない
+            log.exception("アイコン再検証でエラー")
 
     @daily_report.before_loop
     async def _before_daily(self) -> None:
@@ -486,7 +513,12 @@ class RyzaBot(commands.Bot):
                 if msg.channel == "approval" and deemed_ref is None
                 else None
             )
-            embed_json = org.apply_icon_overrides(msg.embed, overrides)
+            # 発信者の内部キーは **embed ではなく列**(0032・独立役員審査 0020 C-10)から
+            # 渡す。0032 以前に投入された行は列が NULL で、その場合だけ resolve_author が
+            # embed 内の旧キーへフォールバックする(後方互換)。
+            embed_json = org.apply_icon_overrides(
+                msg.embed, overrides, member_id=msg.author_member_id
+            )
             # webhook 方式(代表指示 2026-08-03): author キャラクターを username /
             # avatar_url へ昇格して投稿(webhooks.py)。承認ボタン付きは webhook に
             # コンポーネントを付けられないため従来の Bot 投稿のまま(否認ボタンも同じ)。

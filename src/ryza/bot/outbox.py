@@ -18,18 +18,27 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
+from ryza import org
+
 # embed(dict）を受け取り、送信して Discord メッセージ ID を返す関数。失敗時は例外。
 SendFn = Callable[["OutboxMessage"], str]
 
 
 @dataclass(frozen=True)
 class OutboxMessage:
-    """配送対象1件。"""
+    """配送対象1件。
+
+    ``author_member_id`` は embed の発信者キャラクター(``config/org.yaml`` の id)を
+    **embed とは別に**持つ内部キー(0032)。配送時のアイコン上書き解決だけに使い、
+    Discord へは送らない。0032 以前に投入された行は None(``org.resolve_author`` が
+    embed 内の旧キーへフォールバックする)。
+    """
 
     id: int
     channel: str
     embed: dict[str, Any]
     urgent: bool
+    author_member_id: str | None = None
 
 
 def enqueue(
@@ -39,19 +48,29 @@ def enqueue(
     run_id: int,
     *,
     urgent: bool = False,
+    author_member_id: str | None = None,
 ) -> int:
     """``press.outbox`` に1件投入し id を返す(未送状態)。
 
     投入は生成側(朝刊/速報ジョブ・日報)の責務。Bot 自身も日報・起動通知などで使う。
+
+    **内部キーの分離(0032・独立役員審査 0020 C-10)**: 生成側の embed ビルダ
+    (``org.embed_author`` / ``author_for_role``)は発信者の id を author に載せて渡すが、
+    ここで ``org.split_author_member_id`` が外して ``author_member_id`` 列へ移す。
+    ``embed_json`` に入るのは Discord のフィールドだけになり、「送信直前の1関数が
+    取り除く」という規律への依存が消える(再混入は 0032 の CHECK 制約が書込時に落とす)。
+    明示引数を渡した場合はそちらが勝つ(embed に author を持たない通知にも id を付けられる)。
     """
+    clean_embed, embedded_id = org.split_author_member_id(embed)
+    member_id = author_member_id or embedded_id
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO press.outbox (channel, embed_json, urgent, run_id)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO press.outbox (channel, embed_json, urgent, run_id, author_member_id)
+            VALUES (%s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (channel, Jsonb(embed), urgent, run_id),
+            (channel, Jsonb(clean_embed), urgent, run_id, member_id),
         )
         return cur.fetchone()[0]
 
@@ -71,7 +90,7 @@ def claim_pending(
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT id, channel, embed_json, urgent
+            SELECT id, channel, embed_json, urgent, author_member_id
             FROM press.outbox
             WHERE sent_at IS NULL
             ORDER BY {order}
@@ -81,7 +100,9 @@ def claim_pending(
             (limit,),
         )
         return [
-            OutboxMessage(id=r[0], channel=r[1], embed=r[2], urgent=r[3])
+            OutboxMessage(
+                id=r[0], channel=r[1], embed=r[2], urgent=r[3], author_member_id=r[4]
+            )
             for r in cur.fetchall()
         ]
 

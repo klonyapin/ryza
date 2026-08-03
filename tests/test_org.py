@@ -301,3 +301,108 @@ def test_default_opener_does_not_follow_redirects():
     """リダイレクト追従を無効化していること(3xx から内部宛へ誘導させない)。"""
     handler = org._NoRedirect()
     assert handler.redirect_request(None, None, 302, "Found", {}, "https://evil.test/") is None
+
+
+# ── 内部キーの構造分離(0032・独立役員審査 0020 C-10)────────────────────────
+def test_split_author_member_id_removes_key_and_returns_it():
+    """embed から内部キーを外し、id を別に返す(enqueue が press.outbox の列へ移す)。"""
+    embed = {"title": "朝刊", "author": org.embed_author("aya"), "color": 1}
+    clean, member_id = org.split_author_member_id(embed)
+    assert member_id == "aya"
+    assert org.AUTHOR_MEMBER_KEY not in clean["author"]
+    assert clean["author"]["name"] == org.get_member("aya").display_name
+    assert clean["title"] == "朝刊" and clean["color"] == 1
+    # 元の dict は壊さない(呼び出し元が同じ embed を再利用しても壊れない)。
+    assert embed["author"][org.AUTHOR_MEMBER_KEY] == "aya"
+
+
+def test_split_author_member_id_passthrough_without_author():
+    embed = {"title": "起動通知", "color": 1}
+    clean, member_id = org.split_author_member_id(embed)
+    assert clean is embed and member_id is None
+
+
+def test_split_author_member_id_passthrough_without_key():
+    """既に分離済み(Discord のフィールドだけ)の embed は素通しする。"""
+    embed = {"author": {"name": "n", "icon_url": "https://x.test/a.png"}}
+    clean, member_id = org.split_author_member_id(embed)
+    assert clean is embed and member_id is None
+
+
+def test_resolve_author_uses_explicit_member_id():
+    """0032 以降は列から渡す。embed 側にキーが無くても上書きが効く。"""
+    author = {"name": "n", "icon_url": "https://old/x.png"}
+    resolved = org.resolve_author(author, {"aya": "https://new/y.png"}, member_id="aya")
+    assert resolved == {"name": "n", "icon_url": "https://new/y.png"}
+
+
+def test_apply_icon_overrides_with_explicit_member_id():
+    embed = {"title": "朝刊", "author": {"name": "n", "icon_url": "https://old/x.png"}}
+    out = org.apply_icon_overrides(embed, {"aya": "https://new/y.png"}, member_id="aya")
+    assert out["author"]["icon_url"] == "https://new/y.png"
+
+
+def test_resolve_author_falls_back_to_embedded_key_for_legacy_rows():
+    """列が NULL の 0032 以前の行は、従来どおり embed 内のキーで解決する(後方互換)。"""
+    author = {"name": "n", "icon_url": "https://old/x.png", org.AUTHOR_MEMBER_KEY: "aya"}
+    resolved = org.resolve_author(author, {"aya": "https://new/y.png"}, member_id=None)
+    assert resolved == {"name": "n", "icon_url": "https://new/y.png"}
+
+
+# ── 指紋(0033 の再検証)──────────────────────────────────────────────────────
+def _probe_opener(headers: dict[str, str]):
+    def _fake(url: str, method: str, timeout: float) -> dict[str, str]:
+        return dict(headers)
+
+    return _fake
+
+
+def test_probe_icon_url_returns_fingerprint():
+    fp = org.probe_icon_url(
+        "https://x.test/a.png",
+        opener=_probe_opener(
+            {
+                "content-type": "image/png; charset=binary",
+                "content-length": "1024",
+                "etag": '"abc"',
+                "last-modified": "Mon, 03 Aug 2026 00:00:00 GMT",
+            }
+        ),
+    )
+    assert fp == org.IconFingerprint(
+        content_type="image/png",
+        content_length=1024,
+        etag='"abc"',
+        last_modified="Mon, 03 Aug 2026 00:00:00 GMT",
+    )
+
+
+def test_probe_icon_url_allows_oversized_image():
+    """再検証は「保存を許すか」ではなく「変わったか」を見る。上限超過は変化として報告する。"""
+    fp = org.probe_icon_url(
+        "https://x.test/a.png",
+        opener=_probe_opener(
+            {"content-type": "image/png", "content-length": str(org.ICON_MAX_BYTES + 1)}
+        ),
+    )
+    assert fp.content_length == org.ICON_MAX_BYTES + 1
+
+
+def test_probe_icon_url_rejects_non_image():
+    with pytest.raises(org.IconUrlError, match="対応していない画像形式"):
+        org.probe_icon_url(
+            "https://x.test/p", opener=_probe_opener({"content-type": "text/html"})
+        )
+
+
+def test_probe_icon_url_rejects_non_https():
+    with pytest.raises(org.IconUrlError):
+        org.probe_icon_url(
+            "http://x.test/a.png", opener=_probe_opener({"content-type": "image/png"})
+        )
+
+
+def test_fingerprint_tolerates_missing_headers():
+    fp = org.IconFingerprint.from_headers({"content-type": "image/gif"})
+    assert fp == org.IconFingerprint(content_type="image/gif")
+    assert fp.as_dict()["etag"] is None

@@ -7,6 +7,11 @@ claim_pending / mark_sent を直接組み合わせて検証し、deliver_pending
 
 from __future__ import annotations
 
+import psycopg
+import pytest
+from psycopg.types.json import Jsonb
+
+from ryza import org
 from ryza.bot import outbox
 
 
@@ -78,3 +83,101 @@ def test_failed_send_leaves_row_pending(conn, run_id):
             # 送信失敗を模し mark_sent しない。
             pass
     assert oid in _pending_ids(conn)
+
+
+# ── 内部キーの構造分離(0032・独立役員審査 0020 C-10)────────────────────────
+def _row(conn, oid: int) -> tuple:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT embed_json, author_member_id FROM press.outbox WHERE id = %s", (oid,)
+        )
+        return cur.fetchone()
+
+
+def test_enqueue_moves_member_id_out_of_embed_json(conn, run_id):
+    """embed_json には Discord のフィールドだけが入り、内部キーは列へ移る。"""
+    embed = {"title": "朝刊", "author": org.embed_author("aya")}
+    oid = outbox.enqueue(conn, "press", embed, run_id)
+    embed_json, author_member_id = _row(conn, oid)
+    assert author_member_id == "aya"
+    assert org.AUTHOR_MEMBER_KEY not in embed_json["author"]
+    assert embed_json["author"]["name"] == org.get_member("aya").display_name
+    # 呼び出し元が渡した dict は壊さない。
+    assert embed["author"][org.AUTHOR_MEMBER_KEY] == "aya"
+
+
+def test_claim_pending_exposes_author_member_id(conn, run_id):
+    oid = outbox.enqueue(conn, "press", {"author": org.embed_author("aya")}, run_id)
+    msg = next(m for m in outbox.claim_pending(conn) if m.id == oid)
+    assert msg.author_member_id == "aya"
+    assert org.AUTHOR_MEMBER_KEY not in msg.embed["author"]
+
+
+def test_enqueue_explicit_author_member_id_wins(conn, run_id):
+    """author を持たない embed にも発信者を付けられる(明示引数が優先)。"""
+    oid = outbox.enqueue(conn, "ops", {"title": "t"}, run_id, author_member_id="tanya")
+    _, author_member_id = _row(conn, oid)
+    assert author_member_id == "tanya"
+
+
+def test_enqueue_without_author_leaves_column_null(conn, run_id):
+    oid = outbox.enqueue(conn, "ops", {"title": "起動通知"}, run_id)
+    embed_json, author_member_id = _row(conn, oid)
+    assert author_member_id is None
+    assert embed_json == {"title": "起動通知"}
+
+
+def test_schema_rejects_internal_key_in_embed_json(conn, run_id):
+    """enqueue を通さない書込経路が内部キーを混ぜたら、DB が書込時に落とす(0032)。
+
+    C-10 の懸念は「除去が送信直前の1関数に依存する」ことだった。除去を投入時へ移した
+    だけでは「新しい書込経路が strip を忘れる」余地が残るため、表の性質として禁じる。
+    """
+    with conn.cursor() as cur, pytest.raises(psycopg.errors.CheckViolation):
+        cur.execute(
+            """
+            INSERT INTO press.outbox (channel, embed_json, urgent, run_id)
+            VALUES ('ops', %s, false, %s)
+            """,
+            (Jsonb({"author": {"name": "n", org.AUTHOR_MEMBER_KEY: "aya"}}), run_id),
+        )
+
+
+def test_legacy_row_still_resolves_via_embedded_key(conn, run_id):
+    """0032 以前に投入された行(列 NULL・embed 内にキー)は従来経路で解決する。
+
+    CHECK 制約は NOT VALID なので既存行には効かない。過去行を模すため制約を明示的に
+    外して INSERT し、配送側(``org.apply_icon_overrides``)が旧キーで解決できることと、
+    Discord へ渡る embed から旧キーが落ちることを確認する。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "ALTER TABLE press.outbox DROP CONSTRAINT outbox_embed_has_no_internal_keys_check"
+        )
+        cur.execute(
+            """
+            INSERT INTO press.outbox (channel, embed_json, urgent, run_id)
+            VALUES ('press', %s, false, %s) RETURNING id
+            """,
+            (
+                Jsonb(
+                    {
+                        "title": "旧朝刊",
+                        "author": {
+                            "name": "n",
+                            "icon_url": "https://old/x.png",
+                            org.AUTHOR_MEMBER_KEY: "aya",
+                        },
+                    }
+                ),
+                run_id,
+            ),
+        )
+        oid = cur.fetchone()[0]
+    msg = next(m for m in outbox.claim_pending(conn) if m.id == oid)
+    assert msg.author_member_id is None
+    delivered = org.apply_icon_overrides(
+        msg.embed, {"aya": "https://new/y.png"}, member_id=msg.author_member_id
+    )
+    assert delivered["author"]["icon_url"] == "https://new/y.png"
+    assert org.AUTHOR_MEMBER_KEY not in delivered["author"]
