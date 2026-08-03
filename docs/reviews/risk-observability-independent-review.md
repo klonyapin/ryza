@@ -1,0 +1,15 @@
+# リスク観測性(判定保留・除外の機械可読化+締め失敗の可視化)— 独立役員審査
+
+- 審査日: 2026-08-04 / 審査者: 独立役員(非執行・批判専任。起草者の選好は不知)
+- 対象: `origin/main..HEAD` — `risk/engine.py`(`Deferral`/`Exclusion`)・`risk/state.py`(`deferred`/`excluded_instruments`/`es95_deferred`)・`risk/daily.py`(`close_ok`)・`jobs/daily.py`・`dashboard/app.py`。**保護領域 `src/ryza/risk/`**
+- 判定: **条件付き承認**(重大 2 件の是正をマージ前提条件とする)
+
+**判定不変は検証済み(証拠)**: 改定前後の `evaluate` を同一入力で突き合わせる差分試験(NAV 1〜30 点・保有 0〜4 銘柄・観測数 0/1/5/10/19/20/25/40・日付ずれ有無をランダム 4,000 ケース)で、`dd_soft`/`dd_hard`/`vol_exceeded`/`es_exceeded`/`drawdown`/`ewma_vol_annual`/`es95.adopted`/`n_obs`/`excluded`/`deferred`/`sufficient` の**不一致ゼロ**。フラグ算出行・`es95()`・ラッチ(`upsert_limits_state` の `dd_hard OR`)は無改変で、既存テストの期待値変更も無い(`load_positions` の 3 タプル化に伴う受け側修正のみ)。
+
+**重大-1(誤った機械可読理由)**: 同じ差分試験で `notes` は 4,000 中 1,240 ケース(31%)で**置換**されており、そのうち `majority_excluded` の出力は**実際には過半でない**ケースを含む(別途 20,000 ケース走査で 11.5%)。原因は `es95()` が `n==0` の早期 return で過半判定に関わらず `deferred=True` を返すこと、および `evaluate` が理由を `has_partial_data`(除外銘柄の観測数>0)という代理指標から**推測**していること。再現: 3 銘柄保有・#1 が短系列(10 観測)・#2/#3 は各 25 観測だが共通日ゼロ → `n_obs=0`・`excluded=(1,)` なのに `Deferral(es95, majority_excluded, observed=0)` と「残部の測定値は参考値」(残部は存在しない)。是正: 理由は `es95()` が自ら返す(`ESResult` に理由を持たせる)こととし、`no_common_days` を独立コードとして追加する。監査が事実として消費するキーで、旧実装の人間向け誤記を機械可読な誤記に格上げしてはならない。
+
+**重大-2(`close_ok=True` の fail-open 既定)**: `run_risk_daily(close_ok=True)` の既定は「締めの成否を知らない」ではなく「締めは成功した」と `metrics` に**断定して記録**する。CLI 経路(`risk/daily.py:511`)は既定のままであり、締めが落ちた朝に運用者が `python -m ryza.risk.daily` を手動再実行すると、`fetch_latest_risk_metrics` が最新行を読むダッシュボードとレポートから警告が消え、`close_ok=true` が台帳に残る(障害直後の最高リスク時点で警告が消える経路)。是正: 既定を `None`(不明)にするか、`ledger.nav_snapshots` に当日行があるかをモジュール内で自己検証する(リマインダー本文が挙げた代替手段)。呼び出し側の作法に fail-safe を依存させない。
+
+**設計判断(保留せず「前日系列だと宣言して続行」)は支持する**。保留すれば `risk.limits_state` が更新されず、ゲートは古いフラグで通し続ける — ラッチは粘着なので「更新しない」は**新規のブリーチを永久に立てない**方向に不安全である。ただし起草者の論には反例が 1 つ欠けている: 未再締めの系列は過去 NAV が誤りうるため、`dd_hard` が誤って立つ可能性があり、その解除は委員会専決(`release_dd_hard`)である。`metrics.close_ok` は残るので事後判別は可能であり、**IPS §3.2 復帰条項の運用手順に「設定時イベントの `close_ok` を確認する」を明記すること**を条件に留める(コード変更は不要)。
+
+**中(任意)**: (a) `has_partial_data` は呼び出し側が渡す `extra_exclusions` を(`measure="es95"` を詐称すれば)理由選択に影響させられる — 保護領域が外部入力で表示挙動を変える設計は避け、重大-1 の是正で同時に解消される。(b) `RiskState.deferred_metrics()` は本体未使用でテスト専用。(c) 後方互換は妥当(`deferred` キーの有無で新旧を分岐、旧行は `_insufficiency_note` にフォールバック、新行は必ず空リストを持つ)。新表示が旧表示より値を出す方向に緩むケースが無いことも確認した(`sufficient=false` なら必ず両指標の `Deferral` が入る)。

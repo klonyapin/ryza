@@ -486,8 +486,8 @@ def _insufficiency_note(metrics: dict[str, Any], limits: dict[str, Any]) -> str 
     — 同一画面で矛盾する。判定が無効な間は値を出さず、その理由を出す。
 
     ``sufficient`` キーが無い古い metrics も「十分と確認できていない」側に倒す
-    (fail-closed)。恒久対応は state_metrics への deferred/excluded 追加
-    (ops/reminders.yaml: risk-state-metrics-sufficiency)。
+    (fail-closed)。**この分岐は ``deferred`` キーを持たない古いイベント行専用の
+    後方互換パス**で、新しい行は :func:`_deferral_note` が指標ごとの理由を出す。
     """
     if metrics.get("sufficient"):
         return None
@@ -499,13 +499,87 @@ def _insufficiency_note(metrics: dict[str, Any], limits: dict[str, Any]) -> str 
     )
 
 
+#: ``ryza.risk.engine`` の判定保留コード → 画面文言。未知のコードはそのまま出す
+#: (エンジン側が理由を増やしたとき、画面が黙ってそれを潰さないため)。
+_DEFERRAL_REASONS = {
+    "insufficient_returns": "帳簿リターン不足",
+    "insufficient_obs": "ES 観測不足",
+    "no_observations": "保有ありだが観測ゼロ",
+    "majority_excluded": "除外銘柄が過半",
+    "no_common_days": "対象銘柄の共通観測日ゼロ",
+}
+
+#: 測定から銘柄を外した理由 → 画面文言。
+_EXCLUSION_REASONS = {
+    "short_series": "短系列",
+    "missing_price": "時価欠測",
+}
+
+
+def _deferral_note(
+    metrics: dict[str, Any], limits: dict[str, Any], metric: str
+) -> str | None:
+    """``metric`` の判定が保留かどうかと、その理由(保留でなければ None)。
+
+    エンジンが ``risk.limits_state_events.metrics`` に残す ``deferred``(指標名+理由
+    +観測数)を**優先**して読む。これが本来の情報源で、「``sufficient`` が偽なら
+    vol/ES を一律 unknown」という旧分岐では、ES が観測不足**以外**の理由(時価欠測に
+    よる銘柄除外・除外過半)で保留になっている場合に理由を誤って説明していた
+    (独立役員審査 T-018 重大-3 の恒久対応)。
+
+    ``deferred`` キーの無い古いイベント行は従来表示に落とす(後方互換)。キーの有無で
+    判定するのは、新しい行では「保留なし」が空リストとして必ず入るため。
+    """
+    entries = metrics.get("deferred")
+    if entries is None:  # 旧 metrics(deferred 導入前)— 従来の粗い分岐で表示する
+        return _insufficiency_note(metrics, limits)
+    reasons = [
+        e for e in entries if isinstance(e, dict) and e.get("metric") == metric
+    ]
+    if not reasons:
+        return None
+    parts = []
+    for e in reasons:
+        label = _DEFERRAL_REASONS.get(str(e.get("reason")), str(e.get("reason")))
+        observed, required = e.get("observed"), e.get("required")
+        parts.append(
+            f"{label}({observed}/{required})"
+            if observed is not None and required is not None
+            else label
+        )
+    return "判定保留 — " + " / ".join(parts)
+
+
+def _exclusion_note(metrics: dict[str, Any]) -> str | None:
+    """採用値から外れた銘柄の一覧(無ければ None)。
+
+    ES の採用値は除外銘柄のエクスポージャーを含まない(過小方向)。「何を測って
+    いないか」は測定値と同じ画面に出さないと、使用率だけが独り歩きする。
+    """
+    entries = metrics.get("excluded_instruments") or []
+    parts = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        reason = _EXCLUSION_REASONS.get(str(e.get("reason")), str(e.get("reason")))
+        parts.append(f"#{e.get('instrument_id')}({e.get('measure')}: {reason})")
+    if not parts:
+        return None
+    return (
+        "測定から除外した銘柄: " + " / ".join(parts)
+        + " — 採用値はこの分のエクスポージャーを含まない(過小方向)"
+    )
+
+
 def _risk_bullets(metrics: dict[str, Any], limits: dict[str, Any]) -> list[viz.Bullet]:
     """スキーマに実在する測定値だけを bullet にする(無いものは作らない)。
 
     DD は 1 日目から有効(engine の drawdown はデータ 1 点から測れる)なので観測数に
-    関わらず出す。vol/ES はエンジンが判定を保留している間 unknown に落とす。
+    関わらず出す。vol/ES はエンジンが判定を保留している間 unknown に落とし、
+    **指標ごとの**保留理由を添える(重大-3 恒久)。
     """
-    note = _insufficiency_note(metrics, limits)
+    vol_note = _deferral_note(metrics, limits, "realized_vol")
+    es_note = _deferral_note(metrics, limits, "es95")
     return [
         viz.make_bullet(
             "DD(対 dd_soft)", metrics.get("drawdown"), limits.get("dd_soft_limit")
@@ -513,15 +587,15 @@ def _risk_bullets(metrics: dict[str, Any], limits: dict[str, Any]) -> list[viz.B
         _dd_bullet(metrics, limits, label="DD(対 dd_hard)"),
         viz.make_bullet(
             "実現ボラ(EWMA 年率)",
-            None if note else metrics.get("ewma_vol_annual"),
+            None if vol_note else metrics.get("ewma_vol_annual"),
             limits.get("realized_vol_limit"),
-            note=note,
+            note=vol_note,
         ),
         viz.make_bullet(
             "日次 ES95(対 NAV)",
-            None if note else metrics.get("es95_adopted"),
+            None if es_note else metrics.get("es95_adopted"),
             limits.get("daily_es95_nav_max"),
-            note=note,
+            note=es_note,
         ),
     ]
 
@@ -557,8 +631,23 @@ def page_risk(conn) -> None:
                 f"測定 {event['as_of']:%Y-%m-%d %H:%M} / {event['actor']} / "
                 f"run {event['run_id']} / 事象 {event['event']}"
             )
+        # 当日の締めが落ちた/走っていない日は測定値そのものの as_of がずれる
+        # (前日までの系列)。使用率の前に出す(risk.daily の同名の事実)。
+        if metrics.get("close_ok") is False:
+            st.warning(
+                "⚠ 直近の締めが失敗/未完了の測定 — 値は前日までの系列に基づく"
+                "(遅延仕訳が未反映のまま DD・実現ボラ・ES を出している)"
+                + (
+                    "。締めの成否は risk 側の自己検証(当日 NAV スナップショットの有無)"
+                    if metrics.get("close_self_checked")
+                    else ""
+                )
+            )
         st.markdown("**リミット使用率(高い順)**")
         viz.render_bullets(_risk_bullets(metrics, limits))
+        excluded_note = _exclusion_note(metrics)
+        if excluded_note:
+            st.caption(excluded_note)
 
         st.markdown("**ラッチ状態**")
         for key, label in _LATCH_LABELS.items():
