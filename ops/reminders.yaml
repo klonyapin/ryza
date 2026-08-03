@@ -1194,3 +1194,15 @@ reminders:
       labels: [decision, ips]
       body: "L2 レビュー(2026-08-04・risk-observability-independent-review.md 末尾)の条件。80-ips.md L10 の「ユーザーのみ起票可」は旧承認モデルの残骸で、定款第4条(L2 起票=代表・CIO)と矛盾(定款が上位のため実務は定款優先)。9/2 の IPS 月次レビューで本文を整合させる。あわせて ops/reminders.yaml 内の同旨の古い記述(ips.yaml 変更はユーザー起票が必要)も是正する。"
     status: pending
+
+  - id: migration-runner-duplicate-version-guard
+    what: "migration ランナーの同一 version 重複エラー化(無言スキップの防止)"
+    conditions:
+      - type: date_after
+        date: "2026-08-08"
+    action:
+      type: issue_create
+      title: "db/migrate: 同一4桁 version の異名ファイル検出とエラー化"
+      labels: [impl]
+      body: "0030/0031 独立審査(重大-1)の指摘: ランナーは4桁 version 文字列のみで適用判定するため、並行ブランチが同番号・異名の migration を持つと後から来た方が無言でスキップされる(共有テスト DB で実測)。是正: 適用時に同一 version の filename 不一致を検出してエラー化+適用済み記録に filename/内容ハッシュを持たせ突合(既存チップ『Detect edited-after-apply migration drift』と統合可)。採番調整の運用(マージ順確定時に設計リードが裁定)は継続。"
+    status: pending
