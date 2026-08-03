@@ -525,7 +525,12 @@ reminders:
       title: "決議チェックの精緻化(批判の鮮度)と確認付き決議の連続検出"
       labels: [governance]
       body: "現行の boardroom.mark_resolution は『議事録の出席者に独立役員が居るか』しか見ない(src/ryza/governance/boardroom.py)。そのため会議の冒頭で独立役員が別論点に1度発言していれば、その後に代表が持ち出した本題が無批判のまま決議できてしまう(独立役員 再確認審査 懸念A)。実装内容: ①チェックを『最終の代表発言以降に独立役員の発言があるか』へ精緻化する(guard_scope_text と同じ区間の考え方を決議側にも適用)、②confirmed_without_critic=True で通した決議を証跡として残す(現状は DB に痕跡が無く、連続使用を検出できない — governance.minute_resolutions への列追加は保護領域のため独立役員審査が必要)、③監査ジョブ(src/ryza/audit)に『確認付き決議の連続』を 05-governance §6-5(形骸化の防止)のアラートとして追加する。②の列追加なしに③は成立しないため順序に注意。"
-    status: pending
+    # 2026-08-03 実装(ブランチ resolution-recency)。①minute_has_recent_critic /
+    # critic_spoke_after_last_representative(議事録本文の話者行から復元)、
+    # ②migrations/0025(confirmed_without_critic。保護領域 — 独立役員審査待ち)、
+    # ③resolution_confirmation_stats + ops-weekly ダイジェスト行(連続3件で警告)・
+    #   ダッシュボードの決議欄。③の設置先は src/ryza/audit ではなく週次 ops(設計リード指示)。
+    status: done # 2026-08-03 実装・マージ待ち(migration 0025 は独立役員審査対象)
 
   - id: meeting-reaction-round-consistency
     what: "進行役の定型応答の直後に反応ラウンドが回る筋を整理する(独立役員 再確認審査 懸念C)"

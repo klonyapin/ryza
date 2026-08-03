@@ -1731,10 +1731,14 @@ def page_boardroom() -> None:
             proposal_ref = st.text_input(
                 "proposal_ref(承認事項なら governance.decisions と突合。任意)"
             )
-            # 決定論チェック(05 §3): 独立役員の発言が無い議事録の決議には明示確認を
-            # 求める。ブロックではなく摩擦であり、決議権は代表に残る(定款第3条)。
+            # 決定論チェック(05 §3): **最後の代表発言より後に**独立役員が発言して
+            # いない議事録の決議には明示確認を求める(批判の鮮度 — 再確認審査 懸念A)。
+            # ブロックではなく摩擦であり、決議権は代表に残る(定款第3条)。確認して
+            # 通した決議は confirmed_without_critic=true で残り(0025)、連続は
+            # 形骸化アラートの対象になる(05 §6-5)。
             confirm = st.checkbox(
-                "独立役員の批判を経ていない議事録でも決議する(内容を理解した上で)"
+                "独立役員の批判(最後の代表発言より後の発言)を経ていない議事録でも"
+                "決議する(内容を理解した上で)"
             )
             if st.form_submit_button("決議としてマーク(代表として)"):
                 if not title.strip() or not body.strip():
@@ -1755,7 +1759,16 @@ def page_boardroom() -> None:
                         )
         for res in boardroom.fetch_resolutions(wconn, minute_id):
             ref = f" / proposal_ref: {res['proposal_ref']}" if res["proposal_ref"] else ""
-            st.caption(f"決議 {res['seq']}: {res['title']}(#{res['resolution_id']}{ref})")
+            mark = " ⚠ 批判を経ない決議" if res["confirmed_without_critic"] else ""
+            st.caption(
+                f"決議 {res['seq']}: {res['title']}(#{res['resolution_id']}{ref}){mark}"
+            )
+        # 形骸化の監査(05 §6-5)を決議の現場にも出す。週次ダイジェストだけに置くと、
+        # 「毎回チェックを外す」当人が自分の連続数を見ないまま運用できてしまう。
+        stats = boardroom.resolution_confirmation_stats(wconn)
+        if stats.confirmed:
+            line = boardroom.confirmation_status_line(stats)
+            (st.warning if stats.alert else st.caption)(f"確認付き決議: {line}")
 
 
 # ── 開発室(代表 ⇄ 設計リード — 代表指示 2026-08-03)────────────────────────────
