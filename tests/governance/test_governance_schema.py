@@ -1,4 +1,4 @@
-"""0013_governance_assets.sql とローダの DB 依存部分の受け入れテスト。
+"""0013_governance_assets.sql / 0019_decisions_deemed.sql とローダの DB 依存部分の受け入れテスト。
 
 テスト専用 DB(tests/conftest.py の ``migrated_db``)に対して実行する。
 接続不可なら skip(Docker 未導入環境向け)。テストは commit せず rollback で隔離。
@@ -6,8 +6,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import psycopg
 import pytest
+import yaml
 
 from ryza.db.conn import connect
 from ryza.governance.personas import assume_role, recent_stances, record_stance
@@ -236,6 +239,158 @@ def test_retraction_requires_target_and_same_role(conn, run_id):
         record_stance(
             conn, role="independent_officer", kind="retraction",
             summary="越権撤回", run_id=run2, retracts=sid,
+        )
+    conn.rollback()
+
+
+# ── decisions の決定語彙(0019・定款 v0.4 第3条)──────────────────────────
+# 定款第3条の3専決事項(config/governance.yaml の representative_reserved)と
+# decisions.kind の対応。**governance.yaml に専決事項を足したらここも足す** —
+# test_reserved_matters_cover_governance_yaml が漏れを検出する。
+RESERVED_KIND_BY_MATTER = {
+    "constitution_amendment": "constitution",  # 現 kind 語彙には未登録(0019 で先回り列挙)
+    "live_money": "budget",
+    "kill_switch_resume": "breaker_resume",
+}
+
+
+def _new_decision(
+    cur,
+    proposal_ref: str,
+    decision: str,
+    kind: str = "pr",
+    decided_by: str | None = None,
+) -> int:
+    # みなし承認は代表の作為ではなく通知による自動発効(0019 C-4 の CHECK)。
+    if decided_by is None:
+        decided_by = "system:deemed" if decision == "deemed" else "representative"
+    cur.execute(
+        """
+        INSERT INTO governance.decisions
+            (proposal_ref, kind, decision, decided_by, note)
+        VALUES (%s, %s, %s, %s, 'test')
+        RETURNING id
+        """,
+        (proposal_ref, kind, decision, decided_by),
+    )
+    return cur.fetchone()[0]
+
+
+def test_deemed_decision_accepted(conn):
+    """みなし承認は decision='deemed' で記録できる(定款 v0.4 第3条)。"""
+    with conn.cursor() as cur:
+        assert _new_decision(cur, "ips-rev-2026-08-deemed", "deemed") > 0
+    conn.rollback()
+
+
+def test_explicit_and_deemed_are_distinct(conn):
+    """明示承認と区別して残る — 監査の deemed_ratio 計算の前提(定款第3条)。"""
+    with conn.cursor() as cur:
+        _new_decision(cur, "live-money-2026-08", "approve", kind="budget")
+        _new_decision(cur, "mandate-rev-2026-08", "deemed")
+        cur.execute(
+            """
+            SELECT decision FROM governance.decisions
+            WHERE proposal_ref IN ('live-money-2026-08', 'mandate-rev-2026-08')
+            ORDER BY proposal_ref
+            """
+        )
+        assert [r[0] for r in cur.fetchall()] == ["approve", "deemed"]
+    conn.rollback()
+
+
+def test_legacy_decisions_still_accepted(conn):
+    """0007 の既存語彙は壊れない(0019 は語彙の拡大のみ)。"""
+    with conn.cursor() as cur:
+        for i, decision in enumerate(("approve", "reject", "question")):
+            assert _new_decision(cur, f"legacy-{i}", decision) > 0
+    conn.rollback()
+
+
+def test_unknown_decision_rejected(conn):
+    """語彙外の決定は CHECK で拒否される(承認記録の語彙を固定する)。"""
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _new_decision(cur, "rubber-stamp-2026-08", "deemed_approved")
+    conn.rollback()
+
+
+# ── 3専決事項は「みなし」で発効させられない(独立役員審査 C-2)──────────────
+@pytest.mark.parametrize("kind", sorted(set(RESERVED_KIND_BY_MATTER.values())))
+def test_reserved_matter_cannot_be_deemed(conn, kind):
+    """3専決(定款第3条)の kind に decision='deemed' は付けられない。
+
+    kind と decision は互いに独立な列なので、この CHECK が無いと
+    (kind='budget', decision='deemed') で実弾投入の承認証跡を偽装できる。
+    """
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _new_decision(cur, f"forged-{kind}", "deemed", kind=kind)
+    conn.rollback()
+
+
+@pytest.mark.parametrize("kind", sorted(set(RESERVED_KIND_BY_MATTER.values())))
+def test_reserved_matter_accepts_explicit_approval(conn, kind):
+    """禁止されるのは 'deemed' だけ — 明示承認の経路は塞がない。
+
+    'constitution' は 0019 が先回りで列挙した未登録 kind なので、
+    decisions_kind_check(0012)の側で弾かれることを期待値として固定する。
+    """
+    expected_ok = kind != "constitution"
+    with conn.cursor() as cur:
+        if expected_ok:
+            assert _new_decision(cur, f"explicit-{kind}", "approve", kind=kind) > 0
+        else:
+            with pytest.raises(psycopg.errors.CheckViolation):
+                _new_decision(cur, f"explicit-{kind}", "approve", kind=kind)
+    conn.rollback()
+
+
+def test_reserved_matters_cover_governance_yaml(conn):
+    """不変条件: governance.yaml の全専決事項が 'deemed' 不可の kind に対応する。
+
+    定款第3条の representative_reserved に4つ目が足された(= 委任範囲が縮んだ)のに
+    スキーマ側の禁止リストが据え置かれる、という乖離を検出する。
+    """
+    root = Path(__file__).resolve().parents[2]
+    gov = yaml.safe_load((root / "config" / "governance.yaml").read_text("utf-8"))
+    reserved = set(gov["representative_reserved"])
+    assert reserved == set(RESERVED_KIND_BY_MATTER), (
+        "governance.yaml の専決事項と RESERVED_KIND_BY_MATTER が乖離している。"
+        "対応する kind を決め、0019 の decisions_deemed_not_reserved_check にも足すこと。"
+    )
+    # 対応表の kind が実際に DB 側で禁止されていることまで確認する(宣言で終わらせない)。
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT pg_get_constraintdef(oid) FROM pg_constraint
+            WHERE conrelid = 'governance.decisions'::regclass
+              AND conname = 'decisions_deemed_not_reserved_check'
+            """
+        )
+        row = cur.fetchone()
+    assert row is not None, "decisions_deemed_not_reserved_check が存在しない"
+    for matter, kind in RESERVED_KIND_BY_MATTER.items():
+        assert f"'{kind}'" in row[0], f"{matter} の kind={kind} が CHECK に無い"
+
+
+# ── deemed の実行主体はシステム(独立役員審査 C-4)────────────────────────
+def test_deemed_by_representative_rejected(conn):
+    """みなし承認は代表の作為ではない — decided_by は 'system:%' に限る。"""
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _new_decision(
+                cur, "deemed-by-rep", "deemed", decided_by="representative"
+            )
+    conn.rollback()
+
+
+def test_explicit_approval_by_representative_still_allowed(conn):
+    """明示承認側に 'system:%' 制約は掛からない(C-4 の CHECK は deemed 限定)。"""
+    with conn.cursor() as cur:
+        assert (
+            _new_decision(cur, "explicit-by-rep", "approve", decided_by="representative")
+            > 0
         )
     conn.rollback()
 
