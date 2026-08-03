@@ -99,6 +99,8 @@ def record_decision(
     kind: str = "other",
     note: str | None = None,
     channel_msg_id: str | None = None,
+    reviewed_sha: str | None = None,
+    review_ref: str | None = None,
 ) -> Decision:
     """押下者のオーナー検証後、``governance.decisions`` に決定を記録する。
 
@@ -106,24 +108,38 @@ def record_decision(
     - 未知の decision / kind は ``ValueError``
     - 既に同 ``proposal_ref`` の決定があれば ``psycopg.errors.UniqueViolation``(二度押し防止)
 
+    ``reviewed_sha`` / ``review_ref``(0029)は**明示承認にも書ける**。3専決事項(定款第3条:
+    定款改正・実弾マネー・Kill Switch 復帰)は必ずこの経路を通るため、ここに列が無いと
+    **最重要の決定種別が構造的に監査 A-18-8(審査対象 SHA の突合)の射程外**になる
+    (独立役員審査 2026-08-04 SHA-4)。既定 ``None`` なのは、押下による承認が必ずしも
+    コミットを対象としない(予算・戦略昇格など)ためで、値があるときだけ突合対象になる。
+
     呼び出し側でトランザクションを制御する(本関数は commit しない)。
     """
+    from ryza.governance.decisions import normalize_reviewed_sha
+
     if decision not in DECISIONS:
         raise ValueError(f"未知の決定: {decision}")
     if kind not in KINDS:
         raise ValueError(f"未知の提案種別: {kind}")
     if not is_owner(decided_by, owner_ids):
         raise NotOwnerError(f"非オーナーの承認操作を拒否: user={decided_by}")
+    # 様式検証は writer に一本化する(deemed 経路と同じ規則 = 突合が経路で変わらない)。
+    reviewed_sha = normalize_reviewed_sha(reviewed_sha)
 
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO governance.decisions
-                (proposal_ref, kind, decision, decided_by, note, channel_msg_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                (proposal_ref, kind, decision, decided_by, note, channel_msg_id,
+                 reviewed_sha, review_ref)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (proposal_ref, kind, decision, str(decided_by), note, channel_msg_id),
+            (
+                proposal_ref, kind, decision, str(decided_by), note, channel_msg_id,
+                reviewed_sha, review_ref,
+            ),
         )
         decision_id = cur.fetchone()[0]
     return Decision(

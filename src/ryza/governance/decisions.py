@@ -73,6 +73,8 @@ import psycopg
 
 from ryza.bot.approvals import KINDS, NotOwnerError, is_owner
 
+log = logging.getLogger("ryza.governance.decisions")
+
 # 定款第3条の3専決事項(config/governance.yaml の representative_reserved)と
 # governance.decisions.kind の対応。0019 の decisions_deemed_not_reserved_check と
 # **同じ集合でなければならない**(tests/governance/test_governance_schema.py の
@@ -302,19 +304,48 @@ def missing_review_ref_warning(
 
     URL(``http://`` / ``https://``)や ``discord://`` 等のスキーム付き参照は対象外
     —— ネットワーク越しの実在確認は CLI の責務にしない(gh 以外の到達手段を増やさない)。
+
+    **リポジトリルートが決められない実行では検査そのものを行わない**(独立役員審査 SHA-6):
+    ``__file__`` からの相対位置はソースチェックアウト前提であり、パッケージとして設置された
+    実行では site-packages を指して**全参照が誤警告**になる。git 作業ツリーの外なら検査を
+    諦めて ``None`` を返す —— 誤警告は「警告が出ていても実在する」学習を生み、警告そのものを
+    無意味にするので、検査できないときは黙るほうが安全である。
     """
     if not review_ref:
         return None
     ref = review_ref.strip()
     if "://" in ref or ref.startswith("#"):
         return None
-    root = repo_root or Path(__file__).resolve().parents[3]
-    if (root / ref).exists():
+    root = repo_root or _repo_root()
+    if root is None or (root / ref).exists():
         return None
     return (
         f"--review の参照 '{ref}' がリポジトリ内に見つからない"
         "(パス形式に見えるが実在しない — 発効は妨げないが、審査意見書の所在を確認すること)"
     )
+
+
+def _repo_root() -> Path | None:
+    """リポジトリルート。``git rev-parse --show-toplevel`` を優先し、駄目なら ``__file__`` 相対。
+
+    ソースチェックアウトなら両者は一致する。パッケージ設置時は git 情報が無く、``__file__``
+    相対も無意味(site-packages を指す)なので ``None`` を返して検査を無効化する。
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=False, timeout=5,
+            cwd=str(Path(__file__).resolve().parent),
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return Path(out.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        pass
+    fallback = Path(__file__).resolve().parents[3]
+    # ソースチェックアウトの目印。無ければ「ルートを決められない」として検査しない。
+    return fallback if (fallback / "config" / "governance.yaml").exists() else None
 
 
 def _raise_if_decided(conn: psycopg.Connection, proposal_ref: str) -> None:
@@ -890,6 +921,24 @@ def _resolve_deemed_args(args: argparse.Namespace) -> DeemedTarget:
     )
 
 
+#: 決定の ``note`` に残す審査参照警告の接頭辞(事後監査の検索キー)。
+REVIEW_WARNING_NOTE_PREFIX = "[審査参照の警告] "
+
+
+def _note_with_warning(note: str | None, warning: str | None) -> str | None:
+    """``--note`` に審査参照の警告を追記する(警告が無ければそのまま)。
+
+    警告を**記録側にも残す**のは、stderr が消えた後に「実在しない審査参照で発効した決定」を
+    事後に特定できるようにするためである(独立役員審査 SHA-6)。追記オンリーの列なので、
+    後から「実は実在した」と分かっても打ち消せない —— それでよい。警告は事実の記録であって
+    判定ではなく、解釈は読む側が行う。
+    """
+    if not warning:
+        return note
+    line = f"{REVIEW_WARNING_NOTE_PREFIX}{warning}"
+    return line if not note else f"{note}\n{line}"
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI エントリポイント(``python -m ryza.governance.decisions --deemed ...``)。
 
@@ -913,9 +962,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # 審査参照の実在検査は**警告**であって発効の可否ではない(遡及登録・リポジトリ外の
     # 審査を塞がないため)。黙って通すと `--review 嘘` がタイプミスのまま記録に残る。
+    # 警告は stderr だけに出すと**痕跡が残らず**、事後監査から「警告が出たか」を判別できない
+    # (独立役員審査 SHA-6)。Run の params と決定の note に載せて DB 側にも残す。
     warning = missing_review_ref_warning(target.review_ref)
     if warning:
         print(f"警告: {warning}", file=sys.stderr)
+        log.warning("%s", warning)
 
     import json
 
@@ -940,13 +992,16 @@ def main(argv: list[str] | None = None) -> int:
             "source": args.source,
             "reviewed_sha": target.reviewed_sha,
             "review_ref": target.review_ref,
+            # 警告が出た実行かどうかを meta.runs に残す(stderr は消える — SHA-6)。
+            "review_ref_warning": warning,
         },
     )
     conn = connect()
     try:
         result = notices.announce_deemed_approval(
             conn, target.proposal_ref, target.kind, target.notice, run.run_id,
-            source=args.source, note=args.note, title=args.title, role=args.role,
+            source=args.source, note=_note_with_warning(args.note, warning),
+            title=args.title, role=args.role,
             reviewed_sha=target.reviewed_sha, review_ref=target.review_ref,
         )
         conn.commit()

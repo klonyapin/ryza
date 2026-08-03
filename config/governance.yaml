@@ -234,6 +234,12 @@ approval_trailer: "Approved:"
 #     効かなくなる)。誤登録は削除でなく新エントリの注記で是正する
 #   - 本ファイル自身が protected_areas(area: constitution)であり、エントリの追加は
 #     独立役員審査 → #承認 通知 → みなし承認の L1 手続を要する(定款第3条・第5条)
+#   - **kind**(省略時 `a18-1`)で受容の対象検査を区別する。`a18-1` = 保護領域の無承認変更
+#     (キー: commit + paths)。`a18-8` = 審査対象 SHA の不一致(キー: commit + ref +
+#     trailer_reviewed。いずれも 40 桁の完全 SHA / 参照の完全一致)。A-18-8 の不一致は
+#     **訂正経路が構造的に存在しない**(承認記録は追記オンリー、main のコミットメッセージは
+#     改変不能)ため、受容が無いと手入力の打ち間違い1件で週次監査が恒常 ⚠️ 化する
+#     (独立役員審査 2026-08-04 SHA-3)。受容しても報告には別枠で必ず出る
 #   - 一致条件は **commit(40桁の完全 SHA)と paths(その違反で触れた保護パスの集合)の完全一致**。
 #     どちらかが違えば受容は効かず従来どおり違反として表示される。保護領域を後から追加して
 #     同じコミットが別の保護パスにも触れていたと判明した場合、paths 集合が変わるため受容は
@@ -340,3 +346,26 @@ controls:
     enforcement: declaration # fine-grained token 分離まで技術的予防なし(正直な自己申告)
     kind: 予防
     verification: 四半期棚卸しで token 分離の実装可否を再評価
+  # 以下 4 行は A-18-5〜8。実装済みの検査が統制表に無く、表と実装の乖離が累積していた
+  # (独立役員審査 2026-08-04 SHA-6)。統制表は定款第6条の正本なので、監査が実行している
+  # 検査は全て行を持つ。
+  - rule: 定款第3条2号(みなし承認は #承認 への通知と同時に発効)
+    risk: 記録は作られたが通知が配送されず「発効したが誰も知らない」状態が続く
+    enforcement: audit
+    kind: 発見
+    verification: decision='deemed' の通知参照(outbox:<id>)が UNNOTIFIED_DEEMED_MINUTES を超えて未配送なら違反として列挙(A-18-5)
+  - rule: 議論規約1・05-governance §6-5(批判を経ない決議の形骸化検出)
+    risk: 鮮度なしの確認で決議が通り続け、独立役員の批判経路が実質的に無効化される
+    enforcement: audit
+    kind: 発見
+    verification: minute_resolutions の confirmed_without_critic の連続・累積を boardroom の閾値で判定(A-18-6)
+  - rule: 定款第3条(保護領域 PR には #承認 への通知=承認記録が必要)
+    risk: --deemed の叩き忘れで保護領域の変更が通知なきまま発効する
+    enforcement: audit
+    kind: 発見
+    verification: 保護領域に触れた PR マージのうち proposal_ref が当該 PR に完全一致する承認記録を持たないものを列挙(A-18-7。緑は分母つき)
+  - rule: 定款第5条(独立審査が見た内容と発効した内容の一致)
+    risk: 審査対象の申告(トレーラ reviewed=)が承認記録と食い違い、審査後の変更が承認済みに見える
+    enforcement: audit
+    kind: 発見
+    verification: トレーラ reviewed= と decisions.reviewed_sha が両方ある決定の一致検査(A-18-8)。不一致時の承継範囲は記録側を採用。片側のみの件数も開示

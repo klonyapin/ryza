@@ -2244,7 +2244,8 @@ def test_a18_8_mismatch_reaches_result_and_report(repo, conn, run_id):
     assert a18.has_findings(result)
     embed = a18.build_alert_embed(result)
     field = next(f for f in embed["fields"] if "A-18-8" in f["name"])
-    assert "⚠️" in field["name"] and "1/1 件" in field["name"]
+    # 分母は**決定**単位で表示する(トレーラ行数ではない — SHA-5)。
+    assert "⚠️" in field["name"] and "1/1 決定" in field["name"]
     conn.rollback()
 
 
@@ -2282,3 +2283,282 @@ def test_a18_8_limitation_is_always_disclosed(repo):
     r, since = repo
     result = _run_a18_deemed(r, since)
     assert any("審査エージェント自身の署名は無い" in n for n in result["notes"])
+
+
+# ── SHA-5: 集計は決定単位(トレーラ行数で水増ししない)────────────────────────
+def test_a18_8_counts_are_per_decision_not_per_trailer(repo, conn, run_id):
+    """同じ決定を参照するコミットが N 個あっても分母は 1・所見も 1 件にまとまる。
+
+    A-18-8 は A-18-1 と違い全コミットの本文を読むため、行数で数えると同じ事実が N 回
+    数えられ、緑の「突合できた決定 N 件」も将来判断の材料も水増しされる(審査 SHA-5)。
+    """
+    r, since = repo
+    url = "https://github.com/x/y/pull/810"
+    _deemed_reviewed(conn, run_id, url, REVIEWED_A)
+    _commit_reviewed_trailer(r, url, REVIEWED_B)
+    _commit(
+        r, "docs/protected.md", "again\n",
+        f"docs: 同じ決定を参照する2つ目のコミット\n\nApproved: {url} reviewed={REVIEWED_B}",
+    )
+    scan = _scan_a188(r, since, conn)
+    assert scan.compared == 1
+    assert len(scan.findings) == 1
+    assert len(scan.findings[0]["commits"]) == 2  # どのコミットで起きたかは全部残す
+    conn.rollback()
+
+
+def test_a18_8_different_declared_shas_are_separate_findings(repo, conn, run_id):
+    """同一決定に別々の SHA を申告するコミットは別の所見(食い違いの種類が違う)。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/811"
+    _deemed_reviewed(conn, run_id, url, REVIEWED_A)
+    _commit_reviewed_trailer(r, url, REVIEWED_B)
+    _commit(
+        r, "docs/protected.md", "third\n",
+        f"docs: 別の SHA を申告\n\nApproved: {url} reviewed={'3' * 40}",
+    )
+    assert len(_scan_a188(r, since, conn).findings) == 2
+    conn.rollback()
+
+
+# ── SHA-2: 記録側にあるがトレーラ v1(reviewed= を落とすと無音になる経路)──────
+def test_a18_8_record_only_is_counted_and_disclosed(repo, conn, run_id):
+    """**SHA-2 の実証ケース**: `reviewed=` を落としても無音にならない。
+
+    CLI が head SHA を自動格納する以上、今後の記録側はほぼ常に埋まる。攻撃でなく横着で
+    トレーラから reviewed= を落とすだけで、承継は無制限のまま突合も働かなくなる。
+    旧実装は declared が無い行を早期 continue しており、この側が計測すらされなかった。
+    """
+    r, since = repo
+    url = "https://github.com/x/y/pull/812"
+    _deemed_reviewed(conn, run_id, url, REVIEWED_A)
+    _commit_with_trailer(r, url)  # 様式 v1(reviewed= なし)
+    scan = _scan_a188(r, since, conn)
+    assert scan.record_only == 1 and scan.compared == 0 and scan.trailer_only == 0
+    result = _run_a18_deemed(r, since, conn)
+    assert result["record_only_reviewed"] == 1
+    assert any("トレーラが様式 v1 の決定 1 件" in n for n in result["notes"])
+    conn.rollback()
+
+
+def test_a18_8_record_only_without_record_sha_is_not_counted(repo, conn, run_id):
+    """記録側も NULL なら record_only ではない(v1 のままの決定を鳴らさない)。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/813"
+    _deemed_reviewed(conn, run_id, url, None)
+    _commit_with_trailer(r, url)
+    scan = _scan_a188(r, since, conn)
+    assert scan.record_only == 0 and scan.trailer_only == 0 and scan.compared == 0
+    conn.rollback()
+
+
+# ── SHA-1: 不一致時の承継範囲は記録側(発効時点で固定)を採用する ──────────────
+#
+# 既存の reviewed 承継テストと同じ構成(ブランチ内 evil merge を PR マージで取り込む)を使う。
+# 承継の対象になるのは「PR マージが持ち込んだブランチ内マージ」であり、素のブランチ内
+# コミットは附則(b)で承認されて inherited には現れない — 検査対象を既存の流儀に揃える。
+def _pr_with_recorded_sha(
+    r: Path,
+    conn,
+    run_id,
+    pr_url: str,
+    *,
+    recorded: Callable[[str], str | None],
+    declared: Callable[[str], str],
+) -> str:
+    """evil merge つき PR を作り、承認記録の reviewed_sha を ``recorded`` で決める。
+
+    ``recorded`` / ``declared`` は evil merge の sha を受け取り、それぞれ記録側・トレーラ側に
+    入れる SHA を返す。戻り値は evil merge の sha。
+    """
+    evil, _merge = _merge_pr_with_evil_merge(
+        r, lambda ev: f"Merge pull request #9 from k/prfeature\n\nApproved: {pr_url} "
+                      f"reviewed={declared(ev)}",
+    )
+    _deemed_reviewed(conn, run_id, pr_url, recorded(evil))
+    return evil
+
+
+def test_a18_1_inheritance_uses_the_recorded_sha_on_mismatch(repo, conn, run_id):
+    """**SHA-1 の実証ケース**: トレーラが head を指しても、記録側 SHA より後は承継しない。
+
+    記録側 ``reviewed_sha`` は発効通知の時点に固定され追記オンリーで改変困難であるのに対し、
+    トレーラはマージ時に書ける。両方あって食い違うなら記録側が「48h の異議期間が実際に
+    係属した内容」であり、承継はそこまでに縮める(通知後に積んだ変更は違反として現れる)。
+    """
+    r, since = repo
+    url = _self_pr_url(821)
+    # 記録側は evil merge の**親**(= 通知時点)、トレーラはブランチ head(= evil merge)。
+    evil = _pr_with_recorded_sha(
+        r, conn, run_id, url,
+        recorded=lambda ev: _git(r, "rev-parse", ev + "^1").strip(),
+        declared=lambda ev: ev,
+    )
+    violations, inherited, _checked, _findings = _run_a181_full(r, since, conn)
+    assert [v["commit"] for v in violations] == [evil[:12]]
+    assert "承認記録の reviewed_sha" in violations[0]["reason"]
+    assert inherited == []
+    conn.rollback()
+
+
+def test_a18_1_matching_shas_inherit_as_before(repo, conn, run_id):
+    """一致していれば従来どおり承継する(記録側採用は不一致のときだけ働く)。"""
+    r, since = repo
+    url = _self_pr_url(822)
+    evil = _pr_with_recorded_sha(
+        r, conn, run_id, url, recorded=lambda ev: ev, declared=lambda ev: ev
+    )
+    violations, inherited, _checked, _findings = _run_a181_full(r, since, conn)
+    assert violations == []
+    assert [i["commit"] for i in inherited] == [evil[:12]]
+    assert inherited[0]["reviewed_from_record"] is False
+    conn.rollback()
+
+
+def test_a18_1_record_side_can_widen_the_scope_and_is_marked(repo, conn, run_id):
+    """記録側が head を指しトレーラが手前を指す場合も**記録側**を採る(常に記録側が正)。
+
+    「縮む方向だけ採用する」ようにすると、どちらを正とするかが所見の向きで変わる恣意的な
+    規則になる。記録側が発効時点で固定されているという理由は方向に依らないので、
+    採用規則も方向に依らせない。承継した事実には記録側由来の印を残す。
+    """
+    r, since = repo
+    url = _self_pr_url(823)
+    evil = _pr_with_recorded_sha(
+        r, conn, run_id, url,
+        recorded=lambda ev: ev,
+        declared=lambda ev: _git(r, "rev-parse", ev + "^1").strip(),
+    )
+    violations, inherited, _checked, _findings = _run_a181_full(r, since, conn)
+    assert violations == []
+    assert [i["commit"] for i in inherited] == [evil[:12]]
+    assert inherited[0]["reviewed_from_record"] is True
+    conn.rollback()
+
+
+def test_a18_1_record_side_override_is_disclosed_in_notes(repo, conn, run_id):
+    """承継範囲を記録側で決めた事実は注記に出す(黙って範囲を変えない)。"""
+    r, since = repo
+    url = _self_pr_url(824)
+    _pr_with_recorded_sha(
+        r, conn, run_id, url,
+        recorded=lambda ev: _git(r, "rev-parse", ev + "^1").strip(),
+        declared=lambda ev: ev,
+    )
+    result = _run_a18_deemed(r, since, conn)
+    assert any("承認記録側の reviewed_sha" in n for n in result["notes"])
+    conn.rollback()
+
+
+def test_a18_1_trailer_only_keeps_the_declared_scope(repo, conn, run_id):
+    """記録側が NULL なら従来どおりトレーラの値で範囲を決める(移行期を壊さない)。"""
+    r, since = repo
+    url = _self_pr_url(825)
+    evil = _pr_with_recorded_sha(
+        r, conn, run_id, url, recorded=lambda _ev: None, declared=lambda ev: ev
+    )
+    violations, inherited, _checked, _findings = _run_a181_full(r, since, conn)
+    assert violations == []
+    assert [i["commit"] for i in inherited] == [evil[:12]]
+    conn.rollback()
+
+
+# ── SHA-3: A-18-8 の不一致に解消経路(acknowledged_findings kind: a18-8)──────
+def _ack_reviewed_gov(r: Path, commit: str, ref: str, declared: str) -> dict:
+    """一時リポジトリの governance.yaml に A-18-8 の受容エントリを足した dict を返す。"""
+    gov = a18.load_governance(r)
+    gov["acknowledged_findings"] = [
+        {
+            "kind": "a18-8",
+            "commit": commit,
+            "ref": ref,
+            "trailer_reviewed": declared,
+            "reason": "手入力の打ち間違い。記録は追記オンリーで訂正できない",
+            "approval_ref": "https://github.com/klonyapin/ryza/pull/999",
+            "acknowledged_on": "2026-08-04",
+        }
+    ]
+    return gov
+
+
+def _only_reviewed_findings(result: dict) -> bool:
+    """A-18-8 **だけ**が所見判定に効いているかを見る(他の検査の信号を落として評価する)。
+
+    一時リポジトリの実行は直 push(A-18-4)と PR 実在照合の無効化で常に所見ありになるため、
+    ``has_findings`` をそのまま見ても A-18-8 の寄与を判定できない。
+    """
+    masked = {
+        **result,
+        "violations": [], "mismatches": [], "direct_pushes": [],
+        "unnotified_deemed": [], "unrecorded_prs": [], "trailer_findings": [],
+        "resolution_bypass": None, "prs_verified": True, "pr_verification": {},
+    }
+    return a18.has_findings(masked)
+
+
+def test_a18_8_acknowledged_mismatch_is_shown_but_not_alerted(repo, conn, run_id):
+    """**SHA-3 の実証ケース**: 訂正不能な不一致を受容でき、恒常 ⚠️ 化しない。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/830"
+    _deemed_reviewed(conn, run_id, url, REVIEWED_A)
+    sha = _commit_reviewed_trailer(r, url, REVIEWED_B)
+    # 受容前は A-18-8 だけで所見が立つ(受容の効果を対比で示す)。
+    assert _only_reviewed_findings(_run_a18_deemed(r, since, conn))
+    gov = _ack_reviewed_gov(r, sha, url, REVIEWED_B)
+    (r / "config" / "governance.yaml").write_text(
+        yaml.safe_dump(gov, allow_unicode=True), encoding="utf-8"
+    )
+    result = _run_a18_deemed(r, since, conn)
+    assert result["reviewed_sha_mismatches"] == []
+    assert len(result["acknowledged_reviewed"]) == 1
+    assert not _only_reviewed_findings(result)
+    embed = a18.build_alert_embed(result)
+    assert any("受容済みの審査対象 SHA 不一致" in f["name"] for f in embed["fields"])
+    assert not any("⚠️ A-18-8" in f["name"] for f in embed["fields"])
+    conn.rollback()
+
+
+def test_a18_8_acknowledgement_does_not_cover_a_different_sha(repo, conn, run_id):
+    """申告値が変われば受容は外れる(古い受容が新しい不一致を覆い隠さない)。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/831"
+    _deemed_reviewed(conn, run_id, url, REVIEWED_A)
+    sha = _commit_reviewed_trailer(r, url, REVIEWED_B)
+    gov = _ack_reviewed_gov(r, sha, url, "9" * 40)  # 別の申告値を受容している
+    (r / "config" / "governance.yaml").write_text(
+        yaml.safe_dump(gov, allow_unicode=True), encoding="utf-8"
+    )
+    result = _run_a18_deemed(r, since, conn)
+    assert len(result["reviewed_sha_mismatches"]) == 1
+    assert _only_reviewed_findings(result)
+    assert any("一致する所見を持たない" in n for n in result["notes"])
+    conn.rollback()
+
+
+def test_a18_8_invalid_acknowledgement_entry_is_disclosed(repo, conn):
+    """欠落エントリは受容として効かせず注記に出す(受容できたと誤認させない)。"""
+    r, since = repo
+    gov = a18.load_governance(r)
+    gov["acknowledged_findings"] = [{"kind": "a18-8", "commit": "z" * 40}]
+    (r / "config" / "governance.yaml").write_text(
+        yaml.safe_dump(gov, allow_unicode=True), encoding="utf-8"
+    )
+    result = _run_a18_deemed(r, since, conn)
+    assert any("kind: a18-8)のエントリが無効" in n for n in result["notes"])
+    conn.rollback()
+
+
+def test_a18_1_acknowledgement_ignores_a18_8_entries(repo, conn):
+    """kind で対象検査が分かれる(A-18-8 の受容が A-18-1 の違反を消さない)。"""
+    r, since = repo
+    sha = _commit(r, "docs/protected.md", "v9\n", "docs: 無承認の保護領域変更")
+    gov = a18.load_governance(r)
+    gov["acknowledged_findings"] = [
+        {"kind": "a18-8", "commit": sha, "ref": "x", "trailer_reviewed": REVIEWED_A}
+    ]
+    (r / "config" / "governance.yaml").write_text(
+        yaml.safe_dump(gov, allow_unicode=True), encoding="utf-8"
+    )
+    result = _run_a18_deemed(r, since, conn)
+    assert [v["commit"] for v in result["violations"]] == [sha[:12]]
+    conn.rollback()

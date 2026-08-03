@@ -795,3 +795,60 @@ def test_cli_rejects_an_invalid_reviewed_sha(capsys):
     ])
     assert rc == 1
     assert "40 桁 hex" in capsys.readouterr().err
+
+
+# ── 明示承認にも審査対象 SHA を書ける(独立役員審査 SHA-4)────────────────────
+# 3専決事項(定款・実弾・KS 復帰)は必ず押下による明示承認を通るため、この経路に列が
+# 無いと**最重要の決定種別が構造的に A-18-8 の射程外**になる。
+def test_explicit_approval_can_record_reviewed_sha(conn):
+    got = record_decision(
+        conn, "explicit-reviewed", "approve", OWNER, OWNERS, kind="budget",
+        reviewed_sha=SHA_A.upper(), review_ref="docs/reviews/x-review.md",
+    )
+    row = current_decision_by_id(conn, got.id)
+    assert row["reviewed_sha"] == SHA_A  # writer と同じ正規化規則
+    assert row["review_ref"] == "docs/reviews/x-review.md"
+    conn.rollback()
+
+
+def test_explicit_approval_defaults_to_null(conn):
+    """押下による承認は必ずしもコミットを対象としない — 既定は従来どおり NULL。"""
+    got = record_decision(conn, "explicit-plain", "approve", OWNER, OWNERS, kind="budget")
+    assert current_decision_by_id(conn, got.id)["reviewed_sha"] is None
+    conn.rollback()
+
+
+def test_explicit_approval_rejects_an_invalid_reviewed_sha(conn):
+    """様式検証は経路で変わらない(deemed と同じ規則 = 突合の前提が揃う)。"""
+    with pytest.raises(ValueError, match="40 桁 hex"):
+        record_decision(
+            conn, "explicit-bad", "approve", OWNER, OWNERS, kind="budget", reviewed_sha="abc123"
+        )
+    conn.rollback()
+
+
+# ── 審査参照の警告を痕跡として残す・ルート解決の堅牢化(独立役員審査 SHA-6)──────
+def test_review_warning_is_appended_to_the_note():
+    """stderr だけでは事後監査から「警告が出たか」を判別できないので note に残す。"""
+    warning = "参照が見つからない"
+    assert decisions_mod._note_with_warning(None, warning).startswith(
+        decisions_mod.REVIEW_WARNING_NOTE_PREFIX
+    )
+    combined = decisions_mod._note_with_warning("元の補足", warning)
+    assert combined.startswith("元の補足") and warning in combined
+    assert decisions_mod._note_with_warning("元の補足", None) == "元の補足"
+
+
+def test_repo_root_is_resolved_via_git():
+    """ソースチェックアウトでは git rev-parse でルートが解ける(パス相対の当て推量に頼らない)。"""
+    root = decisions_mod._repo_root()
+    assert root is not None and (root / "config" / "governance.yaml").exists()
+
+
+def test_review_ref_check_is_disabled_when_the_root_is_unknown(monkeypatch):
+    """ルートを決められない実行(パッケージ設置)では検査せず**誤警告を出さない**。
+
+    誤警告は「警告が出ていても実在する」学習を生み、警告そのものを無意味にする。
+    """
+    monkeypatch.setattr(decisions_mod, "_repo_root", lambda: None)
+    assert decisions_mod.missing_review_ref_warning("docs/reviews/does-not-exist.md") is None
