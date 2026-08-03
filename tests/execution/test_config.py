@@ -25,6 +25,32 @@ def test_load_effective_config_values():
     assert cfg.fees["equity_us"].max_fee == Decimal(22)
     # 未知の資産クラスは高コスト側(default = 米国株と同率)。
     assert cfg.fees["default"].commission_rate == Decimal("0.00495")
+    # 再締めの窓(根拠は execution.yaml のコメント: 独立審査 重要-2 / 週末を跨ぐ遅延)。
+    assert cfg.close.reclose_business_days == 3
+
+
+def test_load_rejects_missing_close_section(tmp_path):
+    """close の既定値はコード側に持たない(窓の広さのハードコード禁止)。"""
+    p = tmp_path / "execution.yaml"
+    p.write_text(
+        "slippage: {half_spread_bps: '5', impact_coeff_bps: '140', max_bps: '100'}\n"
+        "fees:\n  default: {commission_rate: '0'}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ExecutionConfigError, match="reclose_business_days"):
+        ExecutionConfig.load(p)
+
+
+def test_load_rejects_negative_reclose_window(tmp_path):
+    p = tmp_path / "execution.yaml"
+    p.write_text(
+        "slippage: {half_spread_bps: '5', impact_coeff_bps: '140', max_bps: '100'}\n"
+        "fees:\n  default: {commission_rate: '0'}\n"
+        "close: {reclose_business_days: -1}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ExecutionConfigError, match="非負"):
+        ExecutionConfig.load(p)
 
 
 def test_fee_for_fallback():

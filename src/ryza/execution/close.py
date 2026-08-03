@@ -12,6 +12,9 @@
    約定再生と執行系ポジションの独立クロスチェックになる)
 3. ``risk.nav_daily`` へ book_id×date×nav を upsert。status は執行照合(1)と
    ポジション照合(2)の両方が一致したときのみ confirmed
+4. ``ledger.closing.reclose_recent`` — 直近 N 営業日(``config/execution.yaml`` の
+   ``close.reclose_business_days``)の NAV を再計算し、締めの**後**に同じ日付で立った
+   仕訳を取り込む(独立審査 重要-2)。値が変わった日は ``risk.nav_daily`` 側も追随させる
 
 **NAV 二表の役割分担(T-015 統合時の設計リード裁定 2026-08-03)**:
 ``ledger.nav_snapshots`` が NAV の正(ledger が所有・T-015 の ``risk/daily.py`` は
@@ -34,6 +37,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Json
 
+from ryza.execution.config import ExecutionConfig
 from ryza.execution.demo import latest_close
 from ryza.ledger import closing
 
@@ -172,11 +176,13 @@ def run_demo_close(
     date: _date,
     run_id: int,
     on_break: BreakCallback | None = None,
+    config: ExecutionConfig | None = None,
 ) -> dict[str, Any]:
-    """日次締め: 執行照合 → MTM/NAV/ポジション照合(ledger)→ risk.nav_daily。
+    """日次締め: 執行照合 → MTM/NAV/ポジション照合(ledger)→ risk.nav_daily → 再締め。
 
-    戻り値: ``{nav, status, exec_recon, ledger}``。コミットは呼び出し側
-    (ledger.posting と同じ流儀)。
+    戻り値: ``{nav, status, exec_recon, ledger, reclose}``。コミットは呼び出し側
+    (ledger.posting と同じ流儀)。``reclose`` は直近 N 営業日の再締めで**値が変わった
+    日**のリスト(独立審査 重要-2)— 確定値の書き換えは黙って行わず呼び出し側に返す。
     """
     exec_recon = reconcile_executions(conn, book_id=book_id, date=date, on_break=on_break)
 
@@ -220,7 +226,75 @@ def run_demo_close(
     }
     _upsert_nav_daily(conn, book_id, date, nav, status, detail, run_id)
 
-    return {"nav": nav, "status": status, "exec_recon": exec_recon, "ledger": ledger_summary}
+    # 直近 N 営業日の再締め(独立審査 重要-2)。当日の締めより**後**に置く: 当日の
+    # スナップショットを先に確定させておけば、再締めの窓(snap_date < date)と当日の
+    # 処理が重ならない。
+    cfg = config if config is not None else ExecutionConfig.load()
+    reclosed = closing.reclose_recent(
+        conn,
+        book_id=book_id,
+        through=date,
+        days=cfg.close.reclose_business_days,
+        run_id=run_id,
+    )
+    _sync_nav_daily_after_reclose(conn, book_id, reclosed, run_id)
+
+    return {
+        "nav": nav,
+        "status": status,
+        "exec_recon": exec_recon,
+        "ledger": ledger_summary,
+        "reclose": reclosed,
+    }
+
+
+def _sync_nav_daily_after_reclose(
+    conn: psycopg.Connection,
+    book_id: str,
+    reclosed: list[dict[str, Any]],
+    run_id: int,
+) -> None:
+    """再締めで値が変わった日の ``risk.nav_daily`` を ``ledger.nav_snapshots`` に追随させる。
+
+    0016 の設計どおり両表の nav は常に一致していなければならない(nav_snapshots が正、
+    nav_daily は執行照合を重ねた risk 用ビュー)。再締めが片側だけを動かすと、リスク
+    エンジンとダッシュボードが別々の NAV を見ることになる。
+
+    ``status`` は据え置く(``reclose_recent`` と同じ理由 — 遅れて立った拠出資本の仕訳は
+    照合の結論を変えない)。行が無い日は**作らない**: nav_daily の行は執行段の締めが
+    書くもので、ここで合成すると「執行照合を経ていない confirmed」が生まれる。
+    代わりに戻り値(``reclose`` の各要素)へ ``nav_daily_missing`` を立てて呼び出し側に返す。
+    """
+    for item in reclosed:
+        nav_date = item["date"]
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT detail FROM risk.nav_daily WHERE book_id = %s AND nav_date = %s",
+                (book_id, nav_date),
+            )
+            row = cur.fetchone()
+        if row is None:
+            item["nav_daily_missing"] = True
+            continue
+        prev_detail = row[0] if isinstance(row[0], dict) else {}
+        detail = {
+            **prev_detail,
+            "reclose": {
+                "nav_before": str(item["nav_before"]),
+                "source": "ledger.closing.reclose_recent",
+                "reason": "締め後に同日付で立った仕訳の取り込み(独立審査 重要-2)",
+            },
+        }
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE risk.nav_daily
+                SET nav = %s, detail = %s, run_id = %s, updated_at = now()
+                WHERE book_id = %s AND nav_date = %s
+                """,
+                (item["nav_after"], Json(detail), run_id, book_id, nav_date),
+            )
+        item["nav_daily_missing"] = False
 
 
 def _upsert_nav_daily(
@@ -232,7 +306,12 @@ def _upsert_nav_daily(
     detail: dict[str, Any],
     run_id: int,
 ) -> None:
-    """risk.nav_daily を upsert する(同日再締めは上書き — nav_snapshots と同じ流儀)。"""
+    """risk.nav_daily を upsert する(同日再締めは上書き — nav_snapshots と同じ流儀)。
+
+    リネージ(不変原則3)は ``run_id``(NOT NULL・``meta.runs`` への FK)が担う —
+    code_version は meta.runs に 1 度だけ持たせ、detail に写さない。detail に producer を
+    埋める ``ledger.nav_snapshots`` と扱いが違うのは、あちらに run_id 列が無いため。
+    """
     with conn.cursor() as cur:
         cur.execute(
             """

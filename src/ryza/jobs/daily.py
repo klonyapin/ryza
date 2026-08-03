@@ -531,14 +531,13 @@ def run_daily(
     def _execution() -> dict[str, Any]:
         detail: dict[str, Any] = {}
         breaks: list[dict[str, Any]] = []
+        exec_config = ExecutionConfig.load()
         if is_engaged(conn):
             # Kill Switch 中は新規執行をスキップ(通過済み注文も出さない)。
             # 締め(内部会計・NAV 記帳)は運用監視のため走らせる。
             detail["orders"] = "skipped(kill_switch)"
         else:
-            broker = DemoBroker(
-                conn, config=ExecutionConfig.load(), trade_date=jst_date
-            )
+            broker = DemoBroker(conn, config=exec_config, trade_date=jst_date)
             pending = run_pending(
                 conn, book_id=DEMO_BOOK, broker=broker,
                 run_id=run.run_id, entry_date=jst_date,
@@ -549,10 +548,17 @@ def run_daily(
             )
         close_result = run_demo_close(
             conn, book_id=DEMO_BOOK, date=jst_date,
-            run_id=run.run_id, on_break=breaks.append,
+            run_id=run.run_id, on_break=breaks.append, config=exec_config,
         )
         detail["nav"] = str(close_result["nav"])
         detail["nav_status"] = close_result["status"]
+        # 再締めで過去の確定 NAV が動いた日は必ず日次サマリに出す(独立審査 重要-2 の
+        # 是正は「黙って過去を書き換える」経路でもあるため、検知可能にしておく)。
+        if close_result["reclose"]:
+            detail["reclosed"] = [
+                f"{r['date']} {r['nav_before']}→{r['nav_after']}"
+                for r in close_result["reclose"]
+            ]
         if breaks:
             detail["breaks"] = len(breaks)
             enqueue(conn, channel_ops, _build_breaks_embed(breaks, as_of=as_of), run.run_id)
