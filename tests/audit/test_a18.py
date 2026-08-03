@@ -76,14 +76,21 @@ def repo(tmp_path: Path) -> tuple[Path, str]:
 
 
 def _run_a181(repo_path: Path, since: str | None):
-    """A-18-1 を実行し (違反, 検査コミット数) を返す(PR 承継の一覧は _run_a181_full で見る)。"""
-    violations, _inherited, checked = _run_a181_full(repo_path, since)
+    """A-18-1 を DB 無しで実行し ``(違反, 検査数)`` を返す(承継・所見は別ヘルパで見る)。"""
+    violations, _inherited, checked, _findings = _run_a181_full(repo_path, since)
     return violations, checked
 
 
-def _run_a181_full(repo_path: Path, since: str | None):
+def _run_a181_full(repo_path: Path, since: str | None, conn=None):
+    """A-18-1 の全戻り値 ``(違反, 承継, 検査数, トレーラ所見)``。"""
     gov = a18.load_governance(repo_path)
-    return a18.check_protected_commits(repo_path, gov, since_commit=since)
+    return a18.check_protected_commits(repo_path, gov, since_commit=since, conn=conn)
+
+
+def _run_a181_db(repo_path: Path, since: str | None, conn):
+    """DB 接続つきの A-18-1(トレーラ実在照合あり)。``(違反, トレーラ所見)`` を返す。"""
+    violations, _inherited, _checked, findings = _run_a181_full(repo_path, since, conn)
+    return violations, findings
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -242,7 +249,7 @@ def test_pr_inheritance_covers_in_branch_evil_merge(repo):
     evil, merge = _merge_pr_with_evil_merge(
         r, "Merge pull request #9 from k/feature\n\n" + APPROVED
     )
-    violations, inherited, _ = _run_a181_full(r, since)
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
     assert violations == []
     assert [i["commit"] for i in inherited] == [evil[:12]]
     assert inherited[0]["merge"] == merge[:12]
@@ -270,7 +277,7 @@ def test_pr_inheritance_requires_trailer_on_the_merge(repo):
     """トレーラの無い PR マージ配下の evil merge は従来どおり違反(初期 PR #56 型)。"""
     r, since = repo
     evil, _ = _merge_pr_with_evil_merge(r, "Merge pull request #9 from k/feature")
-    violations, inherited, _ = _run_a181_full(r, since)
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
     assert [v["commit"] for v in violations] == [evil[:12]]
     assert "evil merge" in violations[0]["reason"]
     assert inherited == []
@@ -280,7 +287,7 @@ def test_pr_inheritance_requires_pr_merge_subject(repo):
     """件名がマージ形式でない(= PR でない)統合は、トレーラがあっても承継の起点にしない。"""
     r, since = repo
     evil, _ = _merge_pr_with_evil_merge(r, "ローカルマージ(PR でない)\n\n" + APPROVED)
-    violations, inherited, _ = _run_a181_full(r, since)
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
     assert inherited == []
     # evil merge に加え、ブランチ内の通常コミットも附則(b)の対象外になり違反として残る。
     assert evil[:12] in [v["commit"] for v in violations]
@@ -295,7 +302,7 @@ def test_first_parent_merge_itself_is_not_inherited(repo):
     r, since = repo
     _merge_pr_with_evil_merge(r, "Merge pull request #9 from k/feature\n\n" + APPROVED)
     _make_evil_merge(r, "Merge pull request #10 from k/other")  # トレーラなし・main 上
-    violations, inherited, _ = _run_a181_full(r, since)
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
     assert len(violations) == 1
     assert "evil merge" in violations[0]["reason"]
     assert len(inherited) == 1  # 先の PR #9 配下の承継は維持される
@@ -306,7 +313,7 @@ def test_inheritance_does_not_cover_direct_main_commits(repo):
     r, since = repo
     sha = _commit(r, "docs/protected.md", "v2\n", "docs: main への直コミット")
     _merge_pr(r, "f1", "src/prot/ks.py", "x = 1\n", 11)
-    violations, inherited, _ = _run_a181_full(r, since)
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
     assert [v["commit"] for v in violations] == [sha[:12]]
     assert inherited == []
 
@@ -327,7 +334,7 @@ def test_octopus_merge_cannot_be_an_inheritance_origin(repo):
     _git(r, "merge", "--no-ff", "-q", "o1", "o2",
          "-m", "Merge pull request #9 from k/octopus\n\n" + APPROVED)
     assert len(_git(r, "log", "-1", "--format=%P").split()) == 3  # octopus であること
-    violations, inherited, _ = _run_a181_full(r, since)
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
     assert inherited == []
     assert sorted(v["commit"] for v in violations) == sorted([a[:12], b[:12]])
     assert all("親2" in v["reason"] for v in violations)
@@ -341,7 +348,7 @@ def test_plain_branch_commits_are_not_counted_as_inherited(repo):
     """
     r, since = repo
     _merge_pr(r, "f1", "src/prot/ks.py", "x = 1\n", 12)
-    violations, inherited, _ = _run_a181_full(r, since)
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
     assert violations == [] and inherited == []
 
 
@@ -521,6 +528,336 @@ def test_real_repo_acknowledged_findings_are_matched():
     assert len(result["acknowledged"]) == len(_real_governance()["acknowledged_findings"])
     assert not any("acknowledged_findings のエントリが一致する違反を持たない" in n
                    for n in result["notes"])
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# A-18-1 Approved トレーラの実在照合(governance.current_decisions との突合)
+#
+# 「トレーラがある」で受理すると、代表が否認した承認を A-18 が承認として受理し、
+# 取消義務が生じている変更が無承認変更として検出されない(独立役員審査 0021 C-5)。
+# 照合は必ず現決定 view 経由で行い、否認済みは受理しない。
+# ────────────────────────────────────────────────────────────────────────────
+OWNER = "424242"
+OWNERS = (OWNER,)
+
+
+def test_decision_ref_id_requires_prefix():
+    """裸の数字は決定 ID として解釈しない(Issue 番号との偶然一致が fail-open — 重要-2)。"""
+    assert a18.decision_ref_id("decision:45") == 45
+    assert a18.decision_ref_id("123") is None
+    assert a18.decision_ref_id("https://github.com/x/y/issues/1") is None
+    assert a18.decision_ref_id("#12") is None
+
+
+def test_approval_trailer_refs_collects_all():
+    msg = "fix: x\n\nApproved: decision:12\nApproved: https://github.com/x/y/issues/3\n"
+    assert a18.approval_trailer_refs(msg) == ["decision:12", "https://github.com/x/y/issues/3"]
+
+
+def _deemed(conn, run_id, proposal_ref: str) -> int:
+    """みなし承認を1件記録し decision id を返す(通知と同一トランザクション)。"""
+    from ryza.governance import notices
+
+    return notices.announce_deemed_approval(
+        conn, proposal_ref, "pr", "保護領域の変更", run_id
+    ).decision.id
+
+
+def _veto(conn, run_id, proposal_ref: str) -> None:
+    from ryza.governance import notices
+
+    notices.apply_veto(
+        conn, proposal_ref, "リスク上限を緩める方向のため",
+        vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id,
+    )
+
+
+def _commit_with_trailer(r: Path, ref: str) -> str:
+    return _commit(
+        r, "docs/protected.md", f"v-{ref}\n", f"docs: 保護領域変更\n\nApproved: {ref}"
+    )
+
+
+def test_deemed_decision_trailer_is_accepted(repo, conn, run_id):
+    """みなし承認(deemed)を指すトレーラは承認記録として受理される(0019 C-3 の⑤)。"""
+    r, since = repo
+    decision_id = _deemed(conn, run_id, "https://github.com/x/y/pull/101")
+    _commit_with_trailer(r, f"decision:{decision_id}")
+    violations, findings = _run_a181_db(r, since, conn)
+    assert violations == [] and findings == []
+    conn.rollback()
+
+
+def test_pr_url_trailer_is_matched_by_proposal_ref(repo, conn, run_id):
+    """**重大-1**: PR URL のトレーラは proposal_ref 一致で解決される。
+
+    本リポジトリの承認記録は全件 PR URL であり、deemed 記録の proposal_ref も同じ URL。
+    ID 形式だけを照合していた実装では、否認済み承認がそのまま受理されていた。
+    """
+    r, since = repo
+    url = "https://github.com/x/y/pull/201"
+    _deemed(conn, run_id, url)
+    _commit_with_trailer(r, url)
+    violations, _ = _run_a181_db(r, since, conn)
+    assert violations == []
+    # 否認すると同じトレーラが受理されなくなる。
+    _veto(conn, run_id, url)
+    violations_after, _ = _run_a181_db(r, since, conn)
+    assert len(violations_after) == 1
+    assert "否認済み" in violations_after[0]["reason"]
+    conn.rollback()
+
+
+def test_vetoed_decision_trailer_is_violation(repo, conn, run_id):
+    """否認された承認を指すトレーラは受理しない(取消されるまで無承認変更)。"""
+    r, since = repo
+    decision_id = _deemed(conn, run_id, "https://github.com/x/y/pull/102")
+    _veto(conn, run_id, "https://github.com/x/y/pull/102")
+    _commit_with_trailer(r, f"decision:{decision_id}")
+    violations, _ = _run_a181_db(r, since, conn)
+    assert len(violations) == 1
+    assert "否認済み" in violations[0]["reason"]
+    conn.rollback()
+
+
+def _merge_pr_with_evil_merge_trailer(r: Path, ref: str) -> tuple[str, str]:
+    """PR マージのトレーラに ``ref`` を書いた「ブランチ内 evil merge 付き PR」を作る。"""
+    return _merge_pr_with_evil_merge(
+        r, f"Merge pull request #9 from k/prfeature\n\nApproved: {ref}"
+    )
+
+
+def test_vetoed_pr_trailer_cannot_be_an_inheritance_origin(repo, conn, run_id):
+    """**承継 × 否認**: 否認済みの PR トレーラは承継の起点にならず、配下は違反のまま。
+
+    承継の起点判定を素の has_approval_trailer で行うと、この経路だけ否認照合を迂回して
+    「否認された PR の内容がブランチ丸ごと承認扱い」になる(2026-08-04 設計リード追達1)。
+    """
+    r, since = repo
+    url = "https://github.com/x/y/pull/301"
+    _deemed(conn, run_id, url)
+    evil, _merge = _merge_pr_with_evil_merge_trailer(r, url)
+    # 否認前: 承継が効き違反ゼロ。
+    violations, inherited, _checked, _f = _run_a181_full(r, since, conn)
+    assert violations == [] and [i["commit"] for i in inherited] == [evil[:12]]
+    assert inherited[0]["decision_verified"] is True
+    # 否認後: 起点が無効になり、配下の evil merge が違反として復活する。
+    _veto(conn, run_id, url)
+    violations_after, inherited_after, _c, _f2 = _run_a181_full(r, since, conn)
+    assert inherited_after == []
+    assert evil[:12] in [v["commit"] for v in violations_after]
+    conn.rollback()
+
+
+def test_inheritance_without_conn_is_disclosed(repo):
+    """conn なし(照合不能)では形式的有効性のみで承継し、notes に件数を開示する。"""
+    r, since = repo
+    evil, _merge = _merge_pr_with_evil_merge_trailer(r, "https://github.com/x/y/pull/302")
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [i["commit"] for i in result["inherited"]] == [evil[:12]]
+    assert result["inherited"][0]["decision_verified"] is False
+    assert any("decisions 照合なしの承継 1 件" in n for n in result["notes"])
+
+
+def test_pr_merge_does_not_rescue_a_vetoed_trailer(repo, conn, run_id):
+    """PR マージ経由でも、トレーラが否認済みの承認を指すなら違反のまま。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/103"
+    decision_id = _deemed(conn, run_id, url)
+    _veto(conn, run_id, url)
+    _git(r, "checkout", "-q", "-b", "feature-vetoed")
+    sha = _commit(
+        r, "src/prot/ks.py", "x = 1\n", f"feat: 保護コード\n\nApproved: decision:{decision_id}"
+    )
+    _git(r, "checkout", "-q", "main")
+    _git(r, "merge", "--no-ff", "-q", "feature-vetoed", "-m", "Merge pull request #7 from k/f")
+    violations, _ = _run_a181_db(r, since, conn)
+    assert [v["commit"] for v in violations] == [sha[:12]]
+    assert "否認済み" in violations[0]["reason"]
+    conn.rollback()
+
+
+def test_missing_decision_record_is_violation(repo, conn):
+    """存在しない決定 ID を指すトレーラは承認と見なさない(自己申告の空手形)。"""
+    r, since = repo
+    _commit_with_trailer(r, "decision:999999999")
+    violations, _ = _run_a181_db(r, since, conn)
+    assert len(violations) == 1
+    assert "存在しない" in violations[0]["reason"]
+    conn.rollback()
+
+
+def test_rejected_decision_trailer_is_violation(repo, conn):
+    """却下された決定を指すトレーラも承認ではない。"""
+    from ryza.bot.approvals import record_decision
+
+    r, since = repo
+    got = record_decision(conn, "rejected-proposal", "reject", OWNER, OWNERS, kind="pr")
+    _commit_with_trailer(r, f"decision:{got.id}")
+    violations, _ = _run_a181_db(r, since, conn)
+    assert len(violations) == 1
+    assert "承認ではない" in violations[0]["reason"]
+    conn.rollback()
+
+
+def test_unknown_reference_is_accepted_and_disclosed(repo, conn):
+    """DB に対応行が無い参照(Issue 決議)は従来どおり受理し、所見にも残さない。"""
+    r, since = repo
+    _commit_with_trailer(r, "https://github.com/x/y/issues/1")
+    violations, findings = _run_a181_db(r, since, conn)
+    assert violations == [] and findings == []
+    conn.rollback()
+
+
+def test_bare_number_trailer_is_unverifiable_and_noted(repo, conn):
+    """裸の数字は照合せず受理し、「照合できない参照」として notes に開示する(重要-2)。"""
+    r, since = repo
+    _commit_with_trailer(r, "42")
+    violations, findings = _run_a181_db(r, since, conn)
+    assert violations == []
+    assert len(findings) == 1
+    assert findings[0]["problems"] == []
+    assert any("decision:42" in u for u in findings[0]["unverifiable"])
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since, conn=conn)
+    assert any("照合できない Approved 参照" in n for n in result["notes"])
+    # 様式の不備であって統制違反ではない — 報告の要否を左右しない(⚠️ は点けない)。
+    assert a18.vetoed_trailer_findings(result) == []
+    conn.rollback()
+
+
+def test_vetoed_reference_alongside_valid_one_is_listed(repo, conn, run_id):
+    """有効な承認があっても否認済み参照は所見に残す(軽微-10)。"""
+    r, since = repo
+    ok_url = "https://github.com/x/y/pull/301"
+    bad_url = "https://github.com/x/y/pull/302"
+    _deemed(conn, run_id, ok_url)
+    _deemed(conn, run_id, bad_url)
+    _veto(conn, run_id, bad_url)
+    _commit(
+        r, "docs/protected.md", "v2\n",
+        f"docs: 変更\n\nApproved: {ok_url}\nApproved: {bad_url}",
+    )
+    violations, findings = _run_a181_db(r, since, conn)
+    assert violations == []  # 有効な承認があるので受理
+    assert len(findings) == 1 and "否認済み" in findings[0]["problems"][0]
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since, conn=conn)
+    assert a18.has_findings(result)  # 取消義務の検討対象として報告する
+    embed = a18.build_alert_embed(result)
+    assert any("否認済みの承認記録を参照" in f["name"] for f in embed["fields"])
+    conn.rollback()
+
+
+def test_without_conn_vetoed_trailer_is_not_detected(repo, conn, run_id):
+    """conn 無しでは照合できない。従来動作を保ちつつ、その限界を notes で開示する。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/104"
+    _deemed(conn, run_id, url)
+    _veto(conn, run_id, url)
+    _commit_with_trailer(r, url)
+    violations, _ = _run_a181(r, since)
+    assert violations == []  # 検出できない(= conn を渡さない実行の限界)
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert result["decision_refs_verified"] is False
+    assert any("未照合" in n for n in result["notes"])
+    conn.rollback()
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# A-18-5 通知なき発効(未配送のみなし承認)
+#
+# 記録と outbox 投入が同一トランザクションでも、**投入は配送ではない**。配送が止まれば
+# 「発効したが誰も知らない」状態が続き、定款第3条の発効要件が満たされない(重要-3)。
+# ────────────────────────────────────────────────────────────────────────────
+def _age_outbox(conn, outbox_id: int, minutes: int) -> None:
+    """outbox 行の created_at を過去にずらす(滞留の再現)。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE press.outbox SET created_at = now() - make_interval(mins => %s) WHERE id = %s",
+            (minutes, outbox_id),
+        )
+
+
+def test_fresh_unsent_notice_is_not_a_finding(conn, run_id):
+    """投入直後の未配送は正常(配送ループは 5 秒間隔)。"""
+    from ryza.governance import notices
+
+    notices.announce_deemed_approval(conn, "a185-fresh", "pr", "要旨", run_id)
+    findings, _ = a18.check_unnotified_deemed(conn)
+    assert [f for f in findings if f["proposal_ref"] == "a185-fresh"] == []
+    conn.rollback()
+
+
+def test_stale_unsent_notice_is_a_violation(conn, run_id):
+    """60 分を超えて未配送なら「通知なき発効」として違反。"""
+    from ryza.governance import notices
+
+    result = notices.announce_deemed_approval(conn, "a185-stale", "pr", "要旨", run_id)
+    _age_outbox(conn, result.outbox_id, 120)
+    findings, _ = a18.check_unnotified_deemed(conn)
+    mine = [f for f in findings if f["proposal_ref"] == "a185-stale"]
+    assert len(mine) == 1
+    assert mine[0]["decision_id"] == result.decision.id
+    assert mine[0]["notice_ref"] == result.notice_ref
+    assert "未配送" in mine[0]["reason"]
+    conn.rollback()
+
+
+def test_delivered_notice_is_not_a_finding(conn, run_id):
+    """配送済み(sent_at あり)なら滞留していても所見にしない。"""
+    from ryza.bot.outbox import mark_sent
+    from ryza.governance import notices
+
+    result = notices.announce_deemed_approval(conn, "a185-sent", "pr", "要旨", run_id)
+    _age_outbox(conn, result.outbox_id, 120)
+    mark_sent(conn, result.outbox_id, "123456")
+    findings, _ = a18.check_unnotified_deemed(conn)
+    assert [f for f in findings if f["proposal_ref"] == "a185-sent"] == []
+    conn.rollback()
+
+
+def test_manual_notice_ref_is_reported_as_untracked(conn):
+    """``outbox:`` 形式でない通知参照(手作業の記録)は追跡不能として数える。"""
+    from ryza.governance.decisions import record_deemed_approval
+
+    record_deemed_approval(conn, "a185-manual", "pr", "discord://承認/12345")
+    _findings, untracked = a18.check_unnotified_deemed(conn)
+    assert untracked >= 1
+    conn.rollback()
+
+
+def test_unnotified_deemed_reaches_report_and_is_urgent(conn, run_id, repo):
+    """A-18-5 の所見は報告 embed に載り、urgent として投入される。"""
+    from ryza.governance import notices
+
+    r, since = repo
+    result_notice = notices.announce_deemed_approval(conn, "a185-report", "pr", "要旨", run_id)
+    _age_outbox(conn, result_notice.outbox_id, 120)
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since, conn=conn)
+    assert result["unnotified_deemed"]
+    assert a18.has_findings(result)
+    embed = a18.build_alert_embed(result)
+    assert any("A-18-5" in f["name"] and "⚠️" in f["name"] for f in embed["fields"])
+    oid = a18.enqueue_alert(conn, result, run_id)
+    with conn.cursor() as cur:
+        cur.execute("SELECT urgent FROM press.outbox WHERE id = %s", (oid,))
+        assert cur.fetchone()[0] is True
+    conn.rollback()
+
+
+def test_run_a18_with_conn_marks_refs_verified(repo, conn):
+    r, since = repo
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since, conn=conn)
+    assert result["decision_refs_verified"] is True
+    conn.rollback()
+
+
+def test_real_repo_trailers_resolve_without_conn():
+    """実リポジトリの履歴で A-18-1 が壊れていない(conn 無しの従来経路)。"""
+    root = Path(__file__).resolve().parents[2]
+    gov = a18.load_governance(root)
+    violations, inherited, checked, findings = a18.check_protected_commits(root, gov)
+    assert isinstance(violations, list) and checked >= 0 and isinstance(findings, list)
+    assert isinstance(inherited, list)
 
 
 # ────────────────────────────────────────────────────────────────────────────

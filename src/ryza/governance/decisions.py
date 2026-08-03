@@ -26,10 +26,24 @@ governance.decisions に deemed として記録し、監査対象とする」)�
 (アプリ検証だけに寄せると、別経路の INSERT で穴が開く)。
 
 呼び出し側でトランザクションを制御する(本モジュールは commit しない)。
+
+**CLI**(みなし承認の発効通知を機械化する経路 — ops/reminders.yaml
+``governance-deemed-notice-wiring``)::
+
+    python -m ryza.governance.decisions --deemed \\
+        --proposal-ref https://github.com/klonyapin/ryza/pull/99 \\
+        --kind pr --notice "保護領域 X の変更。独立役員審査は ... で完了"
+
+``#承認`` への通知投入と ``deemed`` 行の記録を1トランザクションで行う
+(実装は :mod:`ryza.governance.notices`)。手で ``#承認`` に投稿してから記録を忘れる、
+という「通知なき発効/記録なき通知」を経路として消すのが目的である。
 """
 
 from __future__ import annotations
 
+import argparse
+import logging
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -405,6 +419,32 @@ def record_veto_withdrawal(
     )
 
 
+# 現決定 view から読む列(:func:`current_decision` / :func:`current_decision_by_id` 共通)。
+_CURRENT_DECISION_COLUMNS = """
+    decision_id, proposal_ref, kind, recorded_decision,
+    effective_decision, is_vetoed, decided_by, decided_at,
+    veto_id, veto_kind, vetoed_by, veto_reason, revert_commit,
+    derived_effects_ref, vetoed_at
+"""
+
+
+def _select_current_decision(
+    conn: psycopg.Connection, where: str, param: object
+) -> dict[str, object] | None:
+    """現決定 view を1件読む(検索キーだけが異なる2つの読み口の共通実装)。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {_CURRENT_DECISION_COLUMNS} "  # noqa: S608 - where は呼び出し元の定数
+            f"FROM governance.current_decisions WHERE {where}",
+            (param,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        columns = [d.name for d in cur.description]
+    return dict(zip(columns, row, strict=True))
+
+
 def current_decision(
     conn: psycopg.Connection, proposal_ref: str
 ) -> dict[str, object] | None:
@@ -414,23 +454,112 @@ def current_decision(
     否認された決定の ``effective_decision`` は ``'vetoed'`` になるため、
     「承認済み」として扱う分岐に否認済みの決定が紛れ込まない。
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT decision_id, proposal_ref, kind, recorded_decision,
-                   effective_decision, is_vetoed, decided_by, decided_at,
-                   veto_id, veto_kind, vetoed_by, veto_reason, revert_commit,
-                   derived_effects_ref, vetoed_at
-            FROM governance.current_decisions
-            WHERE proposal_ref = %s
-            """,
-            (proposal_ref,),
+    return _select_current_decision(conn, "proposal_ref = %s", proposal_ref)
+
+
+def current_decision_by_id(
+    conn: psycopg.Connection, decision_id: int
+) -> dict[str, object] | None:
+    """``governance.decisions.id`` から現決定を引く(A-18-1 のトレーラ突合の読み口)。
+
+    保護領域コミットの ``Approved: <ID>`` トレーラ(定款第5条)は決定を **ID** で指す。
+    監査がこれを ``governance.decisions`` の直読で解決すると、代表が否認した承認を
+    「承認済み」と受理し、否認された変更が無承認変更として検出されなくなる
+    (独立役員審査 0021 C-5)。したがって突合は必ず現決定 view を経由する。
+    """
+    return _select_current_decision(conn, "decision_id = %s", decision_id)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# CLI: みなし承認の発効通知(記録と通知を同一トランザクションで)
+# ────────────────────────────────────────────────────────────────────────────
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m ryza.governance.decisions",
+        description="みなし承認を #承認 へ通知し、同一トランザクションで記録する(定款第3条)",
+    )
+    parser.add_argument(
+        "--deemed", action="store_true",
+        help="みなし承認を発効させる(現状これが唯一のアクション。明示承認は Bot のボタン経路)",
+    )
+    parser.add_argument("--proposal-ref", required=True, help="提案の一意参照(PR URL 等)")
+    parser.add_argument(
+        "--kind", required=True, choices=sorted(set(KINDS) - RESERVED_KINDS),
+        help="提案種別(3専決事項の kind は選べない — 定款第3条)",
+    )
+    parser.add_argument("--notice", required=True, help="通知の要旨(何がなぜ発効したか)")
+    parser.add_argument("--title", default=None, help="通知の見出し(省略時は既定文)")
+    parser.add_argument(
+        "--source", default=DEFAULT_DEEMED_SOURCE,
+        help=f"発効源(decided_by は system:<source> になる。既定 {DEFAULT_DEEMED_SOURCE})",
+    )
+    parser.add_argument("--note", default=None, help="決定への補足(任意)")
+    parser.add_argument(
+        "--role", default="dev_lead", help="通知の発信者役職(config/org.yaml。既定 dev_lead)"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="DB へ書かず、投稿する embed を表示するだけ"
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI エントリポイント(``python -m ryza.governance.decisions --deemed ...``)。
+
+    ``notices`` は本モジュールを import するため、依存の向きを保つ目的で遅延 import する
+    (writer である本モジュールは通知経路を知らない)。
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    args = _build_parser().parse_args(argv)
+    if not args.deemed:
+        print("--deemed を指定してください(現状これが唯一のアクション)", file=sys.stderr)
+        return 2
+
+    import json
+
+    from ryza.db.conn import connect
+    from ryza.governance import notices
+    from ryza.provenance import start_run
+
+    if args.dry_run:
+        embed = notices.build_deemed_notice_embed(
+            args.proposal_ref, args.kind, args.notice, title=args.title, role=args.role
         )
-        row = cur.fetchone()
-        if row is None:
-            return None
-        columns = [d.name for d in cur.description]
-    return dict(zip(columns, row, strict=True))
+        print(json.dumps(embed, ensure_ascii=False, indent=2))
+        return 0
+
+    # Run は自前接続(autocommit)で持つ。記録側を rollback しても「試みた事実」が
+    # meta.runs に残る(a18.run_and_report と同じ流儀)。
+    run = start_run(
+        "governance.deemed_notice",
+        {"proposal_ref": args.proposal_ref, "kind": args.kind, "source": args.source},
+    )
+    conn = connect()
+    try:
+        result = notices.announce_deemed_approval(
+            conn, args.proposal_ref, args.kind, args.notice, run.run_id,
+            source=args.source, note=args.note, title=args.title, role=args.role,
+        )
+        conn.commit()
+        run.finish("success")
+    except (ValueError, PermissionError) as exc:
+        conn.rollback()
+        run.finish("failed")
+        print(f"みなし承認を記録できませんでした: {exc}", file=sys.stderr)
+        return 1
+    except Exception:
+        conn.rollback()
+        run.finish("failed")
+        raise
+    finally:
+        conn.close()
+
+    print(
+        f"みなし承認を記録し通知を投入しました: decision_id={result.decision.id} "
+        f"notice_ref={result.notice_ref} decided_by={result.decision.decided_by}",
+        file=sys.stderr,
+    )
+    return 0
 
 
 __all__ = [
@@ -447,8 +576,14 @@ __all__ = [
     "ReservedMatterError",
     "Veto",
     "current_decision",
+    "current_decision_by_id",
+    "main",
     "record_deemed_approval",
     "record_revert_completion",
     "record_veto",
     "record_veto_withdrawal",
 ]
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI 実行パス
+    raise SystemExit(main())
