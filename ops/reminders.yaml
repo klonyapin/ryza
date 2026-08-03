@@ -818,8 +818,8 @@ reminders:
       type: issue_create
       title: "IPS §3.2 復帰条項の運用手順に close_ok 確認を明記する(CIO 起票)"
       labels: [decision, risk, ips]
-      body: "締めが落ちた日でもリスク日次は測定を続ける(前日までの系列であることを宣言して続行 — `risk/daily.py` の `close_ok`)。この設計は独立役員審査 2026-08-04 で支持されたが、**留保条件が 1 つ付いている**: 未再締めの系列は過去 NAV が誤りうるため `dd_hard` が誤って立つ可能性があり、その解除は委員会専決(`risk.state.release_dd_hard`)である。誤検知でも解除には委員会の明示操作が要り、運用者は『測定の前提が壊れていた日に立ったフラグか』を判断する材料を手順として持っていない。是正: IPS §3.2 の復帰条項の運用手順に『dd_hard が立った際は、当該 `risk.limits_state_events`(event=engine_update)の `metrics.close_ok` / `close_self_checked` を確認し、false であれば締めを完了させたうえで再測定してから復帰可否を審議する』を明記する。**コード変更は不要**(`metrics` に既に記録済み)。IPS は L2 文書のため CIO 起票メモ+投資委員会決議で改訂すること(定款第4条)。起票メモには『この確認を怠ると、締め障害由来の誤 dd_hard がラッチとして残り、解除のたびに委員会の議事が消費される』というコストを添える。出典: docs/reviews/risk-observability-independent-review.md(設計判断の段落)。"
-    status: pending
+      body: "締めが落ちた日でもリスク日次は測定を続ける(前日までの系列であることを宣言して続行 — `risk/daily.py` の `close_ok`)。この設計は独立役員審査 2026-08-04 で支持されたが、**留保条件が 1 つ付いている**: 未再締めの系列は過去 NAV が誤りうるため `dd_hard` が誤って立つ可能性があり、その解除は委員会専決(`risk.state.release_dd_hard`)である。誤検知でも解除には委員会の明示操作が要り、運用者は『測定の前提が壊れていた日に立ったフラグか』を判断する材料を手順として持っていない。是正: IPS §3.2 の復帰条項の運用手順に『dd_hard が立った際は、当該 `risk.limits_state_events`(event=engine_update)の `metrics.close_ok` / `close_self_checked` を確認し、false であれば締めを完了させたうえで再測定してから復帰可否を審議する』を明記する。**コード変更は不要**(`metrics` に既に記録済み)。IPS は L2 文書のため CIO 起票メモ+投資委員会決議で改訂すること(定款第4条)。起票メモには『この確認を怠ると、締め障害由来の誤 dd_hard がラッチとして残り、解除のたびに委員会の議事が消費される』というコストを添える。出典: docs/reviews/risk-observability-independent-review.md(設計判断の段落)。 **完了(2026-08-04・CIO 起票代行)**: docs/design/80-ips.md §3.2 の表の直後に「dd_hard 復帰手順の前提確認」を追記した — 復帰審議の前に `risk.limits_state_events`(`event=engine_update`)の `metrics.close_ok` / `close_self_checked` を確認し、`close_ok=false` なら締め完了後の再測定を先に行う。`config/ips.yaml` は**変更しない**: 追記は運用手順であってリミット値・条項構造の変更を伴わず、機械可読版に対応する項目がないため(hard_limits の値は不変)。版番号も v1.3 のまま据え置き、A-18-2(80-ips.md ⇔ config/ips.yaml の版突合)は一致を保つ — 判断の根拠は 80-ips.md 付録に明記した。発効は定款第3・4条のみなし承認(L2: 独立役員審査 → `#承認` 通知と同時に発効・事後否認可)であり、**本コミットは起票のみ**。"
+    status: done # 2026-08-04 CIO 起票代行: 80-ips.md §3.2 に close_ok 確認手順を追記(独立役員審査+#承認 通知は起票後の手続)
 
   - id: protect-execution-config
     what: "config/execution.yaml を protected_areas に登録する(再締め審査 再-9)"
@@ -1052,7 +1052,27 @@ reminders:
       title: "GCP IAM 是正: 既定 Compute SA の roles/editor 剥離とリソースレベル化"
       labels: [ops]
       body: "棚卸し結果は `docs/ops/gcp-iam-inventory.md`(as_of 2026-08-04)。**実施順序に依存関係があり、順序を誤ると夜間ジョブが翌週まで沈黙する。** 必ず R-0 → R-1 の順で行うこと。\n\n**R-0(自動化可・追加のみ)**: ①Cloud Run Job `ops-weekly` に**リソースレベル**で `roles/run.invoker`(compute SA)、②BigQuery データセット `billing_export` の ACL に READER(compute SA)、③`jquants-api-key`/`jquants-refresh-token`/`fred-api-key`/`estat-app-id` の secretAccessor 付与を `ops/deploy-daily.sh` に宣言として書く(現在は手動付与のみで VM 再作成時に再現しない)。\n\n**R-1(手動・代表確認必須)**: プロジェクトレベルの `roles/editor` を `287074591154-compute@developer.gserviceaccount.com` から削除する。影響は Bot・日次サイクル・A-18 監査・ops-weekly・Scheduler の**5経路同時**。実施前にロールバック手順(再付与コマンド)を用意し、実施直後に4系統の陽性確認(Bot 死活 / `ryza-daily` 手動実行 / `ops-weekly` 手動実行 / `ryza-a18` 手動実行)を行うこと。09:00 JST 帯(日次サイクル)と月曜 01:00 UTC 帯(ops-weekly)は避ける。\n\n**R-2**: プロジェクトレベルの `roles/run.invoker` と `roles/bigquery.dataViewer` を削除し、`ops/deploy-ops-weekly.sh:90-93,111-114` をリソースレベル付与に書き換える。**保護領域 deploy_path のため独立役員審査+承認記録が必要。**\n\n**R-3**: `discord-bot-token` の `roles/secretmanager.secretVersionAdder`(compute SA)を削除する。用途が無いことはコード検索で確認済みだが、R-1 の前に消しても効果はゼロ(editor が包含する)。\n\n**R-6/R-7(自動化可)**: Artifact Registry `ryza` にクリーンアップポリシー(タグ付き最新 N≥5 世代を保持・無タグは7日で削除)、削除済みサービス `ryza-secret-drop` のイメージと `cloud-run-source-deploy` リポジトリの削除、`deploy-ops-weekly.sh` の `latest` タグ付与の廃止(SHA タグ固定に揃える)。\n\n**自動化してはいけないもの**: R-1・R-2・R-3。IAM の削除はスクリプト化すると『消したつもりで消えていない』『消しすぎて夜間ジョブが翌週まで止まる』が両方とも静かに起きる。`gcloud projects remove-iam-policy-binding` は etag 競合時に黙って失敗しうる。**代表の確認を挟んだ手動実施+実施後の陽性確認**とすること。\n\n**未検証の残件**: プロジェクトレベル `run.invoker` の継承により compute SA は IAM 上 `ryza-dashboard` の invoker である。IAP が直接呼び出しを終端するか否かは棚卸しでは未検証(能動的な試行が必要)。R-2 の実施時に陽性テスト(compute SA の ID トークンで叩き、拒否されること)を添えること。\n\n**別枠(IAM 外)**: `default-allow-rdp`(0.0.0.0/0→3389・本プロジェクトで未使用)の削除と `default-allow-ssh` の送信元を IAP TCP forwarding 範囲(35.235.240.0/20)へ限定する検討。"
-    status: pending
+    # 2026-08-04 **前半(追加系)実施済み**。記録は docs/ops/gcp-iam-inventory.md §8。
+    #   R-0 ① Cloud Run Job ops-weekly にリソースレベル roles/run.invoker を付与
+    #     (ポリシー空 → 1 バインディング)。Scheduler の起動経路がプロジェクトレベル
+    #     付与から独立し、R-2 の削除に耐える状態になった
+    #   R-0 ② BigQuery データセット billing_export の ACL に compute SA=READER を追加
+    #     (5 → 6 エントリ)。データセットの get-iam-policy は allowlist 制で使えないため
+    #     ACL の read-modify-write で実施。既存 5 件は退避・照合済み
+    #   R-0 ③ / R-4 jquants-api-key / fred-api-key / estat-app-id の accessor 付与を
+    #     ops/deploy-daily.sh §1b に宣言追加(既存の手動付与と同一のため増分ゼロを実測)
+    # **jquants-refresh-token は R-4 の対象から意図的に外した**。J-Quants V2 は API キー
+    #   認証のみで refresh token を使わず(src/ryza/ingest/jquants.py の api_key())、
+    #   リポジトリ全体の参照は当該コメント1件のみ。未使用の Secret に accessor を宣言すると
+    #   「必要だから付いている」という誤った証拠を作るため。secretVersionAdder(出所不明)と
+    #   合わせて棚卸し文書 §8.3 の要調査項目にした。billing_export に OWNER を持つ第4の
+    #   アカウント euplotes04@gmail.com の正体不明も同節に追記(代表の認否が要る)
+    # **副次的な発見**: src/ryza/ops/weekly.py の default_bq_table_missing は BigQuery 例外を
+    #   すべて「テーブル欠落」に丸めるため、R-1 で BQ 読み取り権を失うと**沈黙ではなく誤起票**
+    #   として現れる。R-1 の陽性確認では終了コードだけでなく起票内容まで見ること(文書 §8.4)
+    # 後半(R-1〜R-3・削除系)は**未実施・代表確認待ち**。そのまま実行できる手順書と
+    #   ロールバック手順を文書 §9 に、R-6/R-7 のコマンドを §10 に整備した(いずれも未実行)。
+    status: pending # 前半(R-0/R-4・追加系)完了。後半(R-1〜R-3・削除系)は代表確認待ち
 
   - id: critic-input-window-decision-visibility
     what: "批判の鮮度判定と独立役員の入力窓(TRANSCRIPT_WINDOW=30)のずれを塞ぐ(決議精緻化審査 懸念3)"
@@ -1181,4 +1201,27 @@ reminders:
       title: "protected_areas: 未保護モジュールの不変条件テスト(fm/sizing・prompting・execution config)"
       labels: [governance]
       body: "protect-equivalence-tests の棚卸し(2026-08-04)で保留にした3件。tests/fm/test_sizing.py は不変原則1(LLM の確信度をサイジングに入れない)の**唯一の CI 執行点**、tests/research/test_prompting.py(+ tests/press/test_writer.py のデータ境界回帰)はプロンプト注入フェンスの唯一の執行点、tests/execution/test_config.py は config/execution.yaml 発効値の写しである。いずれも対応する実装・設定(src/ryza/fm/**・src/ryza/research/prompting.py・config/execution.yaml)が protected_areas に無いため、テストだけを登録すると未保護モジュールを事実上の保護領域に格上げすることになる(実装を変えればテストが落ち、通すには保護ファイルの改変=審査が要る)。判断すべきは『テストだけ登録するのか、モジュール自体を登録するのか、どちらもしないのか』であり、L1 のテスト登録として決める範囲を超える。とくに不変原則1 は CLAUDE.md の第1原則であり、現状は CI 上の担保がテスト1本の書き換えで外せる。"
+    status: pending
+
+  - id: ips-line10-draft-rights-consistency
+    what: "80-ips.md L10「ユーザーのみ起票可」と定款第4条(L2=CIO 起票可)の矛盾解消"
+    conditions:
+      - type: date_after
+        date: "2026-08-28"
+    action:
+      type: issue_create
+      title: "IPS 月次レビュー(9/2)で起票権記述を定款 v0.4 に整合させる"
+      labels: [decision, ips]
+      body: "L2 レビュー(2026-08-04・risk-observability-independent-review.md 末尾)の条件。80-ips.md L10 の「ユーザーのみ起票可」は旧承認モデルの残骸で、定款第4条(L2 起票=代表・CIO)と矛盾(定款が上位のため実務は定款優先)。9/2 の IPS 月次レビューで本文を整合させる。あわせて ops/reminders.yaml 内の同旨の古い記述(ips.yaml 変更はユーザー起票が必要)も是正する。"
+    status: pending
+
+  - id: ops-weekly-bq-acl-verify
+    what: "IAM 最小化後、初回の週次 ops の BQ 経路(データセット ACL READER)の実走確認"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: notify
+      channel: 運営
+      body: "月曜の ops-weekly 実行後、BQ コスト行が正しく出ていること・誤った『テーブル欠落』起票が無いことを確認する(gcp-iam-inventory.md §8.4/§11)。問題があれば §9.5 のロールバック(bigquery.dataViewer の再付与)ではなくデータセット ACL の修正を先に試す。"
     status: pending

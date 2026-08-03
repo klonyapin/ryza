@@ -75,6 +75,34 @@ gcloud secrets add-iam-policy-binding "${SECRET}" \
   --member="serviceAccount:${RUNTIME_SA}" \
   --role="roles/secretmanager.secretAccessor" >/dev/null
 
+# ── 1b. データ取込 Secret の Accessor 付与(冪等・R-4 / docs/ops/gcp-iam-inventory.md D-3)
+#
+# 日次サイクルの実取込(jquants / fred / estat)が VM 上で読む Secret。これらは 2026-08-03 に
+# **手動で** accessor を付与されており、どの deploy スクリプトにも宣言が無かった。そのため
+# VM を作り直すと再現せず、取込だけが静かに落ちる(取込側は理由付きで skip するため、
+# 気づくのは朝刊の欠落を見たときになる)。ここで宣言に取り込み、冪等に収束させる。
+#
+# `jquants-refresh-token` は**意図的に含めない**。J-Quants V2 は API キー認証のみで、
+# refresh token は V1 の遺物である(src/ryza/ingest/jquants.py の api_key() 参照。
+# コード検索でも参照は当該コメント1件のみ)。使われていない Secret に accessor を
+# 宣言すると、宣言そのものが「使っている」という誤った証拠になるため足さない。
+# 既存の手動付与の扱いは docs/ops/gcp-iam-inventory.md §8 の要調査項目とする。
+#
+# 未登録の Secret はエラーにせず警告に留める(取込は鍵が無ければ理由付きで skip する
+# 縮退設計であり、e-Stat 等が未登録の段階でも日次サイクル自体は設置できるべきである)。
+DATA_SECRETS="${DATA_SECRETS:-jquants-api-key fred-api-key estat-app-id}"
+for ds in ${DATA_SECRETS}; do
+  if gcloud secrets describe "${ds}" >/dev/null 2>&1; then
+    echo "   - ${ds}: accessor 付与(冪等)"
+    gcloud secrets add-iam-policy-binding "${ds}" \
+      --member="serviceAccount:${RUNTIME_SA}" \
+      --role="roles/secretmanager.secretAccessor" >/dev/null
+  else
+    echo "   ! WARN: Secret '${ds}' が未登録のため accessor を付与しませんでした。" >&2
+    echo "     該当データソースの取込は理由付きで skip されます(鍵登録後に本スクリプトを再実行)。" >&2
+  fi
+done
+
 # ── 2. コード同期(git 追跡ファイルのみを tar して転送) ────────────────────────
 echo "-- コードを VM へ同期"
 TARBALL="$(mktemp /tmp/ryza-daily.XXXXXX.tar.gz)"
