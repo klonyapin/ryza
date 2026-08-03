@@ -407,13 +407,25 @@ def test_run_a18_if_configured_failure_is_reported(monkeypatch, tmp_path):
 
 
 # ── 決議の形骸化監査(05-governance §6-5 の趣旨に連なる新設統制)──────────────
+# 本番の判定主体は A-18-6(tests/audit/test_a18.py)。ここで固定するのは週次側の表示契約:
+# 行は必ず載り、既定は「スキップ」ではなく報告先への参照であること。
 def test_digest_always_contains_resolution_status_line():
-    """未配線でも「決議の批判経由」行は必ず載る(見ていない事実も報告する)。"""
+    """判定を持たない実行でも「決議の批判経由」行は必ず載る(沈黙させない)。"""
     digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
     client = StubClient(issues=[digest_issue])
     assert weekly.post_digest(client, NOW, fired=[]) is True
     body = client.comments_posted[0][1]
-    assert f"### 決議の批判経由: {weekly.RESOLUTION_STATUS_UNWIRED}" in body
+    assert f"### 決議の批判経由: {weekly.RESOLUTION_STATUS_DELEGATED}" in body
+
+
+def test_default_resolution_line_points_at_the_reporter_not_skip():
+    """既定行は「スキップ」ではなく報告先(A-18-6)の参照であること。
+
+    「スキップ」を常設すると、統制が外された状態と正常状態が同じ文字列になり、
+    無害化が正常表示に化ける(ops-weekly VM 移設審査 2026-08-04 重大-2 と同型)。
+    """
+    assert "スキップ" not in weekly.RESOLUTION_STATUS_DELEGATED
+    assert "A-18-6" in weekly.RESOLUTION_STATUS_DELEGATED
 
 
 def test_digest_carries_resolution_alert():
@@ -427,9 +439,10 @@ def test_digest_carries_resolution_alert():
     assert f"### 決議の批判経由: {status}" in client.comments_posted[0][1]
 
 
-def test_resolution_audit_status_unwired(monkeypatch):
+def test_resolution_audit_status_delegates_by_default(monkeypatch):
+    """opt-in が無い実行では判定せず、報告先(A-18-6)の参照行を返す。"""
     monkeypatch.delenv("BOARDROOM_AUDIT", raising=False)
-    assert weekly.resolution_audit_status() == weekly.RESOLUTION_STATUS_UNWIRED
+    assert weekly.resolution_audit_status() == weekly.RESOLUTION_STATUS_DELEGATED
 
 
 def test_resolution_audit_status_failure_is_reported(monkeypatch):

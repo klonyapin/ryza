@@ -1786,9 +1786,9 @@ def page_boardroom() -> None:
             st.caption(
                 f"決議 {res['seq']}: {res['title']}(#{res['resolution_id']}{ref}){mark}"
             )
-        # 形骸化の監査(05 §6-5 の趣旨に連なる新設統制)を決議の現場にも出す。週次
-        # ダイジェストだけに置くと、「毎回チェックを外す」当人が自分の連続数を見ない
-        # まま運用できてしまう(週次側は BOARDROOM_AUDIT 未配線なら出ない)。
+        # 形骸化の監査(05 §6-5 の趣旨に連なる新設統制)を決議の現場にも出す。ここだけに
+        # 置くと「毎回チェックを外す」当人しか見ない指標になるため、独立した検出点は
+        # A-18-6(週次監査 → #運営)側にある。こちらは当人への即時フィードバック。
         stats = boardroom.resolution_confirmation_stats(wconn)
         if stats.bypassed:
             line = boardroom.confirmation_status_line(stats)
