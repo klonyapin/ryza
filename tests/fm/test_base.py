@@ -59,7 +59,8 @@ def mandates():
 
 def _submit(conn, run, intents, mandates, *, as_of, max_slots=5):
     mandate = mandates[FM]
-    candidates = {c.instrument_id: c for c in base.load_universe(conn, mandate, as_of=as_of)}
+    universe = base.load_universe(conn, mandate, as_of=as_of).candidates
+    candidates = {c.instrument_id: c for c in universe}
     return base.submit_intents(
         conn, run, intents,
         mandate=mandate, max_slots=max_slots, candidates=candidates,

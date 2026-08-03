@@ -305,7 +305,18 @@ reminders:
       title: "銘柄分類の point-in-time 履歴化(E6 の前提)"
       labels: [impl]
       body: "market.instrument_classification(migrations/0015)は instrument_id 主キーの上書き型で、分類の履歴を持たない。過去 as_of のリプレイでは『当時の分類』を再現できず、①最新分類の as_of が as_of より新しいとユニバースが静かに空になる、②分類が後から付いた銘柄を過去に遡って候補にできてしまう(look-ahead)。是正案: SCD2 化(instrument_id, valid_from)または追記オンリーの履歴表 + as_of ビュー(market.bars_asof と同型)。**それまでの間、リプレイ結果・バックテスト結果を提示するときは『E6(point-in-time ユニバース)未達』の但し書きを必ず付す**(設計リード裁定 2026-08-03)。スキーマ変更のため保護領域手続。"
-    status: pending
+    # 2026-08-04 実装: 追記オンリーの履歴表 market.instrument_classification_history
+    # (migrations/0026)+ 分類確定時の同一トランザクション追記(risk/classify.py)+
+    # リプレイのユニバース読出しを履歴経由に(fm/base.py load_universe)。
+    # **但し書きは自動化した**: fm.base.universe_pit_status が「履歴が as_of を
+    # カバーしているか」を判定し、未カバーなら E6 未達の note を実行サマリに載せる
+    # (daily の _fm_summary → e6_note)。履歴の記録開始(min(created_at))より前の
+    # as_of は未達表示のまま(移行前の改訂は物理的に存在しないため — 達成を偽らない)。
+    # 2026-08-04 独立審査(条件付き承認)の是正: 読出しを bitemporal 化(as_of +
+    # created_at。今日の追記で過去のリプレイが変わらない)・現在値キャッシュを判断
+    # 経路から排除(常に履歴経路)・カバレッジ根拠を履歴表のデータへ・created_at を
+    # DB 側で固定(偽装防止)。意見書は docs/reviews/t017-fm-agents-independent-review.md。
+    status: done
 
   - id: fm-stage-savepoint-split
     what: "daily の fm 段が単一 savepoint(独立役員審査 T-017 C-5)— Ben の例外が Jim の決定論注文を巻き戻す"

@@ -231,7 +231,8 @@ def run_jim(
         mandates = mandates or loaded_mandates
     mandate = mandates[FM]
 
-    universe = base.load_universe(conn, mandate, as_of=as_of, limit=cfg.max_universe)
+    read = base.load_universe(conn, mandate, as_of=as_of, limit=cfg.max_universe)
+    universe = read.candidates
     candidates = {c.instrument_id: c for c in universe}
     positions = base.load_positions(conn, book_id)
     held = set(held_positions(positions, FM))
@@ -263,6 +264,9 @@ def run_jim(
         "scanned": scanned,
         "entries": len(entries),
         "exits": len(exits),
+        # E6(point-in-time ユニバース)の充足状況。リプレイ結果に必ず添える(審査 C-4)。
+        # source は実際に使った読出し経路をそのまま載せる(再導出しない — 審査 C-20)。
+        "pit_universe": base.universe_pit_status(conn, as_of=as_of, source=read.source),
         **result.as_dict(),
     }
 

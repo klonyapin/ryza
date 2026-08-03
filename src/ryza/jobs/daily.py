@@ -297,6 +297,11 @@ def _fm_summary(result: dict[str, Any]) -> dict[str, Any]:
         summary["skipped"] = result["skipped"]
     if "rejected" in result:
         summary["rejected"] = len(result["rejected"])
+    # E6(point-in-time ユニバース)未達の但し書きは黙って落とさない(審査 C-4)。
+    # 通常運転(当日 as_of・履歴カバー済み)では note は None なので何も足さない。
+    note = (result.get("pit_universe") or {}).get("note")
+    if note:
+        summary["e6_note"] = note
     return summary
 
 
