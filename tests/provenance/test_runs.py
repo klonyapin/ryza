@@ -95,3 +95,26 @@ def test_params_stored_as_jsonb(conn):
         cur.execute("SELECT params FROM meta.runs WHERE run_id = %s", (r.run_id,))
         params = cur.fetchone()[0]
     assert params == {"date": "2026-08-02", "types": ["filing"]}
+
+
+def test_record_runtime_keeps_input_params_immutable(conn):
+    """実行時の観測値は params['runtime'] に隔離され、入力証跡は書き換わらない。"""
+    r = start_run("dashboard.boardroom.meeting", {"speaker_tier": "fable"}, conn=conn)
+    r.record_runtime({"rounds": 2, "roles": [["cio"], ["audit"]]})
+    r.record_runtime({"guard_fired": True})  # 追記はマージされる
+    r.record_runtime({})  # 空パッチは何もしない
+    with conn.cursor() as cur:
+        cur.execute("SELECT params FROM meta.runs WHERE run_id = %s", (r.run_id,))
+        params = cur.fetchone()[0]
+    assert params["speaker_tier"] == "fable"  # 入力は不変
+    assert params["runtime"] == {
+        "rounds": 2, "roles": [["cio"], ["audit"]], "guard_fired": True,
+    }
+
+
+def test_record_runtime_on_run_without_initial_params(conn):
+    r = start_run("dashboard.boardroom.meeting", conn=conn)
+    r.record_runtime({"roles": [["cio"]]})
+    with conn.cursor() as cur:
+        cur.execute("SELECT params FROM meta.runs WHERE run_id = %s", (r.run_id,))
+        assert cur.fetchone()[0] == {"runtime": {"roles": [["cio"]]}}
