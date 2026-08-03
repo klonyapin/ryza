@@ -404,3 +404,40 @@ def test_run_a18_if_configured_failure_is_reported(monkeypatch, tmp_path):
     monkeypatch.setenv("A18_REPO_PATH", str(tmp_path))  # git リポジトリでない → 失敗
     status = weekly.run_a18_if_configured(dry_run=True)
     assert status.startswith("失敗:")
+
+
+# ── 決議の形骸化監査(05-governance §6-5 の趣旨に連なる新設統制)──────────────
+def test_digest_always_contains_resolution_status_line():
+    """未配線でも「決議の批判経由」行は必ず載る(見ていない事実も報告する)。"""
+    digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
+    client = StubClient(issues=[digest_issue])
+    assert weekly.post_digest(client, NOW, fired=[]) is True
+    body = client.comments_posted[0][1]
+    assert f"### 決議の批判経由: {weekly.RESOLUTION_STATUS_UNWIRED}" in body
+
+
+def test_digest_carries_resolution_alert():
+    digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
+    client = StubClient(issues=[digest_issue])
+    status = (
+        "⚠ 形骸化の疑い(連続 3 件以上): 直近 3 件中 3 件が批判を経ない決議"
+        "(確認付き 3 / 判定不能 0)/ 連続 3 件"
+    )
+    assert weekly.post_digest(client, NOW, fired=[], resolution_status=status) is True
+    assert f"### 決議の批判経由: {status}" in client.comments_posted[0][1]
+
+
+def test_resolution_audit_status_unwired(monkeypatch):
+    monkeypatch.delenv("BOARDROOM_AUDIT", raising=False)
+    assert weekly.resolution_audit_status() == weekly.RESOLUTION_STATUS_UNWIRED
+
+
+def test_resolution_audit_status_failure_is_reported(monkeypatch):
+    """DB へ届かない実行環境でも週次ジョブは止めず、状態行に「失敗」を出す。"""
+    monkeypatch.setenv("BOARDROOM_AUDIT", "1")
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("no db")
+
+    monkeypatch.setattr("ryza.db.conn.connect", _boom)
+    assert weekly.resolution_audit_status().startswith("失敗: OSError")

@@ -47,6 +47,14 @@
 しかならない。本モジュールは発注・設定変更・フラグ操作など「何かを自動執行する」経路を
 一切持たず、発効する決定は代表が明示的にマークした決議のみ(05 §4)。決議マーク自体も
 記録であって執行ではない(執行は別途、承認フロー・決定論コードの管轄)。
+
+**批判の鮮度(2026-08-03 再確認審査 懸念A の是正)**: 決議の決定論チェックは
+「会議に独立役員の発言が1件でもあるか」ではなく「**最後の代表発言より後に**独立役員が
+発言したか」を見る(``minute_critic_recency``。判定不能も通さない fail-closed)。冒頭で
+独立役員が無関係な話題に1度発言していれば、以後に語彙外の言い回しで持ち出した本題まで
+無批判で決議できてしまう経路を塞ぐ。批判を経ずに通した決議は
+``confirmed_without_critic``(0025 の三値)で永続化し、連続・累積は形骸化アラート
+(``resolution_confirmation_stats`` — 05 §6-5 の趣旨に連なる新設統制)の対象になる。
 """
 
 from __future__ import annotations
@@ -328,8 +336,29 @@ def attendees_of(turns: Sequence[ChatTurn]) -> list[str]:
 
 
 def has_critic_speech(turns: Sequence[ChatTurn]) -> bool:
-    """会議に独立役員の発言が1件でもあるか(決議マークの決定論チェック用)。"""
+    """会議に独立役員の発言が1件でもあるか(議事録メタ節の表示用)。"""
     return any(t.speaker == CRITIC_ROLE for t in turns)
+
+
+def critic_spoke_after_last_representative(speakers: Sequence[str]) -> bool:
+    """**最後の代表発言より後に**独立役員が発言したか(批判の鮮度 — 決議チェックの中核)。
+
+    「会議全体で独立役員の発言が1件以上」では、冒頭で独立役員が無関係な話題に1度
+    発言していれば、以後に代表が語彙外の言い回し(「そろそろリアルに切り替えよう」
+    「紙トレはもう卒業だ」)で持ち出した本題が**両層とも無摩擦で通る**
+    (独立役員 再確認審査 2026-08-03 新規懸念A の実証)。決定論ガード
+    (``guard_scope_text``)が「前回の批判以降の代表発言」を見るのと同じ区間の考え方を
+    決議側にも適用し、最新の代表発言が批判に晒されたことを要求する。
+
+    代表の発言が1件も無い議事録(委員会の議事録など)では区間の起点が無いため、
+    独立役員の発言の有無に帰着させる。
+    """
+    for speaker in reversed(speakers):
+        if speaker == CRITIC_ROLE:
+            return True
+        if speaker == "representative":
+            return False
+    return False
 
 
 # ── 発言のサニタイズ(なりすまし行の無害化 — 独立役員審査 C-2)──────────────────
@@ -408,13 +437,38 @@ def transcript_markdown(turns: Sequence[ChatTurn], *, held_at: datetime) -> str:
         guard_fired = guard_fired or turn.source == "guard"
         label = _SOURCE_LABELS.get(turn.source or "", turn.source or "不明")
         lines.append(f"- {i}. {_label(turn.speaker)} ← {label}")
+    recent = critic_spoke_after_last_representative([t.speaker for t in turns])
     lines += [
         "",
         f"- 決定論ガード(重要決定 → 独立役員の強制): {'発火あり' if guard_fired else '発火なし'}",
         f"- 独立役員の発言: {'あり' if has_critic_speech(turns) else '**なし**'}",
+        f"- 最終代表発言以降の独立役員の発言(批判の鮮度): {'あり' if recent else '**なし**'}",
         "",
     ]
     return "\n".join(lines)
+
+
+# 議事録本文から発言者の時系列を復元する(``transcript_markdown`` の逆写像)。
+# 本物の発言行だけが行頭 ``**話者名**: `` で始まる — 発言内に混ざった詐称行は
+# ``sanitize_speech`` が ``> `` で引用化しており行頭に来ない(独立役員審査 C-2)。
+# メタ節の行は ``- `` 始まりのため一致しない。
+_MINUTE_SPEECH_LINE = re.compile(r"^\*\*(?P<label>[^*\n]+)\*\*:", re.MULTILINE)
+_LABEL_TO_SPEAKER = {label: key for key, label in _SPEAKER_LABELS.items()}
+
+
+def parse_speaker_sequence(body_md: str) -> list[str]:
+    """議事録本文(``transcript_markdown`` 形式)から発言者キーの時系列を復元する。
+
+    決議チェックは保存済みの議事録に対して行うため、セッションの ``ChatTurn`` ではなく
+    **証憑そのもの**(``governance.minutes.body_md``)から判定する。未知のラベル行は
+    無視する(この形式で書かれていない議事録では空リストになり、呼び出し側が
+    出席者ベースの判定へフォールバックする)。
+    """
+    return [
+        _LABEL_TO_SPEAKER[m.group("label")]
+        for m in _MINUTE_SPEECH_LINE.finditer(body_md)
+        if m.group("label") in _LABEL_TO_SPEAKER
+    ]
 
 
 def _conversation_block(turns: Sequence[ChatTurn]) -> str:
@@ -737,12 +791,15 @@ def save_office_chat_minute(
 
 
 class CriticAbsentError(RuntimeError):
-    """独立役員の発言が無い議事録に決議をマークしようとした(要・明示確認)。
+    """批判の鮮度が無い議事録に決議をマークしようとした(要・明示確認)。
 
     05 §3 の批判義務は「重要決定には最低1つの懸念」を求める。決議は**発効する決定**
     そのものなので、文言のゆらぎに依存するガードより強い最終防衛線として、
-    「批判が1件も無い議事録の決議」を検出して代表に明示確認させる
+    「独立役員の批判を経ていない決議」を検出して代表に明示確認させる
     (独立役員審査 2026-08-03 C-1: 決議は言い換えに強い検出点)。
+
+    判定は「最後の代表発言より後に独立役員が発言したか」である(再確認審査 懸念A の
+    是正)。「会議全体で1件以上」では冒頭の無関係な1発言で以後の決議が素通りする。
     """
 
 
@@ -756,6 +813,34 @@ def minute_attendees(conn: psycopg.Connection, minute_id: int) -> list[str]:
     if row is None:
         raise ValueError(f"議事録 minute_id={minute_id} が存在しない")
     return list(row[0])
+
+
+def minute_critic_recency(conn: psycopg.Connection, minute_id: int) -> bool | None:
+    """当該議事録の**批判の鮮度**を三値で返す(決議チェック)。
+
+    - ``True``: 最後の代表発言より後に独立役員が発言している(鮮度あり)
+    - ``False``: 話者列は復元できたが、最後の代表発言より後に独立役員の発言が無い
+    - ``None``: **判定不能**。本文が ``transcript_markdown`` 形式でなく話者列を復元
+      できない(手書き・他の会議体の議事録など)
+
+    以前は判定不能のとき「出席者配列に独立役員が居るか」へフォールバックしていたが、
+    これは **fail-open** であった(自由記述の議事録+出席者に独立役員、で摩擦ゼロの
+    決議が成立することを決議精緻化審査 2026-08-03 懸念1 が実測)。出席者は「その場に
+    居た」ことしか意味せず、最新の代表発言が批判に晒された証拠にならない。判定不能は
+    「鮮度あり」ではないため、``mark_resolution`` は明示確認を要求する(fail-closed)。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT body_md FROM governance.minutes WHERE minute_id = %s",
+            (minute_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"議事録 minute_id={minute_id} が存在しない")
+    speakers = parse_speaker_sequence(row[0] or "")
+    if not speakers:
+        return None
+    return critic_spoke_after_last_representative(speakers)
 
 
 def mark_resolution(
@@ -774,16 +859,35 @@ def mark_resolution(
     resolved_by='representative' は 0013 の CHECK でも DB 側から強制される。
     seq は同一議事録内の連番(既存最大+1)。UNIQUE(minute_id, seq) が二重マークを弾く。
 
-    **決定論チェック**: 当該議事録の出席者に独立役員が居なければ ``CriticAbsentError``
-    を送出する。代表が了解の上で決議する場合のみ ``confirmed_without_critic=True``
-    を渡す(UI は警告+明示確認を経てから渡す)。ブロックではなく摩擦であり、
-    決議権は代表に残る(定款第3条)。
+    **決定論チェック(批判の鮮度)**: ``minute_critic_recency`` が ``True``(鮮度あり)
+    でない限り ``CriticAbsentError`` を送出する。**判定不能(``None``)も通さない**
+    — 判定できないことは「批判があった」ことの証拠ではない(fail-closed。決議精緻化
+    審査 懸念1)。代表が了解の上で決議する場合のみ ``confirmed_without_critic=True``
+    を渡す(UI は警告+明示確認を経てから渡す)。ブロックではなく摩擦であり、決議権は
+    代表に残る(定款第3条)。
+
+    **証跡(0025 の三値)**: 記録するのは**実際にチェックを迂回した場合だけ**であり、
+    鮮度のある議事録に引数を立てて渡しても ``false`` のままになる(形骸化の指標を
+    無関係な true で薄めない)。
+
+    - ``false``: 鮮度を確認して通した(通常経路)
+    - ``true``: 鮮度が無いと分かった上で明示確認して通した
+    - ``NULL``: 鮮度を判定できない議事録を明示確認して通した(証跡としては
+      「確認したが検証できていない」であり、``true`` と区別して残す)
     """
-    if not confirmed_without_critic and CRITIC_ROLE not in minute_attendees(conn, minute_id):
+    recency = minute_critic_recency(conn, minute_id)
+    if recency is not True and not confirmed_without_critic:
         raise CriticAbsentError(
-            f"議事録 #{minute_id} には独立役員の発言が無い。批判を経ていない決議になる"
-            "(05-governance §3)。決議するには明示確認が必要"
+            f"議事録 #{minute_id} は" + (
+                "会議形式の本文でなく批判の鮮度を判定できない"
+                if recency is None
+                else "最後の代表発言より後に独立役員が発言していない"
+            )
+            + "。批判の鮮度を欠いた決議になる(05-governance §3)。"
+            "決議するには明示確認が必要"
         )
+    # True → false(通常経路)/ False → true(迂回)/ None → NULL(判定不能)
+    bypassed = None if recency is None else (not recency)
     with conn.cursor() as cur:
         cur.execute(
             "SELECT coalesce(max(seq), 0) + 1 FROM governance.minute_resolutions"
@@ -794,11 +898,12 @@ def mark_resolution(
         cur.execute(
             """
             INSERT INTO governance.minute_resolutions
-                (minute_id, seq, title, resolution_md, proposal_ref, resolved_by)
-            VALUES (%s, %s, %s, %s, %s, 'representative')
+                (minute_id, seq, title, resolution_md, proposal_ref, resolved_by,
+                 confirmed_without_critic)
+            VALUES (%s, %s, %s, %s, %s, 'representative', %s)
             RETURNING resolution_id
             """,
-            (minute_id, seq, title, resolution_md, proposal_ref),
+            (minute_id, seq, title, resolution_md, proposal_ref, bypassed),
         )
         return cur.fetchone()[0]
 
@@ -810,7 +915,8 @@ def fetch_resolutions(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT resolution_id, seq, title, resolution_md, proposal_ref, created_at
+            SELECT resolution_id, seq, title, resolution_md, proposal_ref, created_at,
+                   confirmed_without_critic
             FROM governance.minute_resolutions
             WHERE minute_id = %s
             ORDER BY seq
@@ -819,6 +925,109 @@ def fetch_resolutions(
         )
         cols = [d.name for d in cur.description or []]
         return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
+
+
+# ── 形骸化の監査(決議精緻化審査 2026-08-03 の裁定に基づく新設統制)──────────────
+# 「確認して通す」が例外でなく既定になっていないかを、決議の**列**として見る。
+# 1件ごとの摩擦(CriticAbsentError)は毎回チェックを外す運用には無力であり、痕跡が
+# 無ければ連続も検出できない。05-governance §6-5(形骸化の防止)が明文で挙げるのは
+# 「懸念ゼロ回答の連続」と「付議なし期間の長期化」であって本指標そのものではない。
+# 本統制はその**趣旨に連なる同型の指標**として新設したものである(§6-5 を根拠条文と
+# して引用しない — 条文に書かれていない統制を書かれているかのように引くと、条文の
+# 版と実装の対応を追う A-18 の突合が狂う)。
+#: 直近何件の決議を見るか(監査の走査窓)。
+CONFIRMATION_SCAN_WINDOW = 20
+#: 新しい順に何件連続で「批判を経ない決議」なら警告するか。
+CONFIRMATION_STREAK_ALERT = 3
+#: 走査窓内の「批判を経ない決議」が何件に達したら警告するか。
+#
+# 連続数だけでは true/false を交互に出す運用を1件も検出できない(決議精緻化審査
+# 懸念2 の実測: 交互16件で ``confirmed=8 / streak=0 / alert=False``)。比率ではなく
+# **件数**を採るのは、決議が数件しかない時期に 1/2 件で鳴らさないためである
+# (比率 50% は運用初期に必ず発生し、鳴り続けるアラートは無視される)。
+CONFIRMATION_COUNT_ALERT = 5
+
+
+class ConfirmationStats(NamedTuple):
+    """批判を経ずに(=明示確認で)通した決議の直近状況。
+
+    - ``scanned``: 走査した決議件数(直近 ``CONFIRMATION_SCAN_WINDOW`` 件まで)
+    - ``confirmed``: 鮮度が無いと分かった上で確認して通した件数(列が ``true``)
+    - ``undetermined``: 鮮度を判定できない議事録を確認して通した件数(列が ``NULL``)
+    - ``bypassed``: ``confirmed + undetermined``(批判を経ていない決議の合計)
+    - ``streak``: **最新から連続する**「批判を経ない決議」の件数
+    - ``alert``: ``streak >= CONFIRMATION_STREAK_ALERT`` **または**
+      ``bypassed >= CONFIRMATION_COUNT_ALERT``
+    """
+
+    scanned: int
+    confirmed: int
+    undetermined: int
+    streak: int
+    alert: bool
+
+    @property
+    def bypassed(self) -> int:
+        """批判を経ていない決議の合計(確認付き+判定不能)。"""
+        return self.confirmed + self.undetermined
+
+
+def resolution_confirmation_stats(
+    conn: psycopg.Connection, *, window: int = CONFIRMATION_SCAN_WINDOW
+) -> ConfirmationStats:
+    """直近の決議のうち「批判を経ない決議」の件数と連続数を集計する。
+
+    決議は追記オンリー(0013)で ``resolution_id`` が単調増加するため、時系列は
+    ``resolution_id`` の降順で確定する(``created_at`` の同値・時刻ずれに依存しない)。
+
+    ``NULL``(鮮度の判定不能)も**批判を経ていない側**に数える: どちらも代表の明示確認
+    だけで通っており、独立役員の批判が最新の代表発言に及んだ証拠が無い(0025 の三値)。
+    ただし内訳は ``confirmed`` / ``undetermined`` に分けて報告する — 前者は会議の運用
+    問題、後者は議事録形式の問題であり、打ち手が違う。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT confirmed_without_critic FROM governance.minute_resolutions"
+            " ORDER BY resolution_id DESC LIMIT %s",
+            (window,),
+        )
+        flags = [r[0] for r in cur.fetchall()]
+    streak = 0
+    for flag in flags:  # 新しい順。最初に false(鮮度確認済み)が来た時点で連続は切れる
+        if flag is False:
+            break
+        streak += 1
+    confirmed = sum(1 for f in flags if f is True)
+    undetermined = sum(1 for f in flags if f is None)
+    return ConfirmationStats(
+        scanned=len(flags),
+        confirmed=confirmed,
+        undetermined=undetermined,
+        streak=streak,
+        alert=(
+            streak >= CONFIRMATION_STREAK_ALERT
+            or confirmed + undetermined >= CONFIRMATION_COUNT_ALERT
+        ),
+    )
+
+
+def confirmation_status_line(stats: ConfirmationStats) -> str:
+    """``ConfirmationStats`` を運用レポート1行に整形する(週次ダイジェスト・UI 共通)。"""
+    if stats.scanned == 0:
+        return "決議なし(直近の記録が無い)"
+    body = (
+        f"直近 {stats.scanned} 件中 {stats.bypassed} 件が批判を経ない決議"
+        f"(確認付き {stats.confirmed} / 判定不能 {stats.undetermined})"
+        f"/ 連続 {stats.streak} 件"
+    )
+    if not stats.alert:
+        return body
+    reason = (
+        f"連続 {CONFIRMATION_STREAK_ALERT} 件以上"
+        if stats.streak >= CONFIRMATION_STREAK_ALERT
+        else f"走査窓内で {CONFIRMATION_COUNT_ALERT} 件以上"
+    )
+    return f"⚠ 形骸化の疑い({reason}): {body}"
 
 
 # ── 主張・懸念の蓄積(セッション終了時)────────────────────────────────────────
@@ -923,6 +1132,9 @@ def record_chat_stances(
 __all__ = [
     "BOARDROOM_ROLES",
     "CHAT_STANCE_SOURCE",
+    "CONFIRMATION_COUNT_ALERT",
+    "CONFIRMATION_SCAN_WINDOW",
+    "CONFIRMATION_STREAK_ALERT",
     "CRITIC_ROLE",
     "FACILITATOR_SPEAKER",
     "FACILITATOR_TEXT",
@@ -937,11 +1149,14 @@ __all__ = [
     "TASK_TYPE",
     "TRANSCRIPT_WINDOW",
     "ChatTurn",
+    "ConfirmationStats",
     "CriticAbsentError",
     "MeetingResult",
     "SavedMinute",
     "attendees_of",
     "conduct_meeting",
+    "confirmation_status_line",
+    "critic_spoke_after_last_representative",
     "digest_stances",
     "fetch_resolutions",
     "guard_scope_text",
@@ -950,7 +1165,10 @@ __all__ = [
     "meeting_directive",
     "mentions_important_decision",
     "minute_attendees",
+    "minute_critic_recency",
+    "parse_speaker_sequence",
     "record_chat_stances",
+    "resolution_confirmation_stats",
     "role_digest_input",
     "route_speakers",
     "sanitize_speech",

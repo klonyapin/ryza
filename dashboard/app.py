@@ -1731,10 +1731,15 @@ def page_boardroom() -> None:
             proposal_ref = st.text_input(
                 "proposal_ref(承認事項なら governance.decisions と突合。任意)"
             )
-            # 決定論チェック(05 §3): 独立役員の発言が無い議事録の決議には明示確認を
-            # 求める。ブロックではなく摩擦であり、決議権は代表に残る(定款第3条)。
+            # 決定論チェック(05 §3): **最後の代表発言より後に**独立役員が発言して
+            # いない議事録、および本文形式から鮮度を**判定できない**議事録の決議には
+            # 明示確認を求める(批判の鮮度 — 再確認審査 懸念A・決議精緻化審査 懸念1 の
+            # fail-closed 化)。ブロックではなく摩擦であり、決議権は代表に残る
+            # (定款第3条)。通した決議は confirmed_without_critic に true(鮮度なし)
+            # または NULL(判定不能)で残り(0025)、連続・累積が監査の対象になる。
             confirm = st.checkbox(
-                "独立役員の批判を経ていない議事録でも決議する(内容を理解した上で)"
+                "独立役員の批判(最後の代表発言より後の発言)を確認できない議事録でも"
+                "決議する(内容を理解した上で)"
             )
             if st.form_submit_button("決議としてマーク(代表として)"):
                 if not title.strip() or not body.strip():
@@ -1755,7 +1760,20 @@ def page_boardroom() -> None:
                         )
         for res in boardroom.fetch_resolutions(wconn, minute_id):
             ref = f" / proposal_ref: {res['proposal_ref']}" if res["proposal_ref"] else ""
-            st.caption(f"決議 {res['seq']}: {res['title']}(#{res['resolution_id']}{ref})")
+            flag = res["confirmed_without_critic"]
+            mark = "" if flag is False else (
+                " ⚠ 批判を経ない決議" if flag else " ⚠ 鮮度の判定不能な決議"
+            )
+            st.caption(
+                f"決議 {res['seq']}: {res['title']}(#{res['resolution_id']}{ref}){mark}"
+            )
+        # 形骸化の監査(05 §6-5 の趣旨に連なる新設統制)を決議の現場にも出す。週次
+        # ダイジェストだけに置くと、「毎回チェックを外す」当人が自分の連続数を見ない
+        # まま運用できてしまう(週次側は BOARDROOM_AUDIT 未配線なら出ない)。
+        stats = boardroom.resolution_confirmation_stats(wconn)
+        if stats.bypassed:
+            line = boardroom.confirmation_status_line(stats)
+            (st.warning if stats.alert else st.caption)(f"批判を経ない決議: {line}")
 
 
 # ── 開発室(代表 ⇄ 設計リード — 代表指示 2026-08-03)────────────────────────────
