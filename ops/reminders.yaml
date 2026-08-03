@@ -615,7 +615,19 @@ reminders:
       type: issue_create
       title: "ledger: replay_position の as_of 対応 → 再締めで過去日の評価替えを再適用する"
       labels: [impl, ledger, risk]
-      body: "再締め(`ledger.closing.reclose_stale`)は記帳済み仕訳の**集計だけ**をやり直し、評価替え(MTM)は打ち直さない。`_util.replay_position`(src/ryza/ledger/_util.py:215-264)が `entry_date` で絞らず全期間を再生するため、`post_mark_to_market`(src/ryza/ledger/posting.py:298-316)を過去日付で呼ぶと**その日に存在しなかった建玉**を過去日付の仕訳として書いてしまうからである。帰結として遅延約定のあった日の建玉は取得原価のまま残り、**恒久的な偽リターン**が立つ(独立審査の実測: 市場価格 1200 の日に 1000 で 1000 株を遅延記帳 → 真値 `[0.0]` に対し観測 `[+0.020]`、翌日以降も訂正されない)。振幅は『約定日の値洗い差 × 数量 / NAV』に限られ ±50% 級ではないが、`ewma_vol` を経由して重要-1 と同じ経路(誤 vol_exceeded)に乗る。是正: `replay_position` に `as_of`(`entry_date <= as_of` で絞る)を追加し、再締めが過去日の評価替えを**その日の建玉と終値**で再適用できるようにする。移動平均法の原価計算・`securities_book_value` の as_of との整合、既存呼び出し(post_fill の実現損益計算)への影響を確認すること。当面の防御として当該日は `detail.recon_invalidated` / `positions_stale` で名指しされている。**src/ryza/ledger/ は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 新-3。"
+      body: "(実装済み)`_util.replay_position` に `as_of` を追加し、`reclose_stale` が遅延仕訳に建玉行を含む日(= `recon_invalidated` と同集合)について、その日時点の建玉を as_of リプレイで復元しその日の終値(`market.bars` — 当日の締めと同じソース)で評価替えを**集計内で**再適用するようにした。仕訳は書かない(過去日付への新規記帳は水位を進めて自分自身を stale にするため)。終値が欠ける日は再適用せず `detail.mtm_not_reapplied` を維持する縮退。**src/ryza/ledger/ は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 新-3。"
+    status: done # 2026-08-04 実装(branch mtm-replay)。審査実測 +2% → 0% を回帰テストで固定
+
+  - id: mtm-zero-qty-residue
+    what: "【優先度高】全売却後の評価残渣が NAV を恒久的に過大にする(MTM リプレイ審査 新-10 — 新-3 と構造的に同一の偽リターン)"
+    conditions:
+      - type: date_after
+        date: "2026-08-08"
+    action:
+      type: issue_create
+      title: "ledger: qty==0 の銘柄も評価替えを打つ(全売却後の securities 残渣で NAV が恒久過大)"
+      labels: [impl, ledger, risk]
+      body: "建玉を全売却した銘柄の `securities` 勘定に前日 MTM の残渣が残り、NAV が**恒久的に過大**になる。`ledger.closing.run_daily_close`(`closing.py` の held_instruments ループ)も `ledger.closing._reapply_mtm` も、`qty == 0` を評価替えの**前**にスキップするため、建玉ゼロの銘柄が時価ゼロへ洗い替えられないからである。売却時の `post_fill` は取得原価ぶん(`cost_released`)しか `securities` を取り崩さないので、評価益ぶんが資産に残る。**独立審査の実測(origin/main でも同一 — 本 PR の回帰ではない)**: 1000株@1000 買い → 終値 1200 で評価替え → 翌日 1200 で全売り → `securities` 残高 200,000・数量 0、NAV 10,200,000→10,400,000、`book_returns` は `[+0.0196, 0.0]`(真値 `[0.0, 0.0]`)。これは新-3 と構造的に同一の恒久的偽リターンであり、`ewma_vol` 経由で誤 `vol_exceeded` の経路に乗る。**本 PR(mtm-replay)固有の害**: 遅延全売り日の再締めが `mtm_reapplied=True` と『その日の終値で評価替えして NAV に反映した』注記を付けながら 1 銘柄も評価替えしない(`positions={}` で残渣は資産に残る)。是正: `qty == 0` でも評価替えを打つ(delta = 0 − 帳簿価額)。**run_daily_close と _reapply_mtm の両呼び出し口を同時に**直すこと(片方だけだと当日と再締めで NAV が食い違う)。売り約定の残渣そのものを post_fill 側で消す設計(時価で取り崩す)も代替として検討し、移動平均法の実現損益計算への影響を評価すること。**src/ryza/ledger/ は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。別 PR とする。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md MTM リプレイ審査記録 新-10。"
     status: pending
 
   - id: close-stage-failure-visibility
@@ -806,4 +818,16 @@ reminders:
       title: "議事録の話者復元をラベル辞書から切り離す(ラベル凍結または構造化保存)"
       labels: [governance]
       body: "boardroom.parse_speaker_sequence は表示用ラベル辞書 _SPEAKER_LABELS の逆写像で議事録本文から話者を復元する。決議精緻化審査 2026-08-03 懸念6 は、『代表』→『代表取締役』のような表示上の改称だけで、同一の過去本文の判定が『要確認』→『鮮度あり』へ**反転**する(fail-open)ことを実測した。証憑(minutes.body_md)は追記オンリーで書き換えられないのに、その解釈がコード側の可変な辞書に依存している。対処の選択肢: (a) 復元専用のラベル表を凍結し(過去の表記も含む追記オンリーの表として持つ)、表示用辞書と分離した上で回帰テストで固定する、(b) 議事録保存時に話者列を構造化して残す(governance.minutes への列追加 = 保護領域の migration。本文と冗長になるが解釈をコードから外せる)、(c) 本文の話者行に役職キー(英字)を機械可読な形で併記する。(b) が最も堅いが保護領域の手続を要する。いずれの場合も、既存行(旧表記)の解釈が変わらないことをテストで固定すること。"
+    status: pending
+
+  - id: mtm-bar-arrival-revisit
+    what: "MTM 未再適用日(mtm_pending)のバー到着後の自動再訪"
+    conditions:
+      - type: date_after
+        date: "2026-08-12"
+    action:
+      type: issue_create
+      title: "MTM 再適用: 当日バーが後から取り込まれた日の自動再訪"
+      labels: [impl, ledger]
+      body: "MTM リプレイ審査(新-6 裁定)で門を「その日のバー」に限定した結果、当日バー欠測のまま再締めされた日は以後 stale でないため、後からバーが取り込まれても自動では再訪されない(mtm_pending のまま取得原価で恒久)。安全側の縮退だが新-3 の害が当該日に限り残る。是正案: 再締めの stale 検出に「mtm_pending かつ当日バーが現在は存在する日」を加える(水位方式と同型の1クエリ)。ledger は保護領域 — 独立審査手続を要する。"
     status: pending
