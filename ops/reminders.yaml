@@ -427,6 +427,20 @@ reminders:
       title: "risk エンジン: スナップショット欠落日の外部フローを次のスナップショットへロールフォワードする"
       labels: [impl, risk]
       body: "ryza.risk.engine.book_returns は `r_t = (nav_t − flow_t − nav_{t−1}) / nav_{t−1}` を隣接**スナップショット**間で計算するが、フローは「そのスナップショット日に計上された仕訳」だけを見る(src/ryza/risk/daily.py load_nav_series の flows 辞書は entry_date で引く)。締めが走らなかった日・非営業日に出資や払戻の仕訳が立つと、その日の flow はどのスナップショットにも紐付かず**リターンから脱落**する。結果、¥100万の帳簿に休日出資 ¥50万が入ると次の測定で『前日比 +50%』という実在しない利益が計上され、実現ボラ・ES の入力(帳簿リターン列)まで汚染される。是正: 前スナップショット日(排他)から当スナップショット日(包含)までの区間の flow を合算して flow_t とする(ロールフォワード)。同じ定義の重複実装になっている dashboard/queries.py fetch_nav_series も同時に合わせること(現状は engine と同一式であることが唯一の担保)。テストは『スナップショットの無い日に出資 → 次営業日のリターンが 0%』を最小ケースとする。**src/ryza/risk/ は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 重要-5。"
+    # 2026-08-03: 実装完了(ryza.risk.navflow へ突合を一本化 + dashboard/queries.py を同定義に統一)。
+    # 独立審査 → みなし承認 → main 統合まで pending のままにする(期日を過ぎたら issue が立つが二重作業の害はない)。
+    status: pending
+
+  - id: risk-protected-areas-registration
+    what: "config/governance.yaml の protected_areas に src/ryza/risk/** を登録する(C-2 の宿題 — リスクエンジンは実装済み)"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "protected_areas に src/ryza/risk/**(area: risk_limits)を登録する"
+      labels: [decision, risk]
+      body: "config/governance.yaml の protected_areas には『risk_limits: リスクエンジン実装時に src パスを追記すること(C-2)』というコメントが残ったままで、T-015 でリスクエンジン(src/ryza/risk/engine.py・daily.py・state.py・navflow.py)が実装された今も機械可読な保護対象になっていない。現状の保護は config/ips.yaml の hard_limits(area: ips)だけで、判定値を読み取って**フラグに変換するコード**は A-13-1(無承認変更検出)の対象外である。実際、2026-08-03 の重要-5 修正(navflow ロールフォワード)はリターン測定の定義を変えたが、Approved トレーラの機械的要求は掛からなかった。是正: protected_areas に `src/ryza/risk/**`(area: risk_limits)を追加する。governance.yaml 自体が L1 文書のため代表の明示承認が必要(定款第4条)。src/ryza/gate/(コンプラゲート実装)についても同時に棚卸しすること。"
     status: pending
 
   - id: risk-state-metrics-sufficiency
