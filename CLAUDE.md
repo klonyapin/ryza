@@ -15,7 +15,7 @@
 3. **証憑とリネージ**: 仕訳は evidence_id 必須。データ・生成物には producer_job / code_version / input_refs / as_of を記録
 4. **point-in-time**: 分析・バックテストは as_of スナップショットに対してのみ。未来情報の混入はバグではなく設計違反
 5. **E1〜E9**(定義は 00-system-design.md §1): LLM 関与戦略の評価はカットオフ後期間のみ/前向き検証/等配分 buy-and-hold 対照/全コスト込み/複数シード/point-in-time ユニバース/単一エージェント対照/資本スケール(¥10万〜100万)&開始時点スイープ/多重検定補正(Deflated Sharpe・PBO、生 Sharpe での採用判定禁止)
-6. **保護領域**(定款 `docs/design/06-constitution.md` 第5条と `config/governance.yaml` の protected_areas が正): 変更は代表承認必須 — PR(代表マージ)または `Approved:` トレーラ+承認記録。対象はコンプラゲート・リスクリミット・Kill Switch(配線含む)・会計エンジン・スキーマ(migrations)・監査コード・執筆規格・IPS・マンデート・デプロイ経路・定款自身・本ファイル。**IPS はユーザーのみ起票可**
+6. **保護領域**(定款 `docs/design/06-constitution.md` 第5条と `config/governance.yaml` の protected_areas が正): 変更は承認記録必須(独立役員審査 → #承認 通知 → 48h 異議なしのみなし承認、または代表の明示承認)。`Approved:` トレーラで記録。対象はコンプラゲート・リスクリミット・Kill Switch(配線含む)・会計エンジン・スキーマ(migrations)・監査コード・執筆規格・IPS・マンデート・デプロイ経路・定款自身・本ファイル。**明示承認が必須なのは3専決のみ: 定款・実弾マネー・Kill Switch 復帰**(定款第3条)
 7. **モデル階層**: まず非LLM(ルール・古典ML)で済むか検討 → 軽量 LLM → 中位 → Fable(研究設計・論文執筆・重要レビューのみ。論文ノルマ1日1本)
 
 ## 文体・成果物の規約

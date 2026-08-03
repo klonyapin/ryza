@@ -1,7 +1,7 @@
 # config/governance.yaml — 権限マトリクス・保護領域・統制テーブル(定款の機械可読版)
-# 正: docs/design/06-constitution.md(v0.1 ドラフト — 批准前。批准時に status を active へ)
-# 保護領域(定款第5条): 本ファイル自身の変更も代表承認必須。
-version: "0.1"
+# 正: docs/design/06-constitution.md(v0.3)
+# 保護領域(定款第5条): 本ファイル自身の変更も承認記録(みなし承認 48h または明示)必須。
+version: "0.3"
 status: active # 2026-08-03 代表批准(批准 PR マージ)により発効
 source: docs/design/06-constitution.md
 
@@ -14,15 +14,20 @@ roles:
   department_job: 部門ジョブ(取込・分析・報道・経営管理などの決定論ジョブ)
   fm: ファンドマネージャーペルソナ(ポッド運用。マンデート範囲内)
 
-# 定款第3条: 代表の専決事項(システムは起票のみ可。ips_amendment は起票も代表のみ)
+# 定款第3条: 代表の明示承認が必須の専決事項(v0.3 で3つに縮減 — 2026-08-03 代表指示)
 representative_reserved:
-  - constitution_amendment
-  - ips_amendment # 起票も代表のみ(80-ips.md)
-  - capital_injection_and_live_transition
-  - protected_area_change_approval
-  - mandate_grant_and_amendment
-  - strategy_promotion
-  - kill_switch_resume
+  - constitution_amendment # 委任範囲自体を定めるため委任不可
+  - live_money # 出資・増資・実弾投入・実弾移行・実弾での戦略昇格
+  - kill_switch_resume # 復帰権は委任不可(発動は代表がいつでも可能)
+
+# 定款第3条: みなし承認(negative consent)。#承認 通知後、異議なければ自動発効。
+# governance.decisions に decision='deemed' で記録し、明示承認と区別する。
+deemed_approval:
+  channel: 承認
+  window_hours_default: 48 # マンデート・デモ内昇格・保護領域変更
+  window_hours_ips: 168 # IPS 改訂は 7 日
+  audit_metric: deemed_ratio # 異議ゼロの長期継続は形骸化アラート(監査部門)
+  live_escalation: リスク上限を緩める方向の IPS・マンデート改訂は実弾移行後は明示承認に格上げ
 
 # 定款第4条: 変更対象4層と改訂権限。
 # 層帰属は最上位一致優先(glob が重複する場合は上位層の手続が勝つ)。
@@ -40,13 +45,13 @@ document_layers:
   L2:
     docs:
       - path: docs/design/80-ips.md
-        draft_by: [representative] # IPS は起票も代表のみ(定款第3条2号)
+        draft_by: [representative, cio] # v0.3: CIO は月次レビュー(80 §2.1)から起案可能。発効はみなし承認 7 日
       - path: docs/design/70-writing-standard.md
         draft_by: [cio]
       - path: docs/design/05-governance.md
         draft_by: [cio]
     review_by: [independent_officer]
-    approve_by: [representative]
+    approve_by: [representative_deemed] # みなし承認(IPS 7日/他 48h — 定款第3条)
   L3:
     docs:
       - path: docs/design/81-fm-mandates.md
@@ -56,7 +61,7 @@ document_layers:
       - path: personas/*/charter.md
         draft_by: [cio]
     review_by: [independent_officer] # 重要変更のみ
-    approve_by: [representative] # 投資委員会
+    approve_by: [representative_deemed] # みなし承認 48h(投資委員会)
   L4:
     docs:
       - path: config/*.yaml
@@ -70,7 +75,7 @@ document_layers:
       - path: ops/**
         draft_by: [design_lead]
     review_by: [design_lead]
-    approve_by: [design_lead] # ただし protected_areas に該当する場合は代表承認必須(承認トレーラ必須)
+    approve_by: [design_lead] # ただし protected_areas は独立役員審査+みなし承認 48h(承認トレーラ必須)
 
 # 定款第5条: 保護領域(変更に代表の承認記録が必須。A-13 が git 履歴と突合)
 protected_areas:
