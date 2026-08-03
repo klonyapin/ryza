@@ -428,19 +428,44 @@ reminders:
       labels: [impl, risk]
       body: "ryza.risk.engine.book_returns は `r_t = (nav_t − flow_t − nav_{t−1}) / nav_{t−1}` を隣接**スナップショット**間で計算するが、フローは「そのスナップショット日に計上された仕訳」だけを見る(src/ryza/risk/daily.py load_nav_series の flows 辞書は entry_date で引く)。締めが走らなかった日・非営業日に出資や払戻の仕訳が立つと、その日の flow はどのスナップショットにも紐付かず**リターンから脱落**する。結果、¥100万の帳簿に休日出資 ¥50万が入ると次の測定で『前日比 +50%』という実在しない利益が計上され、実現ボラ・ES の入力(帳簿リターン列)まで汚染される。是正: 前スナップショット日(排他)から当スナップショット日(包含)までの区間の flow を合算して flow_t とする(ロールフォワード)。同じ定義の重複実装になっている dashboard/queries.py fetch_nav_series も同時に合わせること(現状は engine と同一式であることが唯一の担保)。テストは『スナップショットの無い日に出資 → 次営業日のリターンが 0%』を最小ケースとする。**src/ryza/risk/ は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 重要-5。"
     # 2026-08-03: 実装完了(ryza.risk.navflow へ突合を一本化 + dashboard/queries.py を同定義に統一)。
-    # 独立審査 → みなし承認 → main 統合まで pending のままにする(期日を過ぎたら issue が立つが二重作業の害はない)。
+    # 独立審査で条件付き承認 → BOP/EOP 分離まで是正済み(docs/reviews/risk-navflow-rollforward-independent-review.md)。
+    # みなし承認 → main 統合まで pending のままにする(期日を過ぎたら issue が立つが二重作業の害はない)。
     status: pending
 
-  - id: risk-protected-areas-registration
-    what: "config/governance.yaml の protected_areas に src/ryza/risk/** を登録する(C-2 の宿題 — リスクエンジンは実装済み)"
+  - id: risk-protected-areas-registration-followup
+    what: "(設計リードが別 PR で起票済み)protected_areas への src/ryza/risk/** 登録が main に入ったか確認する(独立審査 重要-8)"
+    conditions:
+      - type: date_after
+        date: "2026-08-12"
+    action:
+      type: issue_create
+      title: "確認: protected_areas の src/ryza/risk/** 登録 PR が統合されたか"
+      labels: [decision, risk]
+      body: "2026-08-03 の navflow 修正(リターン測定の定義変更)は、src/ryza/risk/** が config/governance.yaml の protected_areas に未登録のまま実施された(独立審査 重要-8)。governance.yaml には『risk_limits: リスクエンジン実装時に src パスを追記すること(C-2)』というコメントが残ったままで、判定値(config/ips.yaml の hard_limits)は保護されていても、それを読んでフラグに変換するコードは A-13-1(無承認変更検出)の対象外という状態が続いている。設計リードが登録の別 PR(L1・代表の明示承認が必要)を起票する裁定。本リマインダーはその追跡: 未統合なら再度 #承認 へ上げ、統合済みなら A-13-1 が risk 配下の変更を検出する状態になっていることを 1 度だけ確認して close する。src/ryza/gate/(コンプラゲート実装)の登録有無も同時に棚卸しすること。"
+    status: pending
+
+  - id: ledger-reclose-recent-days
+    what: "会計締めを直近 N 営業日ぶん再実行し、nav_snapshots に producer リネージを持たせる(独立審査 重要-2)"
     conditions:
       - type: date_after
         date: "2026-08-10"
     action:
       type: issue_create
-      title: "protected_areas に src/ryza/risk/**(area: risk_limits)を登録する"
-      labels: [decision, risk]
-      body: "config/governance.yaml の protected_areas には『risk_limits: リスクエンジン実装時に src パスを追記すること(C-2)』というコメントが残ったままで、T-015 でリスクエンジン(src/ryza/risk/engine.py・daily.py・state.py・navflow.py)が実装された今も機械可読な保護対象になっていない。現状の保護は config/ips.yaml の hard_limits(area: ips)だけで、判定値を読み取って**フラグに変換するコード**は A-13-1(無承認変更検出)の対象外である。実際、2026-08-03 の重要-5 修正(navflow ロールフォワード)はリターン測定の定義を変えたが、Approved トレーラの機械的要求は掛からなかった。是正: protected_areas に `src/ryza/risk/**`(area: risk_limits)を追加する。governance.yaml 自体が L1 文書のため代表の明示承認が必要(定款第4条)。src/ryza/gate/(コンプラゲート実装)についても同時に棚卸しすること。"
+      title: "ledger 締め: 直近 N 営業日の再締め + nav_snapshots の producer リネージ"
+      labels: [impl, ledger]
+      body: "navflow のロールフォワード(2026-08-03)は『締めが走らなかった日』の外部フローを次のスナップショットへ寄せるが、**締めが走った後で同じ日付に立った仕訳**は救えない。その日のスナップショットは既に確定しており、後から来たフローはどの点にも帰属しないか、次の点に寄って ±X% の対のリターンを生む(独立審査の検証では +50% / −33% の対を再現)。是正: 日次の会計締めを当日だけでなく**直近 N 営業日ぶん再実行**する(`_upsert_nav` は冪等なので上書きで足りる。N は 5 営業日程度から)。同時に ledger.nav_snapshots へ producer_job / code_version / as_of のリネージ列(または detail への埋め込み)を持たせ、『いつの締めが作った値か』を後から辿れるようにする(不変原則3)。スキーマ変更を伴うため migrations は保護領域の手続に従うこと。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 重要-2。"
+    status: pending
+
+  - id: flow-entry-date-evidence-check
+    what: "出資・払戻の entry_date と証憑の値付け日の突合を posting 側で検証する(独立審査の敵対的指摘)"
+    conditions:
+      - type: date_after
+        date: "2026-08-24"
+    action:
+      type: issue_create
+      title: "ledger.posting: 拠出資本仕訳の entry_date を証憑の値付け日と突合する"
+      labels: [impl, ledger, audit]
+      body: "外部フローの帰属点(どのスナップショットのリターンに効くか)は entry_date だけで決まるが、entry_date は呼び出し側が自由に指定でき、締め後の期間ロックも無い(独立審査の敵対的レビュー)。現状の操作余地は修正前(フロー完全脱落)より小さいものの、リターン測定を動かせる自由度が会計入力側に残っている。是正: ledger.posting で拠出資本勘定(category='equity' かつ account_id <> 'retained')への仕訳について、entry_date と証憑(ledger.evidence)の値付け日/取得日の乖離を検証し、閾値を超える場合は拒否または要承認とする。併せて『確定済みスナップショット日より前の日付への新規仕訳』の扱い(ロック or 逆仕訳強制)を決める。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 敵対的。"
     status: pending
 
   - id: risk-state-metrics-sufficiency
