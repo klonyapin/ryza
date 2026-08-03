@@ -1,6 +1,6 @@
 """theses — FM の提案記録 ``trading.fm_theses`` と証憑の point-in-time 検証(T-017)。
 
-役割は3つ:
+役割は4つ:
 
 1. **記録の唯一の入口** ``record_thesis``: 反証条件(invalidation)と証憑(evidence_refs)を
    欠いた提案を保存させない。スキーマ側の CHECK と二重の防御にするのは、アプリ層でしか
@@ -11,6 +11,9 @@
 3. **判断履歴の注入** ``recent_theses``: FM 別・新しい順に、**ゲート判定の結果つき**で
    読み出す(orders.thesis_id → orders.status / compliance.gate_log)。block された案が
    次回プロンプトの学習材料になる(指示書6・7。governance.stances と同じ思想)
+4. **検疫** ``quarantine_thesis``: 汚染が判明した提案を再注入の対象から外す
+   (``trading.fm_theses_quarantine`` — 追記オンリーと両立する封じ込め。fm_theses は
+   書き換えず、読出し側 3 が除外する。独立役員審査 T-017 C-3)
 
 証憑参照(evidence_refs)の語彙 — いずれも ``kind`` で分岐する JSON オブジェクト:
 
@@ -262,6 +265,76 @@ def record_thesis(
         return cur.fetchone()[0]
 
 
+# ── 検疫(プロンプト汚染の封じ込め — 独立役員審査 T-017 C-3)────────────────────
+# 再注入の対象から外す thesis を指す追記オンリー表(migrations/0023)。fm_theses 自体は
+# 書き換えない(判断の履歴は不変)。除外は**読出し側**の責務であり、注入経路
+# (recent_theses / open_theses_by_instrument)の SQL に共通で入る述語がこれである。
+_NOT_QUARANTINED = """
+              AND NOT EXISTS (
+                  SELECT 1 FROM trading.fm_theses_quarantine q
+                  WHERE q.thesis_id = t.thesis_id
+              )
+"""
+
+
+def quarantine_thesis(
+    conn: psycopg.Connection,
+    thesis_id: int,
+    *,
+    reason: str,
+    quarantined_by: str,
+    run_id: int | None = None,
+) -> int:
+    """提案を検疫する(以後、着任プロンプトへ再注入しない)。
+
+    汚染が判明した提案を封じ込める唯一の入口。当面の登録は**人手**(この関数の直接呼出、
+    または同等の SQL)で行う — 自動検出は誤検知で判断履歴を静かに欠落させるため、
+    判断を経路に残す(0023 の判断3)。
+
+    既に検疫済みの thesis を再度渡した場合は既存の quarantine_id を返す(冪等)。
+    解除の API は用意しない — 誤検疫の救済は同じ内容を新しい thesis として記録する
+    (0023 の判断2 — 検疫を消せる経路を作らない)。
+    """
+    if not (reason or "").strip():
+        raise ThesisError("検疫の理由(reason)は必須(何が汚染したかを残す)")
+    if not (quarantined_by or "").strip():
+        raise ThesisError("検疫の実施主体(quarantined_by)は必須")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM trading.fm_theses WHERE thesis_id = %s", (thesis_id,)
+        )
+        if cur.fetchone() is None:
+            raise ThesisError(f"検疫対象の thesis_id={thesis_id} が存在しない")
+        cur.execute(
+            """
+            INSERT INTO trading.fm_theses_quarantine
+                (thesis_id, reason, quarantined_by, run_id)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (thesis_id) DO NOTHING
+            RETURNING quarantine_id
+            """,
+            (thesis_id, reason.strip(), quarantined_by.strip(), run_id),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            return row[0]
+        cur.execute(
+            "SELECT quarantine_id FROM trading.fm_theses_quarantine WHERE thesis_id = %s",
+            (thesis_id,),
+        )
+        return cur.fetchone()[0]
+
+
+def is_quarantined(conn: psycopg.Connection, thesis_id: int) -> bool:
+    """当該提案が検疫済みか(監査・運用確認用)。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM trading.fm_theses_quarantine WHERE thesis_id = %s",
+            (thesis_id,),
+        )
+        return cur.fetchone() is not None
+
+
 # ── 読出し(次回プロンプトへの注入)────────────────────────────────────────────
 def recent_theses(
     conn: psycopg.Connection, fm: str, *, limit: int = 20
@@ -270,6 +343,11 @@ def recent_theses(
 
     ゲート判定は ``trading.fm_theses`` には書き戻さない(追記オンリー)ため、
     orders.thesis_id → orders.status / compliance.gate_log を辿って合成する。
+
+    **検疫済み(``trading.fm_theses_quarantine``)の提案は返さない** — 本関数は着任
+    プロンプトへの再注入経路であり、汚染した提案をここで落とす(審査 T-017 C-3)。
+    検疫は件数を減らすだけで繰り上げは行わない(limit は検疫前ではなく後に効く SQL に
+    しているため、除外分は次に古い提案で埋まる)。
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -280,6 +358,9 @@ def recent_theses(
             LEFT JOIN trading.orders o ON o.thesis_id = t.thesis_id
             LEFT JOIN compliance.gate_log g ON g.id = o.gate_log_id
             WHERE t.fm = %s
+            """
+            + _NOT_QUARANTINED
+            + """
             ORDER BY t.thesis_id DESC
             LIMIT %s
             """,
@@ -303,6 +384,11 @@ def open_theses_by_instrument(
 
     Ben の保有見直し(invalidation 成立チェック)の入力。約定に至らなかった提案も
     含み得るが、保有中の銘柄に限って引くため実務上は建玉の根拠になる。
+
+    ここも**プロンプトへの注入経路**であるため検疫済みの提案は返さない(審査 T-017
+    C-3。審査は recent_theses のみを挙げたが、建玉根拠も同じ再注入経路である)。
+    根拠が検疫されると呼び出し側の入力は None になり、Ben は「根拠不明の保有」として
+    見直す — 汚染テキストを渡し続けるより安全な縮退である。
     """
     if not instrument_ids:
         return {}
@@ -314,6 +400,9 @@ def open_theses_by_instrument(
                    t.invalidation_md, t.as_of
             FROM trading.fm_theses t
             WHERE t.fm = %s AND t.instrument_id = ANY(%s) AND t.direction = 'buy'
+            """
+            + _NOT_QUARANTINED
+            + """
             ORDER BY t.instrument_id, t.thesis_id DESC
             """,
             (fm, list(instrument_ids)),
@@ -335,7 +424,9 @@ __all__ = [
     "EvidenceError",
     "ThesisError",
     "ThesisRecord",
+    "is_quarantined",
     "open_theses_by_instrument",
+    "quarantine_thesis",
     "record_thesis",
     "recent_theses",
     "validate_evidence_refs",

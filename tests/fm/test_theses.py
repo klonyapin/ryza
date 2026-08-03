@@ -10,7 +10,9 @@ import pytest
 from ryza.fm.theses import (
     EvidenceError,
     ThesisError,
+    is_quarantined,
     open_theses_by_instrument,
+    quarantine_thesis,
     recent_theses,
     record_thesis,
     validate_evidence_refs,
@@ -238,3 +240,60 @@ def test_open_theses_by_instrument(conn, run, insert_document):
     latest = _record(conn, run, evidence_refs=refs, instrument_id=7)
     found = open_theses_by_instrument(conn, "ben", [7])
     assert found[7].thesis_id == latest
+
+
+# ── 検疫(独立役員審査 T-017 C-3)──────────────────────────────────────────────
+def test_quarantined_thesis_is_excluded_from_reinjection(conn, run, insert_document):
+    """検疫した提案は再注入経路(recent_theses / open_theses_by_instrument)に出ない。"""
+    doc_id = insert_document()
+    refs = [{"kind": "document", "doc_id": doc_id}]
+    clean = _record(conn, run, evidence_refs=refs, instrument_id=11)
+    tainted = _record(conn, run, evidence_refs=refs, instrument_id=12)
+    assert is_quarantined(conn, tainted) is False
+
+    quarantine_thesis(
+        conn, tainted, reason="外部文書経由の指示文が混入", quarantined_by="dev-lead",
+        run_id=run.run_id,
+    )
+    assert is_quarantined(conn, tainted) is True
+
+    ids = [r.thesis_id for r in recent_theses(conn, "ben", limit=50)]
+    assert tainted not in ids and clean in ids
+    assert open_theses_by_instrument(conn, "ben", [12]) == {}
+    # 汚染されていない提案の建玉根拠は従来どおり引ける。
+    assert open_theses_by_instrument(conn, "ben", [11])[11].thesis_id == clean
+
+
+def test_quarantine_is_idempotent_and_validated(conn, run, insert_document):
+    doc_id = insert_document()
+    thesis_id = _record(conn, run, evidence_refs=[{"kind": "document", "doc_id": doc_id}])
+    first = quarantine_thesis(conn, thesis_id, reason="汚染", quarantined_by="dev-lead")
+    again = quarantine_thesis(conn, thesis_id, reason="汚染(再)", quarantined_by="audit")
+    assert first == again  # 二重登録しない(証跡は1行)
+
+    with pytest.raises(ThesisError, match="理由"):
+        quarantine_thesis(conn, thesis_id, reason="  ", quarantined_by="dev-lead")
+    with pytest.raises(ThesisError, match="実施主体"):
+        quarantine_thesis(conn, thesis_id, reason="汚染", quarantined_by=" ")
+    with pytest.raises(ThesisError, match="存在しない"):
+        quarantine_thesis(
+            conn, 999_999_999, reason="汚染", quarantined_by="dev-lead"
+        )
+
+
+def test_quarantine_table_is_append_only(conn, run, insert_document):
+    """検疫表自身も追記オンリー(解除経路を作らない — 0023 の判断2)。"""
+    doc_id = insert_document()
+    thesis_id = _record(conn, run, evidence_refs=[{"kind": "document", "doc_id": doc_id}])
+    quarantine_thesis(conn, thesis_id, reason="汚染", quarantined_by="dev-lead")
+    with conn.cursor() as cur, pytest.raises(psycopg.errors.RaiseException):
+        cur.execute(
+            "DELETE FROM trading.fm_theses_quarantine WHERE thesis_id = %s", (thesis_id,)
+        )
+
+
+def test_quarantine_truncate_is_blocked(conn):
+    with pytest.raises(psycopg.errors.RaiseException, match="TRUNCATE は禁止"):
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE trading.fm_theses_quarantine CASCADE")

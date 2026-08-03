@@ -233,17 +233,22 @@ def insert_bars(conn, run):
 def insert_document(conn, run):
     """``docs.documents`` に文書を1件入れて doc_id を返す(証憑テスト用)。"""
 
-    def _insert(*, title: str = "テスト文書", as_of: datetime | None = None) -> int:
+    def _insert(
+        *,
+        title: str = "テスト文書",
+        as_of: datetime | None = None,
+        body: str = "本文",
+    ) -> int:
         stamp = as_of or (datetime.now(UTC) - timedelta(days=1))
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO docs.documents
                     (source_type, source_name, title, body, as_of, content_hash, run_id)
-                VALUES ('filing', 'TDnet', %s, '本文', %s, sha256(%s::bytea), %s)
+                VALUES ('filing', 'TDnet', %s, %s, %s, sha256(%s::bytea), %s)
                 RETURNING doc_id
                 """,
-                (title, stamp, title.encode(), run.run_id),
+                (title, body, stamp, f"{title}{body}".encode(), run.run_id),
             )
             return cur.fetchone()[0]
 
