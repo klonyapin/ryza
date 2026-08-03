@@ -23,6 +23,8 @@ Discord 向けの ``Member.icon_url`` は拡張子を ``.png`` へ読み替え�
 
 from __future__ import annotations
 
+import ipaddress
+import socket
 import urllib.request
 from dataclasses import dataclass, replace
 from functools import lru_cache
@@ -217,18 +219,64 @@ def apply_icon_overrides(
 
 # ── アイコン URL の検証(https のみ・実体が画像であること)───────────────────
 class IconUrlError(ValueError):
-    """アイコン URL が使えない(スキーム違反・到達不能・画像でない)。"""
+    """アイコン URL が使えない(スキーム違反・到達不能・画像でない・内部宛)。"""
 
 
 # 検証の実アクセスは短時間で打ち切る(UI の保存操作を待たせない)。
 ICON_URL_TIMEOUT = 5.0
 
+# 受け入れる画像形式(独立役員審査 0020 C-8)。``image/*`` 全体を許すと ``image/svg+xml``
+# が通り、SVG は script・外部参照を含みうるマークアップである。Streamlit は SVG を
+# レンダリングするため、組織ページの閲覧者(代表)のブラウザで実行されうる。
+# Discord が表示できる形式(PNG/JPEG/GIF/WebP)に限れば実害なく塞げる。
+ICON_ALLOWED_TYPES = ("image/png", "image/jpeg", "image/gif", "image/webp")
 
-def _default_opener(url: str, method: str, timeout: float) -> str:
-    """URL へ ``method`` でアクセスし Content-Type を返す(差し替え可能な I/O)。"""
+# 上限 5MB(独立役員審査 0020 C-8)。Discord のアバターに 5MB 超の原寸画像は不要で、
+# 巨大ファイルは表示のたびに代表の回線と Discord 側の取得を無駄に使う。
+ICON_MAX_BYTES = 5 * 1024 * 1024
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """リダイレクトを一切追従しないハンドラ(``None`` を返すと urllib は 3xx を送出)。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ANN201
+        return None
+
+
+def _default_opener(url: str, method: str, timeout: float) -> dict[str, str]:
+    """URL へ ``method`` でアクセスし、応答ヘッダを小文字キーの dict で返す。
+
+    **リダイレクトは追従しない**(独立役員審査 0020 C-6)。追従を許すと、検証を通った
+    https の外部 URL から内部アドレスへ誘導され、検証の実アクセス自体が内部宛リクエスト
+    (SSRF)になる。3xx は ``HTTPError`` として失敗させ、利用者には最終 URL を直接
+    指定してもらう。
+    """
+    opener = urllib.request.build_opener(_NoRedirect)
     req = urllib.request.Request(url, method=method, headers={"User-Agent": "RyzaOrg/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - https 限定済み
-        return str(resp.headers.get("Content-Type", ""))
+    with opener.open(req, timeout=timeout) as resp:  # noqa: S310 - https 限定済み
+        return {str(k).lower(): str(v) for k, v in resp.headers.items()}
+
+
+def _reject_internal_host(host: str) -> None:
+    """名前解決した宛先がインターネット公開アドレスでなければ ``IconUrlError``。
+
+    暫定の SSRF 緩和(独立役員審査 0020 C-6)。``127.0.0.1`` / ``10.0.0.0/8`` /
+    ``169.254.169.254``(GCE メタデータ)等へ検証アクセスさせない。
+
+    **限界**: 検証時の名前解決と実アクセス時の名前解決は別で、DNS の応答を切り替える
+    攻撃(DNS rebinding)には無力である。恒久是正は保存時に画像を自前で再ホストして
+    外部 URL への実アクセス自体を無くすこと(ops/reminders.yaml icon-rehost-storage)。
+    """
+    try:
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise IconUrlError(f"ホスト名を解決できない({host}): {exc}") from None
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0])
+        if not address.is_global:
+            raise IconUrlError(
+                f"内部アドレスへ解決される URL は使えない({host} → {address})"
+            )
 
 
 def check_icon_url(
@@ -241,31 +289,53 @@ def check_icon_url(
 
     - **https のみ**(http・data:・相対 URL は拒否。Discord も Streamlit も外部から
       取得するため、平文経路とスキームの取り違えをここで塞ぐ)
-    - 実アクセスして ``Content-Type`` が ``image/*`` であること。HEAD を拒む配信元
-      (405/501)があるため HEAD → GET の順に試す
+    - **宛先がインターネット公開アドレス**であること(``_reject_internal_host``)
+    - 実アクセス(**リダイレクト追従なし**)して ``Content-Type`` が
+      ``ICON_ALLOWED_TYPES`` のいずれかであること。HEAD を拒む配信元(405/501)が
+      あるため HEAD → GET の順に試す
+    - ``Content-Length`` が ``ICON_MAX_BYTES`` 以下であること。**ヘッダが無い場合は
+      拒否する** — ボディを実際に読んで実測する経路を作ると、検証のために任意の外部
+      URL から大きなデータを取得することになり、SSRF の増幅・DoS の的になる。
+      サイズを申告しない配信元は代表に別の URL を選んでもらう方が安全で単純
     - 到達不能・タイムアウトは失敗として扱い、**保存しない**
 
-    ``opener`` は ``(url, method, timeout) -> content_type`` の差し替え口
+    ``opener`` は ``(url, method, timeout) -> 小文字キーのヘッダ dict`` の差し替え口
     (テストは実ネットワークを叩かない)。
     """
     candidate = url.strip()
     parsed = urlparse(candidate)
-    if parsed.scheme != "https" or not parsed.netloc:
+    if parsed.scheme != "https" or not parsed.hostname:
         raise IconUrlError(f"https:// の URL のみ受け付ける(受領: {candidate!r})")
     fetch = opener if opener is not None else _default_opener
-    content_type = ""
+    if opener is None:
+        # 差し替え時(テスト)は名前解決しない。実 I/O を行う既定経路だけが対象。
+        _reject_internal_host(parsed.hostname)
+    headers: dict[str, str] = {}
     errors: list[str] = []
     for method in ("HEAD", "GET"):
         try:
-            content_type = fetch(candidate, method, timeout)
+            headers = fetch(candidate, method, timeout)
             break
         except Exception as exc:  # noqa: BLE001 - 失敗理由は利用者に見せる
             errors.append(f"{method}: {type(exc).__name__}: {exc}")
     else:
         raise IconUrlError(f"URL に到達できない({' / '.join(errors)})")
-    if not content_type.split(";")[0].strip().lower().startswith("image/"):
+
+    content_type = str(headers.get("content-type", "")).split(";")[0].strip().lower()
+    if content_type not in ICON_ALLOWED_TYPES:
         raise IconUrlError(
-            f"画像ではない(Content-Type: {content_type or '(なし)'})。画像の直リンク URL を指定する"
+            f"対応していない画像形式(Content-Type: {content_type or '(なし)'})。"
+            f"{' / '.join(ICON_ALLOWED_TYPES)} の直リンク URL を指定する"
+        )
+    raw_length = str(headers.get("content-length", "")).strip()
+    if not raw_length.isdigit():
+        raise IconUrlError(
+            "サイズ(Content-Length)を申告しない URL は受け付けない。"
+            "画像の直リンク URL を指定する"
+        )
+    if int(raw_length) > ICON_MAX_BYTES:
+        raise IconUrlError(
+            f"画像が大きすぎる({int(raw_length):,} bytes > 上限 {ICON_MAX_BYTES:,} bytes)"
         )
     return candidate
 
@@ -278,11 +348,22 @@ def set_icon_override(
 
     台帳に無い ``member_id`` は ``KeyError``(存在しないキャラの上書きを作らない)。
     URL の検証は呼び出し側の責務(``check_icon_url``)— ここは DB 書込のみを行う。
-    現在値とログは**同じトランザクションで**書く(0020 の方式 B の担保)。
+
+    現在値とログは ``conn.transaction()`` で明示的に囲む(独立役員審査 0020 C-1)。
+    本番の呼び出し元(``queries.connect_boardroom``)は **autocommit=True** の接続で、
+    囲まないと 2 文が別トランザクションになり、ログ INSERT が失敗しても現在値だけが
+    残る。それは 0020 が方式 B の担保として掲げた「同一トランザクション」の不成立
+    であり、履歴の無い上書き=改竄と区別できない状態を作る。``transaction()`` は
+    autocommit / 非 autocommit のどちらの接続でも 1 単位に束ねる。
+
+    **非 autocommit の呼び出し元への注意**: psycopg の ``transaction()`` は、
+    トランザクションが未開始なら BEGIN して**ブロック脱出時に COMMIT する**。既に
+    トランザクション中なら SAVEPOINT として振る舞い、commit の判断は呼び出し元に残る。
+    したがって本関数を「その接続の最初の文」として呼ぶと即時確定する。
     """
     if member_id not in members(path):
         raise KeyError(f"config/org.yaml に id='{member_id}' のメンバーがいない")
-    with conn.cursor() as cur:
+    with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO ops.org_icon_overrides (member_id, icon_url, updated_by, updated_at)
@@ -328,8 +409,10 @@ def clear_icon_override(conn: Any, member_id: str, actor: str) -> bool:
     """上書きを削除して台帳の初期値へ戻す。削除した行があれば True。
 
     上書きが無い場合も履歴は残さない(状態が変わっていないため)。
+    削除とログを ``conn.transaction()`` で束ねる理由は ``set_icon_override`` と同じ
+    (独立役員審査 0020 C-1 — autocommit 接続で削除だけが残る経路を塞ぐ)。
     """
-    with conn.cursor() as cur:
+    with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "DELETE FROM ops.org_icon_overrides WHERE member_id = %s RETURNING member_id",
             (member_id,),
@@ -348,6 +431,8 @@ def clear_icon_override(conn: Any, member_id: str, actor: str) -> bool:
 
 __all__ = [
     "AUTHOR_MEMBER_KEY",
+    "ICON_ALLOWED_TYPES",
+    "ICON_MAX_BYTES",
     "ICON_URL_TIMEOUT",
     "IconUrlError",
     "Member",

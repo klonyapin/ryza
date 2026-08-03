@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import socket
+
 import pytest
 
 from ryza import org
@@ -180,14 +182,18 @@ def test_apply_icon_overrides_passthrough_without_author():
 
 
 # ── URL 検証 ─────────────────────────────────────────────────────────────────
-def _opener(content_type: str, *, fail_head: bool = False):
+def _opener(content_type: str, *, length: str | None = "1024", fail_head: bool = False):
+    """``check_icon_url`` の I/O 差し替え口(小文字キーのヘッダ dict を返す)。"""
     calls: list[tuple[str, str]] = []
 
-    def _fake(url: str, method: str, timeout: float) -> str:
+    def _fake(url: str, method: str, timeout: float) -> dict[str, str]:
         calls.append((url, method))
         if fail_head and method == "HEAD":
             raise OSError("405 Method Not Allowed")
-        return content_type
+        headers = {"content-type": content_type}
+        if length is not None:
+            headers["content-length"] = length
+        return headers
 
     _fake.calls = calls  # type: ignore[attr-defined]
     return _fake
@@ -214,8 +220,36 @@ def test_check_icon_url_rejects_non_https(url):
 
 
 def test_check_icon_url_rejects_non_image():
-    with pytest.raises(org.IconUrlError, match="画像ではない"):
+    with pytest.raises(org.IconUrlError, match="対応していない画像形式"):
         org.check_icon_url("https://x.test/page", opener=_opener("text/html"))
+
+
+@pytest.mark.parametrize("content_type", list(org.ICON_ALLOWED_TYPES))
+def test_check_icon_url_accepts_each_allowed_type(content_type):
+    assert org.check_icon_url("https://x.test/a", opener=_opener(content_type))
+
+
+def test_check_icon_url_rejects_svg(caplog):
+    """SVG は script・外部参照を含みうるマークアップのため許可しない(C-8)。"""
+    with pytest.raises(org.IconUrlError, match="対応していない画像形式"):
+        org.check_icon_url("https://x.test/a.svg", opener=_opener("image/svg+xml"))
+
+
+def test_check_icon_url_rejects_oversized_image():
+    big = str(org.ICON_MAX_BYTES + 1)
+    with pytest.raises(org.IconUrlError, match="大きすぎる"):
+        org.check_icon_url("https://x.test/a.png", opener=_opener("image/png", length=big))
+
+
+def test_check_icon_url_accepts_exactly_max_size():
+    opener = _opener("image/png", length=str(org.ICON_MAX_BYTES))
+    assert org.check_icon_url("https://x.test/a.png", opener=opener)
+
+
+def test_check_icon_url_rejects_missing_content_length():
+    """サイズ未申告は拒否(ボディを実測しに行かない — SSRF 増幅・DoS を避ける)。"""
+    with pytest.raises(org.IconUrlError, match="Content-Length"):
+        org.check_icon_url("https://x.test/a.png", opener=_opener("image/png", length=None))
 
 
 def test_check_icon_url_falls_back_to_get_when_head_rejected():
@@ -225,8 +259,45 @@ def test_check_icon_url_falls_back_to_get_when_head_rejected():
 
 
 def test_check_icon_url_rejects_unreachable():
-    def _boom(url: str, method: str, timeout: float) -> str:
+    def _boom(url: str, method: str, timeout: float) -> dict[str, str]:
         raise TimeoutError("timed out")
 
     with pytest.raises(org.IconUrlError, match="到達できない"):
         org.check_icon_url("https://x.test/a.png", opener=_boom)
+
+
+# ── SSRF 緩和(独立役員審査 0020 C-6)────────────────────────────────────────
+@pytest.mark.parametrize(
+    "address", ["127.0.0.1", "10.1.2.3", "192.168.0.5", "169.254.169.254", "::1"]
+)
+def test_reject_internal_host_blocks_non_global_addresses(monkeypatch, address):
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    monkeypatch.setattr(
+        org.socket, "getaddrinfo",
+        lambda *a, **k: [(family, socket.SOCK_STREAM, 6, "", (address, 443))],
+    )
+    with pytest.raises(org.IconUrlError, match="内部アドレス"):
+        org._reject_internal_host("internal.test")
+
+
+def test_reject_internal_host_allows_public_address(monkeypatch):
+    monkeypatch.setattr(
+        org.socket, "getaddrinfo",
+        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+    )
+    org._reject_internal_host("example.test")  # 例外が出なければ合格
+
+
+def test_reject_internal_host_rejects_unresolvable(monkeypatch):
+    def _boom(*a, **k):
+        raise socket.gaierror("Name or service not known")
+
+    monkeypatch.setattr(org.socket, "getaddrinfo", _boom)
+    with pytest.raises(org.IconUrlError, match="解決できない"):
+        org._reject_internal_host("nx.test")
+
+
+def test_default_opener_does_not_follow_redirects():
+    """リダイレクト追従を無効化していること(3xx から内部宛へ誘導させない)。"""
+    handler = org._NoRedirect()
+    assert handler.redirect_request(None, None, 302, "Found", {}, "https://evil.test/") is None

@@ -516,9 +516,14 @@ def _icon_editor(members: list[dict[str, Any]], overrides: dict[str, str]) -> No
 
 
 def _apply_icon_change(member_id: str, url: str, *, save: bool) -> None:
-    """保存/リセットを実行し、結果を表示して再描画する(失敗時は保存しない)。"""
+    """保存/リセットを実行し、結果を表示して再描画する(失敗時は保存しない)。
+
+    接続は役員室と同じ ``_boardroom_conn()``(``@st.cache_resource``)を**再利用**する
+    (独立役員審査 0020 C-9)。保存のたびに新規接続を開くと、Streamlit の再実行ごとに
+    close されない接続が積み上がる。
+    """
     try:
-        wconn = queries.connect_boardroom()
+        wconn = _boardroom_conn()
     except Exception as exc:  # noqa: BLE001 - DB 停止時も UI は説明を出して生かす
         st.error(f"DB に接続できない: {exc}")
         return

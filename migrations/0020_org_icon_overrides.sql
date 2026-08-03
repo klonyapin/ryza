@@ -54,6 +54,57 @@ CREATE INDEX org_icon_override_log_member_idx
     ON ops.org_icon_override_log (member_id, created_at);
 
 -- ────────────────────────────────────────────────────────────────────────────
+-- 履歴表の追記オンリー強制(独立役員審査 0020 C-3)
+-- ────────────────────────────────────────────────────────────────────────────
+-- 当初は「ryza_boardroom に INSERT しか GRANT しない」だけで追記オンリーを表現して
+-- いたが、それはロール分離が効く経路(ダッシュボード)にしか効かない。テーブル所有
+-- ロール(ryza)で動くジョブ・Bot・手動の psql は履歴を UPDATE / DELETE できてしまい、
+-- 「現在値の履歴が必ず残る」という 0020 の担保が所有ロールに対しては空手形になる。
+-- 0013(governance.minutes / minute_resolutions)が確立した「トリガ + REVOKE」の
+-- 先例に揃え、権限ではなくテーブル自身の性質として追記オンリーを強制する。
+CREATE FUNCTION ops.forbid_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION
+        '% は % では禁止(追記オンリー)。アイコン上書きの変更履歴は証跡であり、訂正も追記で行う',
+        TG_OP, TG_TABLE_NAME;
+END;
+$$;
+
+CREATE TRIGGER org_icon_override_log_no_mutation
+    BEFORE UPDATE OR DELETE ON ops.org_icon_override_log
+    FOR EACH ROW EXECUTE FUNCTION ops.forbid_mutation();
+
+REVOKE UPDATE, DELETE ON ops.org_icon_override_log FROM PUBLIC;
+
+-- **TRUNCATE は行トリガを迂回する**(0015 で実証・0018 が標準化)。行トリガだけでは
+-- `TRUNCATE ops.org_icon_override_log` の一撃で履歴が全て消えるため、0018 の
+-- forbid_truncate と同型の文トリガ + REVOKE TRUNCATE で塞ぐ。
+CREATE FUNCTION ops.forbid_truncate() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION '% の TRUNCATE は禁止(追記オンリーの監査証跡)。訂正は追記で行う',
+        TG_TABLE_NAME;
+END;
+$$;
+
+CREATE TRIGGER org_icon_override_log_no_truncate
+    BEFORE TRUNCATE ON ops.org_icon_override_log
+    FOR EACH STATEMENT EXECUTE FUNCTION ops.forbid_truncate();
+
+REVOKE TRUNCATE ON ops.org_icon_override_log FROM PUBLIC;
+
+-- 現在値表(ops.org_icon_overrides)には同じ制約を掛けない。上書き・削除が本義の
+-- 可変表であり、その変更履歴は上のログ表が持つ。ただし TRUNCATE は「上書きを全部
+-- 消す」操作でありログを残さないため、0018 が trading.orders(可変表)に対して
+-- 行ったのと同じ理由で封鎖する。
+CREATE TRIGGER org_icon_overrides_no_truncate
+    BEFORE TRUNCATE ON ops.org_icon_overrides
+    FOR EACH STATEMENT EXECUTE FUNCTION ops.forbid_truncate();
+
+REVOKE TRUNCATE ON ops.org_icon_overrides FROM PUBLIC;
+
+-- ────────────────────────────────────────────────────────────────────────────
 -- 権限に関する注記(0017 との違い)
 -- ────────────────────────────────────────────────────────────────────────────
 -- 0017 の ops.discord_webhooks は「URL を知る者が誰でも投稿できる」秘密のため、

@@ -300,7 +300,17 @@ class RyzaBot(commands.Bot):
             with connect() as resolve_conn:
                 channel_id = channels.resolve(resolve_conn, msg.channel)
                 webhook_url = webhooks.resolve_webhook(resolve_conn, msg.channel)
-                overrides = org.icon_overrides(resolve_conn)
+                try:
+                    overrides = org.icon_overrides(resolve_conn)
+                except Exception:  # noqa: BLE001 - フェイルオープン(独立役員審査 0020 C-2)
+                    # **アイコンが古いのは許容、配送停止は不許容**。ここで例外を上げると
+                    # outbox.deliver_pending が当該メッセージを送れないまま次へ進み
+                    # (無言の再試行待ち)、0020 未適用の環境や一時的な DB エラーで
+                    # 速報・Kill Switch 通報を含む全 Discord 配送が静かに止まる。
+                    # 見た目の鮮度より配送の到達性を優先し、台帳の値で送る。
+                    log.warning("アイコン上書きを読めないため台帳の値で配送する", exc_info=True)
+                    resolve_conn.rollback()  # 失敗でアボートした tx を明示的に畳む
+                    overrides = {}
             if channel_id is None:
                 raise RuntimeError(f"チャンネル未解決(ensure 前?): {msg.channel}")
             # #承認 向けで proposal footer を持つ embed には承認ボタンを付ける
