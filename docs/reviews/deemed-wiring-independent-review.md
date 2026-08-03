@@ -53,14 +53,15 @@ GitHub イベント受信基盤が無いため PR 起票の自動検知は依然
 | 軽微-11 | `run_a18_readonly` を新設し、照合は autocommit・`default_transaction_read_only` の別接続で完結させて閉じてから報告用の書込接続を開く。git 走査中の idle-in-transaction が消える |
 | 軽微-12 | 逆方向のフォールト注入(`enqueue` が行を書いた直後に落ちる/`run_id` NOT NULL 違反)で記録・通知の双方が消えることを検証。CLI の IDLE 分岐は「IDLE 接続で `announce` しても commit に化けない」+ CLI 本経路の end-to-end で被覆 |
 
-**トレーラ v2 ライン(`trailer-v2`)との統合について**: A-18-7 は独立した関数
-(`deemed_pr_number` / `_decision_exists` / `decision_for_pr_number` /
-`check_unrecorded_protected_prs`)に閉じてあり、判定ロジックの競合は無い。統合時に手を入れる
-のは (1) `run_a18` の引数(`deemed_since_commit`)と戻り値キー、(2) `run_and_report` の
-`run_a18` 呼び出し —— 本ラインは `run_a18_readonly(**run_kwargs)` に委譲しており、
-v2 が追加する引数はそのまま透過する、(3) `build_alert_embed` / `has_findings` / CLI の出力、
-の3点のみ。なお v2 が入れる `pr_number_from_subject` と本ラインの `deemed_pr_number` は
-同じ件名解析であり、統合後は片方に寄せてよい(どちらも件名の自己申告という限界を共有する)。
+**トレーラ v2 ライン(PR #84)との統合結果**: A-18-7 は独立した関数
+(`_decision_exists` / `decision_for_pr_number` / `check_unrecorded_protected_prs`)に閉じて
+あり、判定ロジックの競合は無かった。競合したのは `run_a18` / `run_and_report` の引数
+(`deemed_since_commit` と v2 の `verify_prs`)と `build_alert_embed` の field 追加位置だけで、
+どちらも併記で解決した。`run_and_report` は `run_a18_readonly(**run_kwargs)` に委譲するため
+v2 が追加した `verify_prs` はそのまま透過する。件名からの PR 番号抽出は v2 の
+`pr_number_from_subject` に寄せ、本ラインの重複定義は削除した(番号の解釈を二重に持たない)。
+A-18-7 は `PRVerifier` による PR 実在照合を掛けない —— 件名が偽なら対応する承認記録も引けず、
+「記録が無い」として同じ経路で拾われるため、追加の API 照合なしに偽装が検出される。
 
 **A-18-7 が拾えないもの**: PR 件名は自己申告であり(A-18-1/4 と同じ限界)、承認記録が DB の外に
 ある PR は「記録なし」と判定される。後者を例外扱いする必要が出たら `acknowledged_findings` と

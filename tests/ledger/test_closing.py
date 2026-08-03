@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
-from ryza.ledger import closing, posting, statements
+from ryza.ledger import _util, closing, posting, statements
 
 D = Decimal
 DAY = date(2026, 8, 3)
@@ -169,9 +169,15 @@ def _snapshot(conn, day: date) -> tuple[Decimal, str, dict]:
         return cur.fetchone()
 
 
-def _reclose(conn, run_id, through: date):
+def _reclose(conn, run_id, through: date, price_source=closing.no_price):
+    """既定は明示の縮退ソース(``no_price``)— 建玉を持たないシナリオ用。
+
+    ``price_source`` は必須引数なので「渡し忘れ」は型で落ちる(独立審査 新-8)。
+    評価替えを検証するテストは実際の終値を返すソースを明示的に渡すこと。
+    """
     return closing.reclose_stale(
-        conn, book_id="DEMO_FUND", through=through, run_id=run_id
+        conn, book_id="DEMO_FUND", through=through, run_id=run_id,
+        price_source=price_source,
     )
 
 
@@ -298,6 +304,224 @@ def test_nav_snapshot_records_producer_lineage(conn, run_id):
     assert after["input_refs"][closing.WATERMARK_KEY] > producer["input_refs"][
         closing.WATERMARK_KEY
     ]
+
+
+# ── as_of リプレイと過去日の MTM 再適用(独立審査 新-3)────────────────────────
+def _max_entry_id(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT coalesce(max(entry_id), 0) FROM ledger.journal_entries")
+        return cur.fetchone()[0]
+
+
+def _late_fill_scenario(conn, run_id) -> tuple[date, date]:
+    """審査 新-3 の実測ケースを再現する。
+
+    d0 を締めた**後**に d0 付けで 1000 株@1000 が記帳される(遅延約定)。市場の終値は
+    両日とも 1200 なので、d0 の建玉を原価のまま残すと d0 の NAV だけが 200,000 低く、
+    翌日 d1 の締めが時価に打ち直した瞬間に +2% の偽リターンが立つ(真値は 0%)。
+    """
+    d0, d1 = DAY, DAY + timedelta(days=1)
+    closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d0, price_source={}, run_id=run_id
+    )
+    posting.post_fill(
+        conn, book_id="DEMO_FUND", instrument_id=1001, side="buy",
+        qty=1000, price=1000, entry_date=d0, run_id=run_id,
+    )
+    closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d1, price_source={1001: 1200}, run_id=run_id
+    )
+    return d0, d1
+
+
+def _close_1200(instrument_id: int, day: date) -> Decimal:
+    return D(1200)
+
+
+def test_reclose_leaves_the_false_return_when_the_days_bar_is_missing(conn, run_id):
+    """(対照)**当日バー欠測**で再適用できない日は原価のまま = 審査実測の +2% を再現する。
+
+    固定するのは「価格ソースを渡し忘れた経路」ではなく「その日のバーが無い」現実的な
+    縮退である(独立審査 新-8: 渡し忘れ経路を対照に使うとそれを仕様として追認する)。
+    """
+    d0, d1 = _late_fill_scenario(conn, run_id)
+    changed = _reclose(conn, run_id, d1, price_source=closing.no_price)
+
+    item = next(c for c in changed if c["date"] == d0)
+    assert item["recon_invalidated"] is True and item["mtm_reapplied"] is False
+    assert item["mtm_pending"] is True and item["mtm_carried_forward"] is False
+    nav_d0, nav_d1 = _snapshot(conn, d0)[0], _snapshot(conn, d1)[0]
+    assert (nav_d0, nav_d1) == (D(10_000_000), D(10_200_000))
+    assert nav_d1 / nav_d0 - 1 == D("0.02")  # 恒久的な偽リターン
+    assert _snapshot(conn, d0)[2]["mtm_not_reapplied"] is True
+
+
+def test_reclose_reapplies_mtm_with_as_of_positions(conn, run_id):
+    """遅延約定日の建玉を as_of リプレイで復元し、その日の終値で評価替えする(新-3)。"""
+    d0, d1 = _late_fill_scenario(conn, run_id)
+    before = _max_entry_id(conn)
+
+    changed = closing.reclose_stale(
+        conn, book_id="DEMO_FUND", through=d1, run_id=run_id,
+        price_source=_close_1200,
+    )
+    item = next(c for c in changed if c["date"] == d0)
+    assert item["mtm_reapplied"] is True and item["restated"] is True
+
+    nav_d0, nav_d1 = _snapshot(conn, d0)[0], _snapshot(conn, d1)[0]
+    assert (nav_d0, nav_d1) == (D(10_200_000), D(10_200_000))
+    assert nav_d1 / nav_d0 - 1 == D(0)  # 偽リターンが消える
+
+    detail = _snapshot(conn, d0)[2]
+    assert detail["mtm_not_reapplied"] is False
+    assert detail["mtm_reapplied"]["delta"] == "200000"
+    assert detail["mtm_reapplied"]["priced_at"] == d0.isoformat()
+    assert detail["mtm_reapplied"]["positions"]["1001"] == {
+        "qty": "1000", "price": "1200",
+        "market_value": "1200000", "book_value": "1000000",
+    }
+    assert D(detail["assets"]) == D(10_200_000)  # 集計値も評価替え後で揃う
+    # 仕訳集計そのままの NAV を残し、nav = nav_from_journals + delta を検証可能にする(新-9)。
+    assert D(detail["nav_from_journals"]) == D(10_000_000)
+    assert D(detail["nav_from_journals"]) + D(detail["mtm_reapplied"]["delta"]) == nav_d0
+    assert D(detail["nav_from_journals"]) == statements.book_totals(
+        conn, "DEMO_FUND", d0
+    )["nav"]
+
+    # 仕訳は 1 本も書かない(過去日付への新規記帳の経路は作らない)。
+    assert _max_entry_id(conn) == before
+    # 冪等: 水位も NAV も動かないので次の再締めは同じ日を拾わない。
+    assert closing.reclose_stale(
+        conn, book_id="DEMO_FUND", through=d1, run_id=run_id, price_source=_close_1200
+    ) == []
+
+
+def test_reclose_keeps_reapplied_mtm_on_a_later_reclose(conn, run_id):
+    """2 回目の再締めが前回の評価替えを取りこぼさない(再適用は仕訳を残さないため)。
+
+    同じ日に今度は**建玉を動かさない**仕訳(出資)が遅れて立つ。今回の遅延仕訳だけを見て
+    「建玉は動いていない」と判断して集計だけをやり直すと、前回の評価替えが NAV から
+    消えて偽リターンが復活する。
+    """
+    d0, d1 = _late_fill_scenario(conn, run_id)
+    closing.reclose_stale(
+        conn, book_id="DEMO_FUND", through=d1, run_id=run_id, price_source=_close_1200
+    )
+    assert _snapshot(conn, d0)[0] == D(10_200_000)
+
+    _post_contribution(conn, run_id, d0, D(1_000_000))  # 建玉を動かさない遅延仕訳
+    changed = closing.reclose_stale(
+        conn, book_id="DEMO_FUND", through=d1, run_id=run_id, price_source=_close_1200
+    )
+    item = next(c for c in changed if c["date"] == d0)
+    # 戻り値の recon_invalidated は「今回の遅延仕訳が建玉を動かしたか」なので False。
+    # detail 側のフラグ(一度立ったら下ろさない)が再適用の根拠になる。
+    assert item["recon_invalidated"] is False
+    assert _snapshot(conn, d0)[2]["recon_invalidated"] is True
+    assert item["mtm_reapplied"] is True
+    assert _snapshot(conn, d0)[0] == D(11_200_000)  # 原価へ戻らない
+
+
+def test_reclose_carries_forward_mtm_when_the_bar_disappears(conn, run_id):
+    """一度再適用した日は、後の再締めで価格を引けなくても**原価へ戻さない**(新-7)。
+
+    再適用は仕訳を残さないので、引き継がずに集計だけをやり直すと NAV が取得原価へ
+    revert し、一度消した偽リターン(+2%)が復活する(審査実測)。
+    """
+    d0, d1 = _late_fill_scenario(conn, run_id)
+    closing.reclose_stale(
+        conn, book_id="DEMO_FUND", through=d1, run_id=run_id, price_source=_close_1200
+    )
+    assert _snapshot(conn, d0)[0] == D(10_200_000)
+
+    _post_contribution(conn, run_id, d0, D(1_000_000))  # 再締めを起こす遅延仕訳
+    changed = closing.reclose_stale(  # ← 今回はその日のバーが引けない
+        conn, book_id="DEMO_FUND", through=d1, run_id=run_id,
+        price_source=closing.no_price,
+    )
+    item = next(c for c in changed if c["date"] == d0)
+    assert item["mtm_carried_forward"] is True
+    assert item["mtm_reapplied"] is False and item["mtm_pending"] is False
+    assert _snapshot(conn, d0)[0] == D(11_200_000)  # 原価(11,000,000)へ戻らない
+
+    detail = _snapshot(conn, d0)[2]
+    assert detail["mtm_not_reapplied"] is False
+    assert detail["mtm_reapplied"]["carried_forward"] is True
+    assert detail["mtm_reapplied"]["delta"] == "200000"
+    assert D(detail["nav_from_journals"]) == D(11_000_000)
+
+
+def test_reclose_stays_at_cost_when_nothing_was_ever_reapplied(conn, run_id):
+    """引き継ぐ値も無い日は取得原価のまま(縮退の下限 — 部分適用しない)。"""
+    d0, d1 = _late_fill_scenario(conn, run_id)
+
+    changed = _reclose(conn, run_id, d1, price_source=closing.no_price)
+    item = next(c for c in changed if c["date"] == d0)
+    assert (item["mtm_reapplied"], item["mtm_carried_forward"], item["mtm_pending"]) == (
+        False, False, True
+    )
+    assert _snapshot(conn, d0)[0] == D(10_000_000)
+    detail = _snapshot(conn, d0)[2]
+    assert detail["mtm_not_reapplied"] is True and "mtm_reapplied" not in detail
+
+
+def test_reclose_leaves_capital_only_days_to_the_aggregate(conn, run_id):
+    """建玉が動いていない日は評価替えを打ち直さない(対象は recon_invalidated と同集合)。"""
+    closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=DAY, price_source={}, run_id=run_id
+    )
+    _post_contribution(conn, run_id, DAY, D(5_000_000))
+
+    changed = closing.reclose_stale(
+        conn, book_id="DEMO_FUND", through=DAY + timedelta(days=1), run_id=run_id,
+        price_source=_close_1200,
+    )
+    assert changed[0]["recon_invalidated"] is False
+    assert changed[0]["mtm_reapplied"] is False
+    assert _snapshot(conn, DAY)[0] == D(15_000_000)
+
+
+def test_replay_position_as_of_bounds_by_entry_date(conn, run_id):
+    """as_of は当日の仕訳を含み翌日の仕訳を除く。既定(None)は従来どおり全期間。"""
+    d0, d1 = DAY, DAY + timedelta(days=1)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=1001, side="buy",
+                      qty=100, price=500, entry_date=d0, run_id=run_id)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=1001, side="buy",
+                      qty=200, price=600, entry_date=d1, run_id=run_id)
+
+    replay = _util.replay_position
+    assert replay(conn, "DEMO_FUND", 1001, as_of=d0 - timedelta(days=1)) == (D(0), D(0))
+    assert replay(conn, "DEMO_FUND", 1001, as_of=d0) == (D(100), D(50_000))
+    assert replay(conn, "DEMO_FUND", 1001, as_of=d1) == (D(300), D(170_000))
+    assert replay(conn, "DEMO_FUND", 1001) == (D(300), D(170_000))  # 既存呼び出しの互換
+
+    # 売りの取り崩し(移動平均法)も as_of で切れる。
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=1001, side="sell",
+                      qty=150, price=700, entry_date=d1 + timedelta(days=1),
+                      run_id=run_id)
+    assert replay(conn, "DEMO_FUND", 1001, as_of=d1) == (D(300), D(170_000))
+    assert replay(conn, "DEMO_FUND", 1001)[0] == D(150)
+
+
+def test_replay_position_as_of_cuts_reversals_on_the_same_boundary(conn, run_id):
+    """逆仕訳も as_of で切る — securities_book_value と日付境界を揃える(差分計算の整合)。"""
+    d0, d1 = DAY, DAY + timedelta(days=1)
+    entry_id = posting.post_fill(
+        conn, book_id="DEMO_FUND", instrument_id=1001, side="buy",
+        qty=100, price=500, entry_date=d0, run_id=run_id,
+    )
+    posting.reverse_entry(
+        conn, entry_id=entry_id, reason="誤記帳の訂正(テスト)", run_id=run_id,
+        entry_date=d1,
+    )
+
+    book_value = _util.securities_book_value
+    # d0 時点: 逆仕訳はまだ立っていない → 数量も帳簿価額も生きている
+    assert _util.replay_position(conn, "DEMO_FUND", 1001, as_of=d0) == (D(100), D(50_000))
+    assert book_value(conn, "DEMO_FUND", 1001, as_of=d0) == D(50_000)
+    # d1 時点: 両方が消える(片側だけ消えると評価替えの差分が壊れる)
+    assert _util.replay_position(conn, "DEMO_FUND", 1001, as_of=d1) == (D(0), D(0))
+    assert book_value(conn, "DEMO_FUND", 1001, as_of=d1) == D(0)
 
 
 def _mk_evidence(cur) -> int:

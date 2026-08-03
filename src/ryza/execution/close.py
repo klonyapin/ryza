@@ -14,7 +14,10 @@
    ポジション照合(2)の両方が一致したときのみ confirmed
 4. ``ledger.closing.reclose_stale`` — 締めの**後**に同じ日付で立った仕訳がある日を
    水位(``detail.producer.input_refs``)で検出し、その日だけ NAV を再計算する
-   (独立審査 重要-2 / 再-1)。値が変わった日は ``risk.nav_daily`` 側も追随させる
+   (独立審査 重要-2 / 再-1)。値が変わった日は ``risk.nav_daily`` 側も追随させる。
+   建玉が後から動いた日は ``price_source``(当日の締めと同じ ``market.bars`` の日足)を
+   渡して**その日の終値で評価替えを再適用**する(独立審査 新-3 — 遅延約定日の建玉が
+   取得原価のまま残ることで立つ恒久的な偽リターンの根治)
 
 **NAV 二表の役割分担(T-015 統合時の設計リード裁定 2026-08-03)**:
 ``ledger.nav_snapshots`` が NAV の正(ledger が所有・T-015 の ``risk/daily.py`` は
@@ -37,7 +40,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Json
 
-from ryza.execution.demo import latest_close
+from ryza.execution.demo import close_on, latest_close
 from ryza.ledger import closing
 
 # 金額突合の許容誤差(丸め対策 — ledger.recon._VALUATION_TOL と同水準)。
@@ -168,6 +171,25 @@ def _make_price_source(
     return _price
 
 
+def _historical_price_source(conn: psycopg.Connection) -> Callable[[int, _date], Decimal | None]:
+    """再締めの評価替えに使う**過去日**の終値ソース(``closing.HistoricalPriceSource``)。
+
+    当日の締め(``_make_price_source``)と同じ ``market.bars`` の日足を引くが、二点違う:
+
+    1. **その日のバーだけを見る**(``close_on`` — 遡らない。独立審査 新-6)。遡り取得だと
+       別日の終値でその日を評価しながら ``priced_at`` にはその日を書く虚偽の証憑ができ、
+       当該日は以後 stale でないため誤価格が恒久固定される
+    2. 無いときは例外ではなく ``None`` を返す — 過去日のバーが取り込まれていないだけで
+       当日の締めごと落ちるのは fail-safe の向きが逆であり、``reclose_stale`` はその日の
+       再適用を諦めて ``mtm_not_reapplied``(または前回値の引き継ぎ)を残す
+    """
+
+    def _price(instrument_id: int, day: _date) -> Decimal | None:
+        return close_on(conn, int(instrument_id), day)
+
+    return _price
+
+
 def run_demo_close(
     conn: psycopg.Connection,
     *,
@@ -229,7 +251,8 @@ def run_demo_close(
     # 当日のスナップショットを先に確定させておけば、当日は水位が最新になり自動的に
     # 検出対象から外れる(自分自身を再締めしない)。
     reclosed = closing.reclose_stale(
-        conn, book_id=book_id, through=date, run_id=run_id
+        conn, book_id=book_id, through=date, run_id=run_id,
+        price_source=_historical_price_source(conn),
     )
     _sync_nav_daily_after_reclose(conn, book_id, reclosed, run_id)
 
@@ -299,6 +322,15 @@ def _sync_nav_daily_after_reclose(
         detail.update(
             reclose=history, positions_stale=True, restated=True, restated_by_run=run_id
         )
+        # その日の建玉を as_of リプレイで復元し終値で評価替えした NAV(独立審査 新-3)。
+        # **両方向に同期する**(独立審査 新-11): 立てるだけで戻さないと、再適用が外れた日で
+        # ledger 側(キーを落とす)と nav_daily のリネージが食い違う。
+        if item.get("mtm_reapplied") or item.get("mtm_carried_forward"):
+            detail["mtm_reapplied"] = True
+            detail["mtm_carried_forward"] = bool(item.get("mtm_carried_forward"))
+        else:
+            detail.pop("mtm_reapplied", None)
+            detail.pop("mtm_carried_forward", None)
         if item["recon_invalidated"]:
             # 一度立ったら下ろさない(nav_snapshots 側と同じ扱い)。
             detail["recon_invalidated"] = True

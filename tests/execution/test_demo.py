@@ -9,7 +9,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from ryza.execution.broker import EXPIRED, FILLED, REJECTED, BrokerOrder
-from ryza.execution.demo import DemoBroker, latest_close
+from ryza.execution.demo import DemoBroker, close_on, latest_close
 
 from .conftest import make_test_config
 
@@ -165,3 +165,20 @@ def test_latest_bar_ignores_future_dates(conn, insert_bar, today_jst):
     insert_bar(904, today_jst, close=Decimal(999), volume=Decimal(10_000))
     assert latest_close(conn, 904, yesterday) == Decimal(500)
     assert latest_close(conn, 904, today_jst) == Decimal(999)
+
+
+def test_close_on_does_not_walk_back_to_an_earlier_bar(conn, insert_bar, today_jst):
+    """``close_on`` はその日のバーだけを見る(遡らない — 独立審査 新-6)。
+
+    過去日の評価替えを打ち直す再締めが遡り取得を使うと、別日の終値で評価しながら
+    ``priced_at`` にはその日を書く虚偽の証憑ができる。``latest_close`` との違いを固定する。
+    """
+    from datetime import timedelta
+
+    two_days_ago = today_jst - timedelta(days=2)
+    yesterday = today_jst - timedelta(days=1)
+    insert_bar(905, two_days_ago, close=Decimal(900), volume=Decimal(10_000))
+
+    assert latest_close(conn, 905, yesterday) == Decimal(900)  # 遡る(ライブ執行の規約)
+    assert close_on(conn, 905, yesterday) is None  # 遡らない(過去日の評価替え)
+    assert close_on(conn, 905, two_days_ago) == Decimal(900)
