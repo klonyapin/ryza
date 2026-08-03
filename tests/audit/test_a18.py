@@ -492,10 +492,19 @@ def test_run_a18_with_conn_marks_refs_verified(repo, conn):
 
 
 def test_real_repo_trailers_resolve_without_conn():
-    """実リポジトリの履歴で A-18-1 が壊れていない(conn 無しの従来経路)。"""
+    """実リポジトリの履歴で A-18-1 が壊れていない(conn 無しの従来経路)。
+
+    CI の浅い checkout(fetch-depth 1)では批准コミットが存在せず検査自体が
+    成立しないためスキップする(fetch-depth: 0 化は a18-ack-l1 ラインで対応)。
+    """
     root = Path(__file__).resolve().parents[2]
     gov = a18.load_governance(root)
-    violations, checked, findings = a18.check_protected_commits(root, gov)
+    try:
+        violations, checked, findings = a18.check_protected_commits(root, gov)
+    except ValueError as exc:
+        if "発効基準コミット" in str(exc):
+            pytest.skip(f"浅い clone のため実リポジトリ検査不能: {exc}")
+        raise
     assert isinstance(violations, list) and checked >= 0 and isinstance(findings, list)
 
 
