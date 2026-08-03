@@ -378,9 +378,14 @@ def _build_restatement_embed(
             "value": (
                 f"NAV {r['nav_before']} → {r['nav_after']}"
                 f"(status={r['status']} 据え置き / 建玉明細は無効化)"
+                # 分岐は**累積の状態**(mtm_pending)で行う — 今回の run の
+                # recon_invalidated で切ると、2 回目以降の再締めで再適用に失敗した日に
+                # 警告が一切出ない(独立審査 新-12)。
                 + ("\n評価替えを当日終値で再適用(as_of リプレイ)" if r.get("mtm_reapplied")
-                   else "\n⚠️ 終値が無く評価替えは未再適用(建玉は取得原価)"
-                   if r.get("recon_invalidated") else "")
+                   else "\n評価替えは前回の再適用値を引き継ぎ(当日バー欠測)"
+                   if r.get("mtm_carried_forward")
+                   else "\n⚠️ 当日バーが無く評価替え未再適用(建玉は取得原価)"
+                   if r.get("mtm_pending") else "")
                 + ("\n⚠️ nav_daily に行が無く risk 側は未追随" if r["nav_daily_missing"] else "")
             )[:1024],
             "inline": False,

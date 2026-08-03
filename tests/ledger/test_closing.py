@@ -169,9 +169,15 @@ def _snapshot(conn, day: date) -> tuple[Decimal, str, dict]:
         return cur.fetchone()
 
 
-def _reclose(conn, run_id, through: date):
+def _reclose(conn, run_id, through: date, price_source=closing.no_price):
+    """既定は明示の縮退ソース(``no_price``)— 建玉を持たないシナリオ用。
+
+    ``price_source`` は必須引数なので「渡し忘れ」は型で落ちる(独立審査 新-8)。
+    評価替えを検証するテストは実際の終値を返すソースを明示的に渡すこと。
+    """
     return closing.reclose_stale(
-        conn, book_id="DEMO_FUND", through=through, run_id=run_id
+        conn, book_id="DEMO_FUND", through=through, run_id=run_id,
+        price_source=price_source,
     )
 
 
@@ -332,13 +338,18 @@ def _close_1200(instrument_id: int, day: date) -> Decimal:
     return D(1200)
 
 
-def test_reclose_without_price_source_leaves_the_false_return(conn, run_id):
-    """(対照)価格ソース無しの再締めは原価のまま = 審査実測の +2% を再現する。"""
+def test_reclose_leaves_the_false_return_when_the_days_bar_is_missing(conn, run_id):
+    """(対照)**当日バー欠測**で再適用できない日は原価のまま = 審査実測の +2% を再現する。
+
+    固定するのは「価格ソースを渡し忘れた経路」ではなく「その日のバーが無い」現実的な
+    縮退である(独立審査 新-8: 渡し忘れ経路を対照に使うとそれを仕様として追認する)。
+    """
     d0, d1 = _late_fill_scenario(conn, run_id)
-    changed = _reclose(conn, run_id, d1)
+    changed = _reclose(conn, run_id, d1, price_source=closing.no_price)
 
     item = next(c for c in changed if c["date"] == d0)
     assert item["recon_invalidated"] is True and item["mtm_reapplied"] is False
+    assert item["mtm_pending"] is True and item["mtm_carried_forward"] is False
     nav_d0, nav_d1 = _snapshot(conn, d0)[0], _snapshot(conn, d1)[0]
     assert (nav_d0, nav_d1) == (D(10_000_000), D(10_200_000))
     assert nav_d1 / nav_d0 - 1 == D("0.02")  # 恒久的な偽リターン
@@ -370,6 +381,12 @@ def test_reclose_reapplies_mtm_with_as_of_positions(conn, run_id):
         "market_value": "1200000", "book_value": "1000000",
     }
     assert D(detail["assets"]) == D(10_200_000)  # 集計値も評価替え後で揃う
+    # 仕訳集計そのままの NAV を残し、nav = nav_from_journals + delta を検証可能にする(新-9)。
+    assert D(detail["nav_from_journals"]) == D(10_000_000)
+    assert D(detail["nav_from_journals"]) + D(detail["mtm_reapplied"]["delta"]) == nav_d0
+    assert D(detail["nav_from_journals"]) == statements.book_totals(
+        conn, "DEMO_FUND", d0
+    )["nav"]
 
     # 仕訳は 1 本も書かない(過去日付への新規記帳の経路は作らない)。
     assert _max_entry_id(conn) == before
@@ -405,17 +422,45 @@ def test_reclose_keeps_reapplied_mtm_on_a_later_reclose(conn, run_id):
     assert _snapshot(conn, d0)[0] == D(11_200_000)  # 原価へ戻らない
 
 
-def test_reclose_skips_mtm_when_close_price_is_missing(conn, run_id):
-    """終値が無い日は再適用せず mtm_not_reapplied を維持する(部分適用しない)。"""
-    d0, d1 = _late_fill_scenario(conn, run_id)
+def test_reclose_carries_forward_mtm_when_the_bar_disappears(conn, run_id):
+    """一度再適用した日は、後の再締めで価格を引けなくても**原価へ戻さない**(新-7)。
 
-    changed = closing.reclose_stale(
+    再適用は仕訳を残さないので、引き継がずに集計だけをやり直すと NAV が取得原価へ
+    revert し、一度消した偽リターン(+2%)が復活する(審査実測)。
+    """
+    d0, d1 = _late_fill_scenario(conn, run_id)
+    closing.reclose_stale(
+        conn, book_id="DEMO_FUND", through=d1, run_id=run_id, price_source=_close_1200
+    )
+    assert _snapshot(conn, d0)[0] == D(10_200_000)
+
+    _post_contribution(conn, run_id, d0, D(1_000_000))  # 再締めを起こす遅延仕訳
+    changed = closing.reclose_stale(  # ← 今回はその日のバーが引けない
         conn, book_id="DEMO_FUND", through=d1, run_id=run_id,
-        price_source=lambda iid, day: None,
+        price_source=closing.no_price,
     )
     item = next(c for c in changed if c["date"] == d0)
-    assert item["mtm_reapplied"] is False
-    assert _snapshot(conn, d0)[0] == D(10_000_000)  # 原価のまま(縮退)
+    assert item["mtm_carried_forward"] is True
+    assert item["mtm_reapplied"] is False and item["mtm_pending"] is False
+    assert _snapshot(conn, d0)[0] == D(11_200_000)  # 原価(11,000,000)へ戻らない
+
+    detail = _snapshot(conn, d0)[2]
+    assert detail["mtm_not_reapplied"] is False
+    assert detail["mtm_reapplied"]["carried_forward"] is True
+    assert detail["mtm_reapplied"]["delta"] == "200000"
+    assert D(detail["nav_from_journals"]) == D(11_000_000)
+
+
+def test_reclose_stays_at_cost_when_nothing_was_ever_reapplied(conn, run_id):
+    """引き継ぐ値も無い日は取得原価のまま(縮退の下限 — 部分適用しない)。"""
+    d0, d1 = _late_fill_scenario(conn, run_id)
+
+    changed = _reclose(conn, run_id, d1, price_source=closing.no_price)
+    item = next(c for c in changed if c["date"] == d0)
+    assert (item["mtm_reapplied"], item["mtm_carried_forward"], item["mtm_pending"]) == (
+        False, False, True
+    )
+    assert _snapshot(conn, d0)[0] == D(10_000_000)
     detail = _snapshot(conn, d0)[2]
     assert detail["mtm_not_reapplied"] is True and "mtm_reapplied" not in detail
 

@@ -40,7 +40,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Json
 
-from ryza.execution.demo import latest_close
+from ryza.execution.demo import close_on, latest_close
 from ryza.ledger import closing
 
 # 金額突合の許容誤差(丸め対策 — ledger.recon._VALUATION_TOL と同水準)。
@@ -174,14 +174,18 @@ def _make_price_source(
 def _historical_price_source(conn: psycopg.Connection) -> Callable[[int, _date], Decimal | None]:
     """再締めの評価替えに使う**過去日**の終値ソース(``closing.HistoricalPriceSource``)。
 
-    当日の締め(``_make_price_source``)と同じ ``market.bars`` の日足を引くが、無いときは
-    例外ではなく ``None`` を返す — 過去日のバーが取り込まれていないだけで当日の締めごと
-    落ちるのは fail-safe の向きが逆であり、``reclose_stale`` はその日の再適用を諦めて
-    ``mtm_not_reapplied`` を残す(独立審査 新-3 の是正の縮退動作)。
+    当日の締め(``_make_price_source``)と同じ ``market.bars`` の日足を引くが、二点違う:
+
+    1. **その日のバーだけを見る**(``close_on`` — 遡らない。独立審査 新-6)。遡り取得だと
+       別日の終値でその日を評価しながら ``priced_at`` にはその日を書く虚偽の証憑ができ、
+       当該日は以後 stale でないため誤価格が恒久固定される
+    2. 無いときは例外ではなく ``None`` を返す — 過去日のバーが取り込まれていないだけで
+       当日の締めごと落ちるのは fail-safe の向きが逆であり、``reclose_stale`` はその日の
+       再適用を諦めて ``mtm_not_reapplied``(または前回値の引き継ぎ)を残す
     """
 
     def _price(instrument_id: int, day: _date) -> Decimal | None:
-        return latest_close(conn, int(instrument_id), day)
+        return close_on(conn, int(instrument_id), day)
 
     return _price
 
@@ -318,9 +322,15 @@ def _sync_nav_daily_after_reclose(
         detail.update(
             reclose=history, positions_stale=True, restated=True, restated_by_run=run_id
         )
-        if item.get("mtm_reapplied"):
-            # その日の建玉を as_of リプレイで復元し終値で評価替えした NAV(独立審査 新-3)。
+        # その日の建玉を as_of リプレイで復元し終値で評価替えした NAV(独立審査 新-3)。
+        # **両方向に同期する**(独立審査 新-11): 立てるだけで戻さないと、再適用が外れた日で
+        # ledger 側(キーを落とす)と nav_daily のリネージが食い違う。
+        if item.get("mtm_reapplied") or item.get("mtm_carried_forward"):
             detail["mtm_reapplied"] = True
+            detail["mtm_carried_forward"] = bool(item.get("mtm_carried_forward"))
+        else:
+            detail.pop("mtm_reapplied", None)
+            detail.pop("mtm_carried_forward", None)
         if item["recon_invalidated"]:
             # 一度立ったら下ろさない(nav_snapshots 側と同じ扱い)。
             detail["recon_invalidated"] = True

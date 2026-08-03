@@ -7,7 +7,7 @@ E2E: gate_and_record(pass)→ runner → run_demo_close → risk.nav_daily 更�
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 from ryza.execution.close import reconcile_executions, run_demo_close
@@ -331,9 +331,16 @@ def test_reclose_reapplies_mtm_from_bars_and_kills_the_false_return(
         assert cur.fetchone()[0]["mtm_reapplied"] is True
 
 
-def test_reclose_degrades_when_the_days_bar_is_missing(conn, run_id, insert_bar):
-    """その日の終値が bars に無ければ再適用せず、注記だけ残して縮退する。"""
+def test_reclose_does_not_price_a_day_with_another_days_bar(conn, run_id, insert_bar):
+    """**当日バー欠測**の日は前日以前の終値で評価しない(独立審査 新-6)。
+
+    遡り取得(``latest_close``)を使うと、別日の終値でその日を評価しながら ``priced_at``
+    にはその日を書く**虚偽の証憑**ができ、しかも当該日は以後 stale でないため誤価格が
+    恒久固定される(審査実測: 前日終値 900 で NAV 9,900,000・returns ``[-0.010, +0.030]``)。
+    再締めの価格ソースは ``close_on``(その日のバーだけ)を使う。
+    """
     d0, d1 = _G_DAYS[0], _G_DAYS[1]
+    insert_bar(1, d0 - timedelta(days=1), close=Decimal(900), volume=Decimal(1_000_000))
     _close(conn, run_id, d0)  # d0 のバー無し(建玉も無いので締めは通る)
     posting.post_fill(
         conn, book_id="DEMO_FUND", instrument_id=1, side="buy",
@@ -344,14 +351,25 @@ def test_reclose_degrades_when_the_days_bar_is_missing(conn, run_id, insert_bar)
 
     result = _close(conn, run_id, d1)
     item = next(r for r in result["reclose"] if r["date"] == d0)
-    assert item["recon_invalidated"] is True and item["mtm_reapplied"] is False
+    assert item["recon_invalidated"] is True
+    assert item["mtm_reapplied"] is False and item["mtm_pending"] is True
+    assert item["nav_after"] == Decimal(10_000_000)  # 前日終値 900 で評価しない
     with conn.cursor() as cur:
         cur.execute(
             "SELECT detail FROM ledger.nav_snapshots "
             "WHERE book_id = 'DEMO_FUND' AND snap_date = %s",
             (d0,),
         )
-        assert cur.fetchone()[0]["mtm_not_reapplied"] is True
+        detail = cur.fetchone()[0]
+    assert detail["mtm_not_reapplied"] is True and "mtm_reapplied" not in detail
+    # nav_daily 側も同期して立てっぱなしにしない(独立審査 新-11)。
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT detail FROM risk.nav_daily "
+            "WHERE book_id = 'DEMO_FUND' AND nav_date = %s",
+            (d0,),
+        )
+        assert "mtm_reapplied" not in cur.fetchone()[0]
 
 
 def _post_late_entry(conn, run_id, day, lines, description):
