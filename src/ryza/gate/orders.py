@@ -200,12 +200,15 @@ def gate_and_record(
     ips: IPSConfig | None = None,
     mandates: dict[str, Mandate] | None = None,
     trade_date: date | None = None,
+    thesis_id: int | None = None,
 ) -> tuple[int, int, GateResult]:
     """ゲート評価 → gate_log 記帳 → orders 行作成を1トランザクションで行う唯一の入口。
 
     - 取引状態(``ops.trading_state``)・ポジション・当日売買代金・リスク状態は DB から読む
     - ``nav``/``cash`` は評価エンジン(T-015)の管轄のため呼び出し側が渡す
       (None なら fail-closed で block)
+    - ``thesis_id``: FM の論拠(``trading.fm_theses``・T-017)。FM 経路は必ず渡す。
+      委員会の例外取引など FM 由来でない注文は None(0018 の列コメント参照)
     - 返り値は ``(order_id, gate_log_id, GateResult)``。コミットは呼び出し側
 
     verdict pass/warn → status='passed'、block → status='blocked'(端状態)。
@@ -264,8 +267,8 @@ def gate_and_record(
             """
             INSERT INTO trading.orders
                 (book_id, fm, instrument_id, side, qty, order_type, limit_price,
-                 ref_price, status, gate_log_id, run_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 ref_price, status, gate_log_id, thesis_id, run_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -279,6 +282,7 @@ def gate_and_record(
                 proposal.ref_price,
                 status,
                 gate_log_id,
+                thesis_id,
                 run_id,
             ),
         )
