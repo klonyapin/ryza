@@ -45,6 +45,7 @@ ALL_PAGES = [
     "組織",
     "規則",
     "役員室",
+    "開発室",
     "開発ステータス",
 ]
 
@@ -149,6 +150,16 @@ def _seed(conn, run, *, sufficient: bool = True) -> None:
             VALUES ('approval', %s, false, %s)
             """,
             (Jsonb({"title": "承認依頼: T-018"}), run.run_id),
+        )
+        # 開発室(0024)。追記オンリーのため残留行はトリガを外して消す(rollback で復元)。
+        cur.execute("ALTER TABLE ops.dev_chat DISABLE TRIGGER USER")
+        cur.execute("DELETE FROM ops.dev_chat")
+        cur.execute("ALTER TABLE ops.dev_chat ENABLE TRIGGER USER")
+        cur.execute(
+            """
+            INSERT INTO ops.dev_chat (sender, body) VALUES
+                ('representative', '代表からの連絡'), ('design_lead', '設計リードの返信')
+            """
         )
 
 
@@ -408,3 +419,33 @@ def test_approvals_summary_row_counts_and_oldest_age(app):
     text = _texts(app("承認・通知"))
     assert "未配送の通知" in text
     assert "最古" in text
+
+
+# ── 開発室(0024・代表指示 2026-08-03)────────────────────────────────────────
+def test_dev_chat_declares_the_asynchronous_contract(app):
+    """ページ冒頭で「非同期・実働はセッション側」を明示する(代表の期待値管理)。"""
+    captions = [str(c.value) for c in app("開発室").caption]
+    notice = next((c for c in captions if "設計リードへの連絡窓口" in c), None)
+    assert notice is not None, captions
+    assert "非同期" in notice and "セッション側" in notice
+
+
+def test_dev_chat_renders_thread_in_chronological_order(conn, app):
+    bodies = [str(m.value) for m in app("開発室").markdown]
+    assert "代表からの連絡" in bodies and "設計リードの返信" in bodies
+    # 代表 → 設計リードの順(新しい順にしない)。
+    assert bodies.index("代表からの連絡") < bodies.index("設計リードの返信")
+
+
+def test_dev_chat_shows_relay_state_of_representative_messages(app):
+    captions = [str(c.value) for c in app("開発室").caption]
+    assert any("中継待ち" in c for c in captions), captions
+
+
+def test_dev_chat_input_appends_to_the_thread(conn, app):
+    at = app("開発室")
+    at.chat_input[0].set_value("追加の連絡").run()
+    assert not at.exception
+    from ryza.governance import devchat
+
+    assert devchat.fetch_thread(conn)[-1].body == "追加の連絡"
