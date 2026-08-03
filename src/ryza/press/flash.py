@@ -7,6 +7,10 @@
 
 **決定論の境界**: 採否閾値・レート上限（3本/時・12本/日）・まとめ速報への統合・的中判定は
 すべて決定論コードが行う。LLM は報道価値スコアと記事案を出すだけ。
+
+**データ境界**（reminders ``press-material-fence``）: トリガの ``summary`` / ``source`` は
+外部由来になり得る（editor が書いた市場観の変化の記述、異常検知・ルール側の文字列）。
+一次判定・執筆とも、これらは ``writer`` と同じフェンスの内側にだけ載せる。
 """
 
 from __future__ import annotations
@@ -24,9 +28,10 @@ from ryza.press import embeds
 from ryza.press.config import PressConfig
 from ryza.press.images import ImageResult
 from ryza.press.linter import Topic, lint_topic
-from ryza.press.writer import WriteResult, write_flash
+from ryza.press.writer import FENCE_NOTICE, WriteResult, write_flash
 from ryza.provenance import Run, record
 from ryza.research.llm import StructuredLLM
+from ryza.research.prompting import fenced_json
 
 AGENT = "press"
 
@@ -184,17 +189,31 @@ class FlashResult:
 def _triage(
     llm: StructuredLLM, trigger: FlashTrigger, *, model: str
 ) -> tuple[float, str]:
-    """軽量 LLM の一次判定（報道価値 0-100・種別）。"""
+    """軽量 LLM の一次判定（報道価値 0-100・種別）。
+
+    ``summary`` / ``source`` は外部由来になり得る（market_view のトリガは editor が書いた
+    変化の記述を、anomaly/rule 由来のトリガは検知側の文字列を運ぶ）ためフェンスに入れる
+    （データ境界・reminders ``press-material-fence``）。``magnitude`` / ``refs`` は
+    こちらの決定論データ（数値・整数）なので外に置く。閾値判定は決定論コード側にあり、
+    ここでの注入は「報道価値を 100 と答えさせる」形で効くため、軽量モデルでも境界は要る。
+    """
     import json
 
     prompt = json.dumps(
         {"task": "この速報トリガの報道価値を 0-100 で採点し種別(fact/prediction)を返せ。",
-         "trigger": {"summary": trigger.summary, "source": trigger.source,
-                     "magnitude": trigger.magnitude, "refs": trigger.refs}},
+         "trigger": fenced_json(
+             {"summary": trigger.summary, "source": trigger.source},
+             tag="flash_trigger",
+         ),
+         "magnitude": trigger.magnitude,
+         "refs": trigger.refs},
         ensure_ascii=False,
     )
     result = llm.complete(
-        system="あなたは報道部の一次トリアージ。事実か予兆かを見分け、報道価値を数値化する。",
+        system=(
+            "あなたは報道部の一次トリアージ。事実か予兆かを見分け、報道価値を数値化する。"
+            "\n\n" + FENCE_NOTICE
+        ),
         user=prompt, schema=TRIAGE_SCHEMA,
         task_type="press.flash.triage", model_tier="light", model=model,
     )

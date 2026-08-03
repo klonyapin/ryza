@@ -329,6 +329,26 @@ def _pad(base: str, n: int) -> str:
     return (base * (n // len(base) + 1))[:n]
 
 
+def _unfence_material(raw: Any) -> dict[str, Any]:
+    """フェンス済み素材ブロック(``<<<material>>> … <<<end>>>``)の中身を dict で返す。
+
+    形が崩れていれば空 dict(dry-run は「合法な最小出力」を返せればよく、素材が読めない
+    ことでスモークを落とさない)。
+    """
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str):
+        return {}
+    lines = raw.splitlines()
+    if len(lines) < 3:
+        return {}
+    try:
+        parsed = json.loads("\n".join(lines[1:-1]))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 class DryRunProvider:
     """``jobs.daily --dry-run`` 用の決定論プロバイダ(実 API を呼ばない)。
 
@@ -377,8 +397,12 @@ class DryRunProvider:
             data = json.loads(user)
         except json.JSONDecodeError:
             data = {}
-        material = data.get("material", {}) if isinstance(data, dict) else {}
-        refs = [int(x) for x in (material.get("refs") or [])]
+        if not isinstance(data, dict):
+            data = {}
+        # 素材はフェンスの内側にしか無い(``ryza.press.writer`` のデータ境界)。実 LLM と
+        # 同じく内側を読む。引用してよい doc_id はフェンス外の決定論データから取る。
+        material = _unfence_material(data.get("material"))
+        refs = [int(x) for x in (data.get("citable_source_ids") or [])]
         title = str(material.get("title", "トピック"))
         valley_level = 1 if refs else 2
         valley_refs = refs[:1] if refs else []

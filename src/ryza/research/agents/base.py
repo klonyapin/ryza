@@ -6,6 +6,8 @@ research_reports 保存 + リネージ」の同じ骨格を持つ純関数的ジ
 
 - ``load_persona``: ``personas/analyst-<name>/system.md`` を読む(プロンプト資産・PR ゲート対象)。
 - ``build_system_prompt``: 人格 + データ境界の注意書き(``FENCE_NOTICE``)。
+- ``fenced_json``: ``ryza.research.prompting`` の再輸出(報道部・FM と共有する境界処理。
+  ここに定義があった名残で本モジュール経由の import が残っているため別名を残す)。
 - ``fetch_triage_docs``: ``docs.triage_queue`` から担当カテゴリの文書を取る(担当キュー)。
 - ``load_document_bodies``: プロンプトに載せる本文を取る。
 - ``current_view_summary``: 現在の市場観を LLM 入力用に要約する。
@@ -33,7 +35,12 @@ from psycopg.types.json import Jsonb
 
 from ryza.provenance import Run, record
 from ryza.research.market_view import MarketViewState, load_current
-from ryza.research.prompting import FENCE_CLOSE, fence_open, fenced_block
+from ryza.research.prompting import (
+    FENCE_CLOSE,
+    fence_open,
+    fenced_block,
+    fenced_json,
+)
 from ryza.research.schemas import SCHEMAS, SchemaError, validate
 
 _PERSONA_ROOT = Path(__file__).resolve().parents[4] / "personas"
@@ -73,17 +80,6 @@ def build_system_prompt(name: str) -> str:
     parts = [persona] if persona else []
     parts.append(FENCE_NOTICE)
     return "\n\n---\n\n".join(parts)
-
-
-def fenced_json(obj: Any, *, tag: str) -> str:
-    """外部由来の構造化データ(過去の LLM 出力など)を JSON 化してフェンスで囲む。
-
-    値の中の文字列が指示として読まれないようにするための境界。JSON の構造そのものは
-    境界にならない(審査 C-3/C-13)。
-    """
-    return fenced_block(
-        json.dumps(obj, ensure_ascii=False, sort_keys=True), tag=tag
-    )
 
 
 @dataclass(frozen=True)
