@@ -83,7 +83,9 @@ def _default_ingest_sources() -> list[tuple[str, IngestSource]]:
 
     return [
         ("jquants", lambda as_of: jquants.main(["--date", _date(as_of)])),
-        ("tdnet", lambda as_of: tdnet.main([])),
+        # tdnet は日付範囲取得(対象日+前日)。recent.rss だと決算集中日(1000件超/日)に
+        # 日次 1 回の実行では取りこぼすため(tdnet.py の既定 URL 参照)。
+        ("tdnet", lambda as_of: tdnet.main(["--date", _date(as_of)])),
         ("edinet", lambda as_of: edinet.main(["--date", _date(as_of)])),
         ("news_rss", lambda as_of: news_rss.main([])),
         ("fred", lambda as_of: fred.main([])),
