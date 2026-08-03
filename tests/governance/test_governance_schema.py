@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from ryza.db.conn import connect
+from ryza.governance.decisions import RESERVED_KIND_BY_MATTER
 from ryza.governance.personas import assume_role, recent_stances, record_stance
 from ryza.provenance import start_run
 
@@ -314,14 +315,11 @@ def test_blind_mode_does_not_resurrect_retracted_stances(conn, run_id):
 
 
 # ── decisions の決定語彙(0019・定款 v0.4 第3条)──────────────────────────
-# 定款第3条の3専決事項(config/governance.yaml の representative_reserved)と
-# decisions.kind の対応。**governance.yaml に専決事項を足したらここも足す** —
+# 定款第3条の3専決事項と decisions.kind の対応表は
+# ``ryza.governance.decisions.RESERVED_KIND_BY_MATTER`` が単一の正
+# (writer 側の事前検証と DB の CHECK が別々の対応表を持つと乖離するため)。
+# **governance.yaml に専決事項を足したらそこに足す** —
 # test_reserved_matters_cover_governance_yaml が漏れを検出する。
-RESERVED_KIND_BY_MATTER = {
-    "constitution_amendment": "constitution",  # 現 kind 語彙には未登録(0019 で先回り列挙)
-    "live_money": "budget",
-    "kill_switch_resume": "breaker_resume",
-}
 
 
 def _new_decision(
