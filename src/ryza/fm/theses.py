@@ -1,6 +1,6 @@
 """theses — FM の提案記録 ``trading.fm_theses`` と証憑の point-in-time 検証(T-017)。
 
-役割は3つ:
+役割は4つ:
 
 1. **記録の唯一の入口** ``record_thesis``: 反証条件(invalidation)と証憑(evidence_refs)を
    欠いた提案を保存させない。スキーマ側の CHECK と二重の防御にするのは、アプリ層でしか
@@ -11,6 +11,9 @@
 3. **判断履歴の注入** ``recent_theses``: FM 別・新しい順に、**ゲート判定の結果つき**で
    読み出す(orders.thesis_id → orders.status / compliance.gate_log)。block された案が
    次回プロンプトの学習材料になる(指示書6・7。governance.stances と同じ思想)
+4. **検疫** ``quarantine_thesis``: 汚染が判明した提案を再注入の対象から外す
+   (``trading.fm_theses_quarantine`` — 追記オンリーと両立する封じ込め。fm_theses は
+   書き換えず、読出し側 3 が除外する。独立役員審査 T-017 C-3)
 
 証憑参照(evidence_refs)の語彙 — いずれも ``kind`` で分岐する JSON オブジェクト:
 
@@ -74,22 +77,28 @@ class ThesisRecord:
 def _ref_lookup(ref: dict[str, Any]) -> tuple[str, tuple[Any, ...], str]:
     """証憑参照 → (SQL, パラメータ, 表示名)。語彙違反は ``ThesisError``。
 
-    SQL はいずれも「参照先の最小 as_of」を1列で返す(行が無ければ NULL)。最小を採るのは
-    改定(indicators の revision)・再取得(bars の as_of 複数)で最も早く知り得た時点を
-    point-in-time の基準にするため。
+    SQL はいずれも **2列**を返す(行が無ければ NULL):
+
+    1. 参照先の最小 ``as_of``(知り得た時点)。最小を採るのは改定(indicators の revision)・
+       再取得(bars の as_of 複数)で最も早く知り得た時点を point-in-time の基準にするため
+    2. 参照先の最大 ``ts``(**対象時点** — bar / indicator のみ。文書系は NULL)。
+       ts は WHERE の等値条件でもあるが、比較を DB 側に寄せて timestamptz として返させる
+       のは、文字列の ts をアプリ側でパースして tz 有無を取り違えるのを避けるため
+       (独立役員審査 T-017 C-6)
     """
     kind = ref.get("kind")
     if kind == "document":
         doc_id = _require_int(ref, "doc_id")
         return (
-            "SELECT min(as_of) FROM docs.documents WHERE doc_id = %s",
+            "SELECT min(as_of), NULL::timestamptz FROM docs.documents WHERE doc_id = %s",
             (doc_id,),
             f"document(doc_id={doc_id})",
         )
     if kind == "research_report":
         report_id = _require_int(ref, "report_id")
         return (
-            "SELECT min(as_of) FROM docs.research_reports WHERE report_id = %s",
+            "SELECT min(as_of), NULL::timestamptz FROM docs.research_reports "
+            "WHERE report_id = %s",
             (report_id,),
             f"research_report(report_id={report_id})",
         )
@@ -100,7 +109,7 @@ def _ref_lookup(ref: dict[str, Any]) -> tuple[str, tuple[Any, ...], str]:
         if ts is None:
             raise ThesisError(f"証憑参照 bar に ts が無い: {ref!r}")
         return (
-            "SELECT min(as_of) FROM market.bars "
+            "SELECT min(as_of), max(ts) FROM market.bars "
             "WHERE instrument_id = %s AND timeframe = %s AND ts = %s",
             (instrument_id, timeframe, ts),
             f"bar(instrument_id={instrument_id}, ts={ts})",
@@ -111,7 +120,8 @@ def _ref_lookup(ref: dict[str, Any]) -> tuple[str, tuple[Any, ...], str]:
         if not series_code or ts is None:
             raise ThesisError(f"証憑参照 indicator に series_code/ts が無い: {ref!r}")
         return (
-            "SELECT min(as_of) FROM market.indicators WHERE series_code = %s AND ts = %s",
+            "SELECT min(as_of), max(ts) FROM market.indicators "
+            "WHERE series_code = %s AND ts = %s",
             (str(series_code), ts),
             f"indicator({series_code} @ {ts})",
         )
@@ -133,6 +143,13 @@ def validate_evidence_refs(
 ) -> list[dict[str, Any]]:
     """証憑参照を検証して正規化リストを返す(全件 as_of 以前に存在すること)。
 
+    検証は2つの時点に対して行う(独立役員審査 T-017 C-6):
+
+    - **as_of(知り得た時点)**: 参照先が判断時点より後に取り込まれていないか
+    - **ts(対象時点 — bar / indicator)**: 参照している足・指標そのものが判断時点より
+      未来のものでないか。バックフィルや誤登録では「as_of は過去だが ts は未来」の行が
+      作れてしまい、as_of の検査だけでは未来バーの参照を検知できない
+
     空リストは拒否(証憑なしの提案は作らない)。違反は ``EvidenceError`` に全件列挙する
     — 1件目で止めないのは、LLM(Ben)の出力を1回で全て直せる形で返すため。
     """
@@ -153,6 +170,7 @@ def validate_evidence_refs(
             cur.execute(sql, params)
             row = cur.fetchone()
         found = row[0] if row else None
+        ref_ts = row[1] if row else None
         if found is None:
             problems.append(f"{label}: 証憑が存在しない(参照先の行なし)")
             continue
@@ -160,6 +178,12 @@ def validate_evidence_refs(
             problems.append(
                 f"{label}: 証憑の as_of {found.isoformat()} が判断時点 "
                 f"{as_of.isoformat()} より新しい(未来情報の混入 — 不変原則4)"
+            )
+            continue
+        if ref_ts is not None and ref_ts > as_of:
+            problems.append(
+                f"{label}: 証憑の対象時点 ts {ref_ts.isoformat()} が判断時点 "
+                f"{as_of.isoformat()} より後(未来のバー・指標の参照 — 不変原則4)"
             )
             continue
         normalized.append(dict(raw))
@@ -241,6 +265,127 @@ def record_thesis(
         return cur.fetchone()[0]
 
 
+# ── 検疫(プロンプト汚染の封じ込め — 独立役員審査 T-017 C-3)────────────────────
+# 再注入の対象から外す thesis を指す追記オンリー表(migrations/0023)。fm_theses 自体は
+# 書き換えない(判断の履歴は不変)。除外は**読出し側**の責務であり、注入経路
+# (recent_theses / open_theses_by_instrument)の SQL に共通で入る述語がこれである。
+_NOT_QUARANTINED = """
+              AND NOT EXISTS (
+                  SELECT 1 FROM trading.fm_theses_quarantine q
+                  WHERE q.thesis_id = t.thesis_id
+              )
+"""
+
+
+def quarantine_thesis(
+    conn: psycopg.Connection,
+    thesis_id: int,
+    *,
+    reason: str,
+    quarantined_by: str,
+    run_id: int | None = None,
+) -> int:
+    """提案を検疫する(以後、着任プロンプトへ再注入しない)。
+
+    汚染が判明した提案を封じ込める唯一の入口。当面の登録は**人手**(この関数の直接呼出、
+    または同等の SQL)で行う — 自動検出は誤検知で判断履歴を静かに欠落させるため、
+    判断を経路に残す(0023 の判断3)。
+
+    既に検疫済みの thesis を再度渡した場合は既存の quarantine_id を返す(冪等)。
+    解除の API は用意しない — 誤検疫の救済は同じ内容を新しい thesis として記録する
+    (0023 の判断2 — 検疫を消せる経路を作らない)。
+    """
+    if not (reason or "").strip():
+        raise ThesisError("検疫の理由(reason)は必須(何が汚染したかを残す)")
+    if not (quarantined_by or "").strip():
+        raise ThesisError("検疫の実施主体(quarantined_by)は必須")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM trading.fm_theses WHERE thesis_id = %s", (thesis_id,)
+        )
+        if cur.fetchone() is None:
+            raise ThesisError(f"検疫対象の thesis_id={thesis_id} が存在しない")
+        cur.execute(
+            """
+            INSERT INTO trading.fm_theses_quarantine
+                (thesis_id, reason, quarantined_by, run_id)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (thesis_id) DO NOTHING
+            RETURNING quarantine_id
+            """,
+            (thesis_id, reason.strip(), quarantined_by.strip(), run_id),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            return row[0]
+        cur.execute(
+            "SELECT quarantine_id FROM trading.fm_theses_quarantine WHERE thesis_id = %s",
+            (thesis_id,),
+        )
+        return cur.fetchone()[0]
+
+
+def is_quarantined(conn: psycopg.Connection, thesis_id: int) -> bool:
+    """当該提案が検疫済みか(監査・運用確認用)。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM trading.fm_theses_quarantine WHERE thesis_id = %s",
+            (thesis_id,),
+        )
+        return cur.fetchone() is not None
+
+
+def quarantined_open_instruments(
+    conn: psycopg.Connection, fm: str, instrument_ids: list[int]
+) -> set[int]:
+    """建玉根拠が**検疫されたために読み出せない**銘柄(独立役員審査 C-11)。
+
+    ``open_theses_by_instrument`` が返さない銘柄には2種類ある — 「そもそも thesis が
+    無い」と「あるが検疫済み」。後者は**降りる条件を失った保有**であり、放置すると
+    invalidation の無い持ち切りになる(40 §制約1 違反)。呼び出し側が両者を区別して
+    扱えるよう、後者だけを返す。
+    """
+    if not instrument_ids:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT t.instrument_id
+            FROM trading.fm_theses t
+            JOIN trading.fm_theses_quarantine q ON q.thesis_id = t.thesis_id
+            WHERE t.fm = %s AND t.instrument_id = ANY(%s) AND t.direction = 'buy'
+            """,
+            (fm, list(instrument_ids)),
+        )
+        return {r[0] for r in cur.fetchall()}
+
+
+def quarantine_stats(conn: psycopg.Connection, *, as_of: datetime) -> dict[str, int]:
+    """検疫の発生状況(当日増分・累計・全提案数)— 日次サマリと監査の入力。
+
+    解除できない封じ込め(0023 判断2)である以上、**silent な mass-quarantine を
+    検知できること**が採用条件である(独立役員審査 C-10 の裁定)。当日は JST の暦日で
+    数える(日次サイクルの区切りと揃える)。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                count(*) FILTER (
+                    WHERE (created_at AT TIME ZONE 'Asia/Tokyo')::date
+                          = (%s AT TIME ZONE 'Asia/Tokyo')::date
+                ),
+                count(*)
+            FROM trading.fm_theses_quarantine
+            """,
+            (as_of,),
+        )
+        today, total = cur.fetchone()
+        cur.execute("SELECT count(*) FROM trading.fm_theses")
+        theses_total = cur.fetchone()[0]
+    return {"today": today, "total": total, "theses_total": theses_total}
+
+
 # ── 読出し(次回プロンプトへの注入)────────────────────────────────────────────
 def recent_theses(
     conn: psycopg.Connection, fm: str, *, limit: int = 20
@@ -249,6 +394,11 @@ def recent_theses(
 
     ゲート判定は ``trading.fm_theses`` には書き戻さない(追記オンリー)ため、
     orders.thesis_id → orders.status / compliance.gate_log を辿って合成する。
+
+    **検疫済み(``trading.fm_theses_quarantine``)の提案は返さない** — 本関数は着任
+    プロンプトへの再注入経路であり、汚染した提案をここで落とす(審査 T-017 C-3)。
+    検疫は件数を減らすだけで繰り上げは行わない(limit は検疫前ではなく後に効く SQL に
+    しているため、除外分は次に古い提案で埋まる)。
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -259,6 +409,9 @@ def recent_theses(
             LEFT JOIN trading.orders o ON o.thesis_id = t.thesis_id
             LEFT JOIN compliance.gate_log g ON g.id = o.gate_log_id
             WHERE t.fm = %s
+            """
+            + _NOT_QUARANTINED
+            + """
             ORDER BY t.thesis_id DESC
             LIMIT %s
             """,
@@ -282,6 +435,11 @@ def open_theses_by_instrument(
 
     Ben の保有見直し(invalidation 成立チェック)の入力。約定に至らなかった提案も
     含み得るが、保有中の銘柄に限って引くため実務上は建玉の根拠になる。
+
+    ここも**プロンプトへの注入経路**であるため検疫済みの提案は返さない(審査 T-017
+    C-3。審査は recent_theses のみを挙げたが、建玉根拠も同じ再注入経路である)。
+    根拠が検疫されると呼び出し側の入力は None になり、Ben は「根拠不明の保有」として
+    見直す — 汚染テキストを渡し続けるより安全な縮退である。
     """
     if not instrument_ids:
         return {}
@@ -293,6 +451,9 @@ def open_theses_by_instrument(
                    t.invalidation_md, t.as_of
             FROM trading.fm_theses t
             WHERE t.fm = %s AND t.instrument_id = ANY(%s) AND t.direction = 'buy'
+            """
+            + _NOT_QUARANTINED
+            + """
             ORDER BY t.instrument_id, t.thesis_id DESC
             """,
             (fm, list(instrument_ids)),
@@ -314,7 +475,11 @@ __all__ = [
     "EvidenceError",
     "ThesisError",
     "ThesisRecord",
+    "is_quarantined",
     "open_theses_by_instrument",
+    "quarantine_stats",
+    "quarantine_thesis",
+    "quarantined_open_instruments",
     "record_thesis",
     "recent_theses",
     "validate_evidence_refs",

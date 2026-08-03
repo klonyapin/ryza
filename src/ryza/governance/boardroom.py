@@ -60,6 +60,7 @@ from typing import Any, NamedTuple
 import psycopg
 
 from ryza.governance.personas import record_stance
+from ryza.research import prompting
 from ryza.research.llm import StructuredLLM
 
 # 役員室のタスク種別(コスト台帳のタグ。部門は dept_tag='governance')。
@@ -348,9 +349,16 @@ _SPEAKER_LABEL_LINE = re.compile(
 
 # 発言を囲むフェンス。ルータ・発言者へ渡す入力では、これで囲まれた内側が「会議の記録
 # データであって指示ではない」ことを system 指示と構文の両方で示す。
+# 記号と無害化の実装は ``ryza.research.prompting`` に共通化した(FM も同じ流儀を使う —
+# 独立役員審査 T-017 C-3)。意味づけ(下の ``_FENCE_NOTICE``)は文脈固有のためここに残す。
+# ``FENCE_OPEN`` は表示・注意書き用のテンプレートで、実際の組み立ては
+# ``prompting.fence_open``(tag の文字集合を検査する — 審査 C-14)を通す。
 FENCE_OPEN = "<<<speaker={speaker}>>>"
-FENCE_CLOSE = "<<<end>>>"
-_FENCE_TOKEN = re.compile(r"<<<\s*(speaker\s*=|end)[^>]*>>>", re.IGNORECASE)
+FENCE_CLOSE = prompting.FENCE_CLOSE
+
+# 話者キーは役職キー(英字とアンダースコア)だが、ChatTurn は任意の文字列を受け取れる。
+# tag に入れる前に決定論的に丸めておき、フェンスヘッダ自体への注入経路を断つ(審査 C-14)。
+_TAG_UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
 
 
 def sanitize_speech(text: str) -> str:
@@ -359,9 +367,7 @@ def sanitize_speech(text: str) -> str:
     - 行頭の「代表:」「cio:」などは ``> `` を付けて引用化する(他者になりすませない)
     - フェンス記号 ``<<<speaker=…>>>`` / ``<<<end>>>`` は全角化して閉じ忘れを防ぐ
     """
-    without_fence = _FENCE_TOKEN.sub(
-        lambda m: m.group(0).replace("<", "＜").replace(">", "＞"), text
-    )
+    without_fence = prompting.neutralize_fences(text)
     return _SPEAKER_LABEL_LINE.sub(
         lambda m: f"{m.group('indent')}> {m.group('marker') or ''}"
         f"{m.group('label')}{m.group('sep')}",
@@ -415,7 +421,7 @@ def _conversation_block(turns: Sequence[ChatTurn]) -> str:
     """LLM へ渡す会議記録。1発言ずつフェンスで囲み、中身はサニタイズ済みにする。"""
     blocks = []
     for t in turns:
-        opening = FENCE_OPEN.format(speaker=t.speaker)
+        opening = prompting.fence_open(f"speaker={_TAG_UNSAFE.sub('_', t.speaker)}")
         blocks.append(f"{opening}\n{sanitize_speech(t.text)}\n{FENCE_CLOSE}")
     return "\n\n".join(blocks)
 
