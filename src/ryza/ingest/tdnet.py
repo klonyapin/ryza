@@ -27,8 +27,15 @@ from ryza.provenance import run as run_ctx
 
 SOURCE_NAME = "TDnet"
 # TDnet 適時開示情報の RSS。実 URL は運用時に環境変数で上書き可能にしておく。
+#
+# TDnet 公式(release.tdnet.info)は HTML 閲覧のみで無料の RSS/API を提供していない
+# (公式 TDnet API と J-Quants の TDnet アドオンはいずれも有料)。ここでは準公式の
+# 「東証TDnet WEB-API by やのしん」(https://webapi.yanoshin.jp/tdnet/、公式 TDnet を
+# 数分間隔で同期)の RSS を既定とする(Issue #29)。個人運営サービスのため、停止時は
+# RYZA_TDNET_FEED_URL で代替 URL に切り替えるか、有料 API への移行を検討する。
 DEFAULT_FEED_URL = os.environ.get(
-    "RYZA_TDNET_FEED_URL", "https://www.release.tdnet.info/inbs/I_list_001_rss.xml"
+    "RYZA_TDNET_FEED_URL",
+    "https://webapi.yanoshin.jp/webapi/tdnet/list/recent.rss?limit=200",
 )
 
 
