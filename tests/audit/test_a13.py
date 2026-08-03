@@ -2,7 +2,11 @@
 
 一時 git リポジトリを作り、保護領域突合(A-13-1)を承認あり/なし/PR マージ/発効日前の
 4 象限で検証する。バージョン整合(A-13-2)・宣言棚卸し(A-13-3)はフィクスチャファイルで、
-outbox 投入はテスト専用 DB で検証する。
+outbox 投入はテスト専用 DB で検証する。全変更 PR 化(A-13-4)は PR マージのみ/直 push/
+非 PR マージ/基準以前の4象限+例外なし(Approved トレーラ付き直 push も違反)を検証する。
+
+一時リポジトリでは実リポジトリの基準コミット(``PR_RULE_BASELINE_COMMIT``)が存在しない
+ため、``run_a13`` には ``pr_since_commit`` を明示的に渡す。
 """
 
 from __future__ import annotations
@@ -204,6 +208,90 @@ def test_glob_to_regex_semantics():
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# A-13-4 全変更 PR 化(直 push 検査)
+# ────────────────────────────────────────────────────────────────────────────
+def _merge_pr(r: Path, branch: str, path: str, content: str, pr_no: int) -> None:
+    """ブランチにコミットを作り PR マージ(Merge pull request マージコミット)で main へ取り込む。"""
+    _git(r, "checkout", "-q", "-b", branch)
+    _commit(r, path, content, f"feat: {branch} の作業")
+    _git(r, "checkout", "-q", "main")
+    _git(r, "merge", "--no-ff", "-q", branch, "-m", f"Merge pull request #{pr_no} from k/{branch}")
+
+
+def test_a134_pr_merges_only_is_clean(repo):
+    """PR マージのみの履歴は違反 0。検査数はマージコミット(first-parent)のみ数える。"""
+    r, since = repo
+    _merge_pr(r, "f1", "README.md", "a\n", 1)
+    _merge_pr(r, "f2", "src/app.py", "x = 1\n", 2)
+    violations, checked = a13.check_direct_pushes(r, since_commit=since)
+    assert violations == []
+    assert checked == 2  # マージコミット2つ(ブランチ内コミットは first-parent でない)
+
+
+def test_a134_direct_push_is_violation(repo):
+    """保護領域外のファイルでも main への直 push は違反(全変更が対象)。"""
+    r, since = repo
+    sha = _commit(r, "README.md", "x\n", "docs: 直 push(保護領域外)")
+    violations, checked = a13.check_direct_pushes(r, since_commit=since)
+    assert checked == 1
+    assert [v["commit"] for v in violations] == [sha[:12]]
+    assert violations[0]["files"] == ["README.md"]
+    assert "直 push" in violations[0]["reason"]
+
+
+def test_a134_approved_trailer_is_still_violation(repo):
+    """例外なし: Approved トレーラ付きの直 push も違反(全 PR 化ルールに例外を設けない)。"""
+    r, since = repo
+    _commit(
+        r, "README.md", "x\n",
+        "docs: 承認トレーラ付き直 push\n\nApproved: https://github.com/x/y/issues/1",
+    )
+    violations, _ = a13.check_direct_pushes(r, since_commit=since)
+    assert len(violations) == 1
+
+
+def test_a134_non_pr_merge_is_violation(repo):
+    """親数>1 でも件名が PR マージ形式でないマージは違反(A-13-1 と同じ件名検査を併用)。"""
+    r, since = repo
+    _git(r, "checkout", "-q", "-b", "f1")
+    _commit(r, "README.md", "a\n", "feat: ブランチ作業")
+    _git(r, "checkout", "-q", "main")
+    _git(r, "merge", "--no-ff", "-q", "f1", "-m", "ローカルマージ(PR でない)")
+    violations, checked = a13.check_direct_pushes(r, since_commit=since)
+    assert checked == 1
+    assert len(violations) == 1
+    assert "非 PR マージ" in violations[0]["reason"]
+    assert violations[0]["files"] == ["README.md"]  # マージが main に持ち込んだ first-parent 差分
+
+
+def test_a134_pre_baseline_commits_are_excluded(repo):
+    """基準コミット以前の直 push は対象外(遡及しない)。since=None だと対象になる。"""
+    r, since = repo
+    violations, checked = a13.check_direct_pushes(r, since_commit=since)
+    assert violations == [] and checked == 0
+    # since=None なら全履歴が対象になり、基準以前の直 push(発効前コミット等)が検出される。
+    violations_all, _ = a13.check_direct_pushes(r, since_commit=None)
+    assert len(violations_all) == 2  # フィクスチャの pre コミット+批准コミット
+
+
+def test_a134_mixed_history_detects_only_direct_pushes(repo):
+    """PR マージと直 push の混在履歴で直 push だけを検出する。"""
+    r, since = repo
+    _merge_pr(r, "f1", "README.md", "a\n", 1)
+    direct = _commit(r, "docs/note.md", "n\n", "docs: 直 push")
+    _merge_pr(r, "f2", "src/app.py", "x = 1\n", 2)
+    violations, checked = a13.check_direct_pushes(r, since_commit=since)
+    assert checked == 3
+    assert [v["commit"] for v in violations] == [direct[:12]]
+
+
+def test_a134_unknown_since_commit_raises(repo):
+    r, _ = repo
+    with pytest.raises(ValueError):
+        a13.check_direct_pushes(r, since_commit="deadbeef" * 5)
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # A-13-2 文書⇔config 整合
 # ────────────────────────────────────────────────────────────────────────────
 def _write(root: Path, rel: str, text: str) -> None:
@@ -253,10 +341,13 @@ def test_declarations_inventory(repo):
 def test_run_a13_end_to_end_on_tmp_repo(repo):
     r, since = repo
     _commit(r, "docs/protected.md", "v2\n", "docs: 無承認変更")
-    result = a13.run_a13(r, since_commit=since)
+    result = a13.run_a13(r, since_commit=since, pr_since_commit=since)
     assert len(result["violations"]) == 1
     assert result["mismatches"] != []  # 80-ips.md 等が無い一時リポジトリでは不整合になる
     assert len(result["declarations"]) == 2
+    # 上の無承認変更は直 push でもあるので A-13-4 でも検出される。
+    assert len(result["direct_pushes"]) == 1
+    assert result["checked_first_parent"] == 1
     # 監査部門コードのパス未登録の注記(governance.yaml のコメントで予告された検査)。
     assert any("src/ryza/audit" in n for n in result["notes"])
     assert a13.has_findings(result)
@@ -265,7 +356,7 @@ def test_run_a13_end_to_end_on_tmp_repo(repo):
 def test_standard_disclosures_always_in_notes(repo):
     """既知の限界(PR 件名未照合・トレーラ実在未照合・evil merge 検査方式)は毎回開示される。"""
     r, since = repo
-    result = a13.run_a13(r, since_commit=since)
+    result = a13.run_a13(r, since_commit=since, pr_since_commit=since)
     for disclosure in a13.STANDARD_DISCLOSURES:
         assert disclosure in result["notes"]
     # 開示は embed の注記フィールドにも常に載る。
@@ -281,18 +372,18 @@ def test_stale_checkout_warning(repo):
     newer = _commit(r, "README.md", "newer\n", "docs: newer")
     _git(r, "checkout", "-q", "main")
     _git(r, "update-ref", "refs/remotes/origin/main", newer)
-    result = a13.run_a13(r, since_commit=since)
+    result = a13.run_a13(r, since_commit=since, pr_since_commit=since)
     assert any("stale checkout" in n for n in result["notes"])
     # origin/main が HEAD の祖先なら警告しない。
     _git(r, "update-ref", "refs/remotes/origin/main", since)
-    result2 = a13.run_a13(r, since_commit=since)
+    result2 = a13.run_a13(r, since_commit=since, pr_since_commit=since)
     assert not any("stale checkout" in n for n in result2["notes"])
 
 
 # ────────────────────────────────────────────────────────────────────────────
 # embed・outbox 投入(テスト専用 DB)
 # ────────────────────────────────────────────────────────────────────────────
-def _result(violations: list, mismatches: list) -> dict:
+def _result(violations: list, mismatches: list, direct_pushes: list | None = None) -> dict:
     return {
         "as_of": "2026-08-03T00:00:00+00:00",
         "since_commit": a13.RATIFICATION_COMMIT,
@@ -300,6 +391,9 @@ def _result(violations: list, mismatches: list) -> dict:
         "violations": violations,
         "mismatches": mismatches,
         "declarations": [{"rule": "宣言その1", "verification": "棚卸し"}],
+        "pr_since_commit": a13.PR_RULE_BASELINE_COMMIT,
+        "checked_first_parent": 3,
+        "direct_pushes": direct_pushes or [],
         "notes": [],
     }
 
@@ -314,6 +408,18 @@ def test_embed_alert_on_violation():
 def test_embed_clean_when_no_findings():
     embed = a13.build_alert_embed(_result([], []))
     assert "所見なし" in embed["title"]
+    assert any(f["name"] == "A-13-4 全変更 PR 化" for f in embed["fields"])
+
+
+def test_embed_alert_on_direct_push_only():
+    """直 push のみでも要対応(has_findings)になり、A-13-4 節に載る。"""
+    d = {"commit": "beef00beef00", "subject": "s", "files": ["README.md"], "reason": "r"}
+    result = _result([], [], [d])
+    assert a13.has_findings(result)
+    embed = a13.build_alert_embed(result)
+    assert "要対応" in embed["title"]
+    field = next(f for f in embed["fields"] if "A-13-4" in f["name"] and "⚠️" in f["name"])
+    assert "beef00beef00" in field["value"]
 
 
 def test_enqueue_alert_writes_ops_outbox(conn, run_id):
@@ -328,3 +434,12 @@ def test_enqueue_alert_writes_ops_outbox(conn, run_id):
     assert channel == "ops"
     assert urgent is True  # 保護領域違反は urgent
     assert "A-13" in title
+
+
+def test_enqueue_alert_direct_push_is_urgent(conn, run_id):
+    d = {"commit": "beef00beef00", "subject": "s", "files": ["README.md"], "reason": "r"}
+    oid = a13.enqueue_alert(conn, _result([], [], [d]), run_id)
+    with conn.cursor() as cur:
+        cur.execute("SELECT urgent FROM press.outbox WHERE id = %s", (oid,))
+        (urgent,) = cur.fetchone()
+    assert urgent is True  # 直 push も統制違反として urgent
