@@ -1,6 +1,6 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-03 11:23 JST",
- "phase": "実装フェーズ(T-010 階層0前処理 進行中)",
+ "generated_at": "2026-08-03 11:29 JST",
+ "phase": "実装フェーズ(T-010 階層0前処理・T-011 分析エージェント+市場観 進行中)",
  "milestones": [
   {
    "name": "全体設計 v3.2",
@@ -50,7 +50,7 @@ window.RYZA_DATA = {
   {
    "name": "T-011 分析エージェント+市場観",
    "detail": "macro/micro/sentiment/editor・慣性ルール・反証拠テスト",
-   "status": "todo"
+   "status": "doing"
   },
   {
    "name": "T-007/T-008 朝刊・速報",
@@ -68,8 +68,8 @@ window.RYZA_DATA = {
    "status": "todo"
   },
   {
-   "name": "IPS v1.0 確定",
-   "detail": "DD25%・レバ2.0x・集中度20%・政策ミックス。§7論点の判断待ち",
+   "name": "IPS v1.0 枠組み承認(複数プロファイル並走の土台)",
+   "detail": "複数プロファイル(aggressive/moderate/conservative…上限なし)並走は決定済み。承認が要るのは枠組み: ガバナンス§2・基準プロファイル値・§7論点2つ。単一IPSへの収束は実弾移行時にデータで判断",
    "status": "todo"
   },
   {
@@ -118,12 +118,12 @@ window.RYZA_DATA = {
   },
   {
    "number": 4,
-   "title": "IPS v1.0 の確定",
+   "title": "IPS v1.0 枠組みの承認(複数プロファイル並走の土台。§7 論点2つの判断待ち)",
    "state": "OPEN",
    "labels": [
     "decision"
    ],
-   "milestone": "IPS v1.0 確定"
+   "milestone": "IPS v1.0 枠組み承認(複数プロファイル並走の土台)"
   },
   {
    "number": 5,
@@ -273,10 +273,9 @@ window.RYZA_DATA = {
   {
    "number": 21,
    "title": "T-010: 階層0前処理パイプライン",
-   "state": "OPEN",
+   "state": "CLOSED",
    "labels": [
-    "impl",
-    "in-progress"
+    "impl"
    ],
    "milestone": "T-010 階層0前処理"
   },
@@ -285,7 +284,8 @@ window.RYZA_DATA = {
    "title": "T-011: 分析エージェント+市場観ステート",
    "state": "OPEN",
    "labels": [
-    "impl"
+    "impl",
+    "in-progress"
    ],
    "milestone": "T-011 分析エージェント+市場観"
   },
@@ -301,6 +301,16 @@ window.RYZA_DATA = {
   }
  ],
  "commits": [
+  {
+   "hash": "b526a0c",
+   "date": "08/03 11:24",
+   "subject": "feat(preprocess): 階層0前処理パイプライン (T-010)"
+  },
+  {
+   "hash": "aeed908",
+   "date": "08/03 11:23",
+   "subject": "refactor(site): ロードマップの正を GitHub Milestones へ移管(ハードコード廃止)"
+  },
   {
    "hash": "7768796",
    "date": "08/03 11:21",
@@ -340,16 +350,6 @@ window.RYZA_DATA = {
    "hash": "232f4c5",
    "date": "08/03 03:07",
    "subject": "fix(bot): daily ループの Run API 誤用も修正"
-  },
-  {
-   "hash": "b2028b6",
-   "date": "08/03 03:06",
-   "subject": "fix(bot): 起動通知の Run API 誤用を修正(context manager ではなく start_run/finish)"
-  },
-  {
-   "hash": "6d849bc",
-   "date": "08/03 03:03",
-   "subject": "fix(bot): Secret 取得を stdlib REST 化(proto-plus 互換性クラッシュの回避)"
   }
  ]
 };
