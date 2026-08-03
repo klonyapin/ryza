@@ -154,6 +154,44 @@ def test_unknown_since_commit_raises(repo):
         _run_a131(r, "deadbeef" * 5)
 
 
+def _make_evil_merge(r: Path, merge_message: str) -> None:
+    """main とブランチで同一保護ファイルを競合させ、独自内容で解消したマージを作る。
+
+    セットアップコミット自体は Approved トレーラ付き(それら自身が違反にならないように)。
+    """
+    _git(r, "checkout", "-q", "-b", "feature")
+    _commit(r, "docs/protected.md", "branch side\n", "docs: branch\n\nApproved: https://x/1")
+    _git(r, "checkout", "-q", "main")
+    _commit(r, "docs/protected.md", "main side\n", "docs: main\n\nApproved: https://x/2")
+    merge = subprocess.run(
+        ["git", "-C", str(r), "merge", "feature"], capture_output=True, text=True, check=False
+    )
+    assert merge.returncode != 0  # コンフリクトが起きていること
+    # どちらの親とも異なる内容で解消(= evil merge の持ち込み差分)。
+    (r / "docs/protected.md").write_text("resolved: neither side\n", encoding="utf-8")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-m", merge_message)
+
+
+def test_evil_merge_without_trailer_is_violation(repo):
+    """マージ自身のコンフリクト解消差分は PR 件名だけでは承認と見なさない(バイパス封鎖)。"""
+    r, since = repo
+    _make_evil_merge(r, "Merge pull request #9 from k/feature")
+    violations, _ = _run_a131(r, since)
+    assert len(violations) == 1
+    assert "evil merge" in violations[0]["reason"]
+    assert violations[0]["files"] == ["docs/protected.md"]
+
+
+def test_evil_merge_with_trailer_is_ok(repo):
+    r, since = repo
+    _make_evil_merge(
+        r, "Merge pull request #9 from k/feature\n\nApproved: https://x/3"
+    )
+    violations, _ = _run_a131(r, since)
+    assert violations == []
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # glob 変換
 # ────────────────────────────────────────────────────────────────────────────
@@ -222,6 +260,33 @@ def test_run_a13_end_to_end_on_tmp_repo(repo):
     # 監査部門コードのパス未登録の注記(governance.yaml のコメントで予告された検査)。
     assert any("src/ryza/audit" in n for n in result["notes"])
     assert a13.has_findings(result)
+
+
+def test_standard_disclosures_always_in_notes(repo):
+    """既知の限界(PR 件名未照合・トレーラ実在未照合・evil merge 検査方式)は毎回開示される。"""
+    r, since = repo
+    result = a13.run_a13(r, since_commit=since)
+    for disclosure in a13.STANDARD_DISCLOSURES:
+        assert disclosure in result["notes"]
+    # 開示は embed の注記フィールドにも常に載る。
+    embed = a13.build_alert_embed(result)
+    assert any(f["name"] == "注記" for f in embed["fields"])
+
+
+def test_stale_checkout_warning(repo):
+    """HEAD が origin/main を含まない場合は stale checkout を警告する(fetch はしない)。"""
+    r, since = repo
+    # origin/main が HEAD に無いコミットを指す状況を作る。
+    _git(r, "checkout", "-q", "-b", "newer")
+    newer = _commit(r, "README.md", "newer\n", "docs: newer")
+    _git(r, "checkout", "-q", "main")
+    _git(r, "update-ref", "refs/remotes/origin/main", newer)
+    result = a13.run_a13(r, since_commit=since)
+    assert any("stale checkout" in n for n in result["notes"])
+    # origin/main が HEAD の祖先なら警告しない。
+    _git(r, "update-ref", "refs/remotes/origin/main", since)
+    result2 = a13.run_a13(r, since_commit=since)
+    assert not any("stale checkout" in n for n in result2["notes"])
 
 
 # ────────────────────────────────────────────────────────────────────────────

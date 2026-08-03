@@ -238,8 +238,16 @@ def find_or_create_digest_issue(client: GitHubClient) -> dict[str, Any] | None:
     )
 
 
+# A-13 監査の実行状態(未配線時の既定)。ダイジェストに必ず1行載せ、沈黙を多義的にしない。
+A13_STATUS_UNWIRED = "スキップ(A13_REPO_PATH 未配線)"
+
+
 def build_digest(
-    client: GitHubClient, now: datetime, fired: list[str], marker: str
+    client: GitHubClient,
+    now: datetime,
+    fired: list[str],
+    marker: str,
+    a13_status: str = A13_STATUS_UNWIRED,
 ) -> str:
     """ダイジェスト本文(Markdown)を組み立てる。先頭に当週マーカーを埋める(冪等判定用)。"""
     since = (now - timedelta(days=7)).isoformat()
@@ -260,10 +268,18 @@ def build_digest(
             lines.append(f"- #{i.get('number')} {i.get('title', '')}")
     lines.append("")
     lines.append(f"### 発火したリマインダー: {', '.join(fired) if fired else 'なし'}")
+    lines.append("")
+    # A-13 監査の実行状態(実行/スキップ(未配線)/失敗)は必ず明記する(独立役員審査条件)。
+    lines.append(f"### A-13 監査: {a13_status}")
     return "\n".join(lines)
 
 
-def post_digest(client: GitHubClient, now: datetime, fired: list[str]) -> bool:
+def post_digest(
+    client: GitHubClient,
+    now: datetime,
+    fired: list[str],
+    a13_status: str = A13_STATUS_UNWIRED,
+) -> bool:
     """当週ダイジェストを投稿する。既に当週分があれば投稿しない(冪等)。投稿したら True。"""
     week = iso_week(now)
     marker = f"<!-- ops-weekly digest {week} -->"
@@ -275,7 +291,7 @@ def post_digest(client: GitHubClient, now: datetime, fired: list[str]) -> bool:
         if marker in (c.get("body") or ""):
             log.info("当週ダイジェストは投稿済み: %s", week)
             return False
-    body = build_digest(client, now, fired, marker)
+    body = build_digest(client, now, fired, marker, a13_status)
     client.create_issue_comment(issue["number"], body)
     return True
 
@@ -289,6 +305,7 @@ def run_weekly(
     now: datetime | None = None,
     bq_checker: BqChecker = default_bq_table_missing,
     reminders_path: str = REMINDERS_PATH,
+    a13_status: str = A13_STATUS_UNWIRED,
 ) -> list[str]:
     """週次ジョブ本体。発火したリマインダー id 一覧を返す。"""
     now = now or datetime.now(UTC)
@@ -298,7 +315,7 @@ def run_weekly(
         client, doc, reminders_text, sha, now,
         bq_checker=bq_checker, reminders_path=reminders_path,
     )
-    post_digest(client, now, fired)
+    post_digest(client, now, fired, a13_status)
     return fired
 
 
@@ -316,33 +333,37 @@ def main() -> None:
         raise SystemExit("GITHUB_TOKEN が未設定です(DRY_RUN=1 以外では必須)")
 
     client = GitHubClient(token, repo, dry_run=dry_run)
-    fired = run_weekly(client)
-    log.info("ops-weekly 完了。発火: %s", fired or "なし")
-    run_a13_if_configured(dry_run=dry_run)
+    # A-13 はダイジェストより先に実行し、実行状態をダイジェストに必ず1行載せる。
+    a13_status = run_a13_if_configured(dry_run=dry_run)
+    fired = run_weekly(client, a13_status=a13_status)
+    log.info("ops-weekly 完了。発火: %s / A-13: %s", fired or "なし", a13_status)
 
 
-def run_a13_if_configured(*, dry_run: bool) -> None:
-    """A-13 監査(規則⇔実装トレーサビリティ)を週次で実行する(opt-in)。
+def run_a13_if_configured(*, dry_run: bool) -> str:
+    """A-13 監査(規則⇔実装トレーサビリティ)を週次で実行し、実行状態の1行を返す(opt-in)。
 
     A-13 は git 履歴(ローカル checkout)と DB(press.outbox)を必要とするため、両方に届く
     実行環境(GCE VM 等)で ``A13_REPO_PATH`` を設定したときだけ走る。Cloud Run 版 ops-weekly
     (checkout も DB も無い)では未設定のまま = スキップ。監査の失敗は握って週次ジョブ本体は
-    継続する(ダイジェスト投稿を道連れにしない)が、ログには残す。
+    継続するが、返す状態行(→週次ダイジェスト)とログに必ず残す(沈黙を多義的にしない)。
     """
     repo_path = os.environ.get("A13_REPO_PATH")
     if not repo_path:
         log.info("A-13 監査はスキップ(A13_REPO_PATH 未設定)")
-        return
+        return A13_STATUS_UNWIRED
     from ryza.audit import a13
 
     try:
         result = a13.run_and_report(repo_path, dry_run=dry_run)
-        log.info(
-            "A-13 監査完了: 違反 %d / 不整合 %d / 宣言 %d",
-            len(result["violations"]), len(result["mismatches"]), len(result["declarations"]),
-        )
-    except Exception:
+    except Exception as exc:
         log.exception("A-13 監査の実行に失敗(週次ジョブ自体は継続)")
+        return f"失敗: {type(exc).__name__}: {exc}"
+    status = (
+        f"実行(違反 {len(result['violations'])} / 不整合 {len(result['mismatches'])} / "
+        f"宣言 {len(result['declarations'])})"
+    )
+    log.info("A-13 監査完了: %s", status)
+    return status
 
 
 if __name__ == "__main__":

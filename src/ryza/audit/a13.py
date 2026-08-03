@@ -16,15 +16,21 @@
 **対象範囲**: 発効日(2026-08-03 の定款批准コミット ``RATIFICATION_COMMIT``)より後のコミットのみ。
 ``git rev-list <批准>..HEAD`` は批准コミット自身とその祖先を除外する。
 
-**既知の限界(設計判断)**:
+**既知の限界(独立役員審査 2026-08-03 指摘により報告 notes へ毎回開示する)**:
 
-- マージコミット自身のファイル差分(コンフリクト解消で持ち込まれた変更)は突合しない。
-  非マージの子コミットは個別に検査されるため、通常の変更は漏れない
+- PR 件名(``Merge pull request``)は自己申告であり GitHub API と未照合。件名偽装で承認を
+  装える(実弾移行前提条件として API 照合を実装する — ops/reminders.yaml 登録済み)
+- 承認記録(Issue / governance.decisions)の実在までは照会しない(トレーラの存在検査まで)。
+  実在照合は governance.decisions 実装の拡充後に追加する
 - GitHub の squash マージ(``... (#N)`` 形式の単独コミット)は「マージ PR」と判定しない。
   本リポジトリの承認手続はマージコミット(``Merge pull request``)で行われている(批准 PR #32 が
   実例)。squash 併用を始める場合は判定の拡張が必要
-- 承認記録(Issue / governance.decisions)の実在までは照会しない(トレーラの存在検査まで)。
-  実在照合は governance.decisions 実装の拡充後に追加する
+
+**evil merge 対策**: マージコミット自身のコンフリクト解消差分は ``git diff-tree --cc``
+(全親と異なるファイルのみ列挙)で検査する。保護パスに触れる場合は **マージコミット自身の**
+``Approved:`` トレーラを必須とし、PR マージ件名だけでは承認と見なさない(レビュー承認は
+ブランチ内容に対するもので、マージ時に持ち込まれた差分をカバーしないため)。クリーンな
+マージは ``--cc`` に現れないので誤検知しない。
 
 git 操作は subprocess で行い、リポジトリパスは引数化してテスト可能にしている。
 """
@@ -51,6 +57,14 @@ log = logging.getLogger("ryza.audit.a13")
 RATIFICATION_COMMIT = "c7af81ef85cc9f45bb7881ffc45769abfbc771dc"
 
 GOVERNANCE_PATH = "config/governance.yaml"
+
+# 既知の限界の常時開示(独立役員審査条件)。報告 embed の notes に毎回載せる。
+STANDARD_DISCLOSURES: tuple[str, ...] = (
+    "PR 件名(Merge pull request)は自己申告で GitHub API 未照合(照合実装は実弾移行前提条件)",
+    "Approved トレーラの参照先(Issue / governance.decisions)の実在は未照合",
+    "マージのコンフリクト解消差分(evil merge)は --cc で検査し、保護パスに触れる場合は"
+    "マージ自身の Approved トレーラを要求",
+)
 
 # 文書⇔config のバージョン突合ペア(A-13-2)。(文書, config, config 内の version キー)
 VERSION_PAIRS: tuple[tuple[str, str], ...] = (
@@ -187,14 +201,14 @@ def check_protected_commits(
     violations: list[dict[str, Any]] = []
     for sha in commits:
         parents = _git(repo, "log", "-1", "--format=%P", sha).split()
-        if len(parents) > 1:
-            # マージコミット自身の差分(コンフリクト解消)は突合しない(モジュール docstring)。
-            continue
-        files = [
-            ln for ln in _git(
-                repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha
-            ).splitlines() if ln
-        ]
+        is_merge = len(parents) > 1
+        if is_merge:
+            # evil merge 対策: マージ自身のコンフリクト解消差分(全親と異なるファイルのみ)。
+            # クリーンなマージは --cc に現れない。
+            diff_args = ("diff-tree", "--cc", "--no-commit-id", "--name-only", sha)
+        else:
+            diff_args = ("diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha)
+        files = [ln for ln in _git(repo, *diff_args).splitlines() if ln]
         touched = match_protected(files, patterns)
         if not touched:
             continue
@@ -202,7 +216,11 @@ def check_protected_commits(
         message = _git(repo, "log", "-1", "--format=%B", sha)
         if has_approval_trailer(message, trailer):
             continue
-        if sha not in first_parent:
+        if is_merge:
+            # マージ自身の差分は PR 件名では承認と見なさない(レビューはブランチ内容に対する
+            # もので、マージ時に持ち込まれた差分をカバーしない)。トレーラ必須。
+            reason = "マージ自身のコンフリクト解消差分(evil merge)で Approved トレーラなし"
+        elif sha not in first_parent:
             merge = _find_introducing_merge(repo, sha, fp_merges)
             if merge and _PR_MERGE_RE.match(_git(repo, "log", "-1", "--format=%s", merge)):
                 continue  # マージ PR 経由 = 代表承認(附則)
@@ -293,6 +311,23 @@ def _coverage_notes(gov: dict[str, Any]) -> list[str]:
     return notes
 
 
+def _staleness_note(repo_path: str | Path) -> list[str]:
+    """検査対象 checkout の鮮度検査(read-only: fetch はしない)。
+
+    ``origin/main`` の追跡 ref が存在し、HEAD がそれを含まない(= 手元の追跡情報より古い
+    履歴を監査している)場合に警告する。追跡 ref 自体が古い可能性は検出できないことも含めて
+    注記する。追跡 ref が無い環境(一時リポジトリ等)は注記なし。
+    """
+    if not _git_ok(repo_path, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"):
+        return []
+    if _git_ok(repo_path, "merge-base", "--is-ancestor", "origin/main", "HEAD"):
+        return []
+    return [
+        "stale checkout: HEAD が origin/main を含まない — 最新でない履歴を監査している可能性"
+        "(read-only 原則により fetch はしない。checkout の更新は運用側で)"
+    ]
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # 本体・報告
 # ────────────────────────────────────────────────────────────────────────────
@@ -313,7 +348,12 @@ def run_a13(
         "violations": violations,
         "mismatches": check_versions(repo_path, version_pairs),
         "declarations": list_declarations(gov),
-        "notes": _coverage_notes(gov),
+        # 既知の限界は毎回開示する(独立役員審査条件)+ 個別の注記(登録漏れ・鮮度)。
+        "notes": [
+            *_coverage_notes(gov),
+            *_staleness_note(repo_path),
+            *STANDARD_DISCLOSURES,
+        ],
     }
 
 
