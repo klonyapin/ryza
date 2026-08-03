@@ -1,6 +1,6 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-03 03:19 JST",
- "phase": "実装フェーズ(T-001 進行中)",
+ "generated_at": "2026-08-03 11:17 JST",
+ "phase": "実装フェーズ(T-010 進行中/T-011 待機)",
  "milestones": [
   {
    "name": "全体設計 v3.2",
@@ -13,71 +13,73 @@ window.RYZA_DATA = {
    "status": "done"
   },
   {
-   "name": "データ基盤+会計 詳細設計",
-   "detail": "5スキーマ・3帳簿・証憑・リネージ",
+   "name": "詳細設計(データ/報道/リサーチ/IPS)",
+   "detail": "5スキーマ・3帳簿・文体リンター・分析エージェント・市場観・IPS v1.0ドラフト",
    "status": "done"
   },
   {
-   "name": "IPS v1.0",
-   "detail": "DD25%・レバ2.0x・集中度20%・政策ミックス。§7論点の判断待ち",
-   "issue": 4,
-   "status": "todo"
-  },
-  {
    "name": "GCP セットアップ",
-   "detail": "ryza-fund 作成・API有効化済み。Billing Export のみ手作業",
+   "detail": "ryza-main・API有効化・Billing Export 済み",
    "issue": 7,
    "status": "done"
   },
   {
-   "name": "デモ口座開設(保留)",
-   "detail": "執行層実装の2〜3週間前に IBKR のみ申請。それまで自前シミュレータで代替",
-   "status": "todo"
-  },
-  {
-   "name": "T-001 DB基盤",
-   "detail": "マイグレーション+帳簿制約",
-   "issue": 1,
-   "status": "done"
-  },
-  {
-   "name": "T-002 会計エンジン",
-   "detail": "記帳・締め・財務諸表・照合",
-   "issue": 2,
-   "status": "done"
-  },
-  {
-   "name": "T-003 証憑・リネージ",
-   "detail": "不変保存・改竄検知・遡及クエリ",
+   "name": "T-001〜T-003 DB・会計・証憑",
+   "detail": "マイグレーション+帳簿制約・記帳/締め/財務諸表・リネージ",
    "issue": 3,
    "status": "done"
   },
   {
-   "name": "報道部 詳細設計",
-   "detail": "文体リンター・速報閾値・embed",
-   "issue": 5,
+   "name": "T-004/T-005 週次ジョブ・統合",
+   "detail": "ops-weekly(Cloud Run Job+Scheduler)稼働中",
+   "issue": 14,
+   "status": "done"
+  },
+  {
+   "name": "T-006 Discord Bot 基盤",
+   "detail": "GCE e2-micro 常駐・4チャンネル・承認/KillSwitch・日報",
+   "issue": 17,
+   "status": "done"
+  },
+  {
+   "name": "T-009 データ取込",
+   "detail": "J-Quants/TDnet/EDINET/RSS/FRED/カレンダー",
+   "issue": 18,
+   "status": "done"
+  },
+  {
+   "name": "T-010 階層0前処理",
+   "detail": "重複排除・分類・銘柄タグ・一次重要度・埋め込み",
+   "issue": 21,
+   "status": "doing"
+  },
+  {
+   "name": "T-011 分析エージェント+市場観",
+   "detail": "macro/micro/sentiment/editor・慣性ルール・反証拠テスト",
+   "issue": 22,
    "status": "todo"
   },
   {
-   "name": "リサーチ層 詳細設計",
-   "detail": "エージェント入出力・市場観ステート",
-   "issue": 6,
+   "name": "T-007/T-008 朝刊・速報",
+   "detail": "毎朝10:00 玲音の朝刊・文体リンター・速報と的中率追跡",
    "status": "todo"
   },
   {
-   "name": "ガバナンス基盤 実装",
-   "detail": "personas・議事録スキーマ・役員室チャット",
-   "issue": 9,
+   "name": "T-012 取込ソース一括拡張",
+   "detail": "EDGAR・e-Stat・海外中銀・国際機関",
+   "issue": 20,
    "status": "todo"
   },
   {
-   "name": "データ取込・リサーチ実装",
-   "detail": "J-Quants/EDINET 取込→分析→市場観",
+   "name": "第1回フル実装監査",
+   "detail": "別ベンダー AI によるコード監査(最初の運用可能版の後)",
+   "issue": 15,
    "status": "todo"
   },
   {
-   "name": "報道部・Discord Bot 実装",
-   "detail": "朝刊10:00・速報・承認フロー",
+   "name": "IPS v1.0 確定",
+   "detail": "DD25%・レバ2.0x・集中度20%・政策ミックス。§7論点の判断待ち",
+   "issue": 4,
    "status": "todo"
   },
   {
@@ -86,8 +88,14 @@ window.RYZA_DATA = {
    "status": "todo"
   },
   {
-   "name": "GCP デプロイ・ペーパー運用開始",
-   "detail": "e2-micro+Cloud Run、日次サイクル稼働",
+   "name": "デモ口座開設(保留)",
+   "detail": "執行層実装の2〜3週間前に IBKR のみ申請。それまで自前シミュレータで代替",
+   "issue": 8,
+   "status": "user"
+  },
+  {
+   "name": "ペーパー運用開始",
+   "detail": "日次サイクル(取込→分析→朝刊→取引→記帳)フル稼働",
    "status": "todo"
   }
  ],
@@ -258,7 +266,8 @@ window.RYZA_DATA = {
    "title": "T-010: 階層0前処理パイプライン",
    "state": "OPEN",
    "labels": [
-    "impl"
+    "impl",
+    "in-progress"
    ]
   },
   {
@@ -274,11 +283,22 @@ window.RYZA_DATA = {
    "title": "テスト隔離の改善: ingest テストが共有 DB の残留データで壊れる",
    "state": "OPEN",
    "labels": [
-    "impl"
+    "impl",
+    "in-progress"
    ]
   }
  ],
  "commits": [
+  {
+   "hash": "63af2bd",
+   "date": "08/03 11:16",
+   "subject": "wip(preprocess): 階層0前処理モジュール群+migration 0009 (T-010)"
+  },
+  {
+   "hash": "6f1bee7",
+   "date": "08/03 03:19",
+   "subject": "chore(site): 進捗更新(T-006 完了・Bot 常駐稼働)"
+  },
   {
    "hash": "5f1a076",
    "date": "08/03 03:18",
@@ -318,16 +338,6 @@ window.RYZA_DATA = {
    "hash": "4d9a598",
    "date": "08/03 02:46",
    "subject": "feat(bot): Ryza Discord Bot 基盤 (T-006)"
-  },
-  {
-   "hash": "a1ec1fa",
-   "date": "08/03 02:21",
-   "subject": "chore(site): 進捗更新(T-009 受け入れ完了・実API疎通OK)"
-  },
-  {
-   "hash": "f3a5f8d",
-   "date": "08/03 02:20",
-   "subject": "fix(ingest): J-Quants V2 移行(x-api-key 認証・/v2 エンドポイント)"
   }
  ]
 };
