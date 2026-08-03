@@ -25,6 +25,13 @@ DB アクセスは ``queries.py``(接続と読取)と ``ryza.governance.boardroo
 (前日比・対リミット・対予算)を添え、赤緑は差異とリミット超過にだけ使う。概況は
 Few の一画面原則に従い 6 ブロック固定の監視面とし、明細は各詳細ページへ降ろす
 (Shneiderman: overview first, then details-on-demand)。
+
+**ナビゲーション(2026-08-03 代表指示のデザイン改修)**: ページ切替は ``st.navigation``
++ ``st.Page`` で、監視/成績・リスク/組織・統治/開発の 4 セクションにグルーピング
+する(構成は ``NAV_SECTIONS``)。旧実装のサイドバー ``st.radio`` は 14 行が縦に圧縮され
+タップターゲット 44px を大きく割っていた。デザイントークンは ``.streamlit/config.toml``
+(DADS 実値)、config.toml で表現できない CSS 層は ``dads.py``。根拠は
+``docs/research/dads-streamlit-application.md``。
 """
 
 from __future__ import annotations
@@ -43,6 +50,7 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+import dads  # noqa: E402
 import github_api  # noqa: E402
 import queries  # noqa: E402
 import viz  # noqa: E402
@@ -1648,69 +1656,123 @@ def page_boardroom() -> None:
             st.caption(f"決議 {res['seq']}: {res['title']}(#{res['resolution_id']}{ref})")
 
 
-# ── エントリポイント ──────────────────────────────────────────────────────────
+# ── エントリポイント(st.navigation・2026-08-03 デザイン改修)─────────────────
+# 旧実装はサイドバーの ``st.radio`` 1 本に 14 ページを平積みし、選択後に if/dict で
+# 分岐していた。代表の指摘「ページ切替ボタンが小さい」は、ラジオのクリック領域が
+# 14 行ぶん圧縮されて WCAG 2.1 SC 2.5.5(44×44 px)を大きく割っていたことによる。
+# ``st.navigation`` へ移すと (a) Streamlit がページリンクとして描くため CSS で
+# タップターゲットを確保でき、(b) sections で意味的にグルーピングでき、(c) 現在地が
+# 強調表示され、(d) ページごとに URL が付く(ブックマーク可能になる)。
+# 根拠: docs/research/dads-streamlit-application.md §4・§5。
+#
+# **ページ関数の構造は変えていない** — ``page_overview(conn)`` 等はそのまま残し、
+# 接続の解決だけを下のラッパが担う。st.Page が受け取れるのは引数なしの callable のため。
+def _with_conn(page_fn):
+    """読取接続を解決して ``page_fn(conn)`` を呼ぶ、引数なしラッパを作る。
+
+    DB に繋がらないときはページを落とさず、説明を出して空のページを描く(旧 ``main``
+    と同じ挙動)。ナビゲーション自体は描画済みなので、代表は他のページへ移動できる。
+    """
+
+    def _run() -> None:
+        try:
+            conn = _conn()
+        except Exception as exc:  # noqa: BLE001 - DB 停止時も UI は説明を出して生かす
+            st.error(f"DB に接続できない: {exc}")
+            st.caption("compose.yaml の PostgreSQL 起動と RYZA_DATABASE_URL を確認。")
+            return
+        page_fn(conn)
+
+    _run.__name__ = page_fn.__name__
+    _run.__doc__ = page_fn.__doc__
+    return _run
+
+
+def _page_org() -> None:
+    """組織ページ。台帳(config/org.yaml)が主で DB は従。
+
+    アイコンの上書き(0020)の読取にだけ DB を使うため、接続できなくても台帳だけで
+    ページを出す(編集 UI は隠す)。``_with_conn`` は使えない — 接続失敗を
+    エラー表示で終わらせず ``None`` として先へ進める必要がある。
+    """
+    try:
+        org_conn = _conn()
+    except Exception:  # noqa: BLE001 - DB 停止時も組織ページは表示する
+        org_conn = None
+    page_org(org_conn)
+
+
+#: サイドバーの構成。``{セクション名: [(タイトル, url_path, アイコン, 描画関数)]}``。
+#:
+#: グルーピングの軸は「代表がその画面を開く動機」。①いま止めるべき事象が起きていないか
+#: (監視)②数字はどうなっているか(成績・リスク)③誰が何を決めたか(組織・統治)
+#: ④開発は進んでいるか(開発)。概況からのドリルダウン先(ジョブ・取込)は概況と同じ
+#: セクションに置き、Shneiderman の overview first → details-on-demand を崩さない。
+#:
+#: ``url_path`` はブックマーク可能な URL になるうえ、**ページの同一性そのもの**である
+#: (Streamlit はページのハッシュを url_path から導出する)。テストもこれでページを
+#: 指名するため、**タイトルを変えても url_path は変えない**こと。
+NAV_SECTIONS: dict[str, list[tuple[str, str, str, Any]]] = {
+    "監視": [
+        # 概況は default=True(url_path は "" に固定され、アプリのトップになる)。
+        ("概況", "overview", ":material/monitor_heart:", _with_conn(page_overview)),
+        ("ジョブ", "jobs", ":material/schedule:", _with_conn(page_jobs)),
+        ("取込", "ingest", ":material/download:", _with_conn(page_ingest)),
+        ("報道", "press", ":material/newspaper:", _with_conn(page_press)),
+        ("市場観", "market-view", ":material/insights:", _with_conn(page_market_view)),
+    ],
+    "成績・リスク": [
+        ("成績", "performance", ":material/trending_up:", _with_conn(page_performance)),
+        ("リスク", "risk", ":material/warning:", _with_conn(page_risk)),
+        ("コスト", "cost", ":material/payments:", _with_conn(page_cost)),
+    ],
+    "組織・統治": [
+        ("組織", "org", ":material/groups:", _page_org),
+        ("規則", "rules", ":material/gavel:", page_rules),  # DB 不要(governance.yaml のみ)
+        ("承認・通知", "approvals", ":material/how_to_reg:", _with_conn(page_approvals)),
+        # 役員室は書込可の専用接続を自前で持つ(READ ONLY 接続は使わない)。
+        ("役員室", "boardroom", ":material/forum:", page_boardroom),
+    ],
+    "開発": [
+        ("計画", "plan", ":material/checklist:", _with_conn(page_plan)),
+        ("開発ステータス", "dev-status", ":material/code:", page_dev_status),
+    ],
+}
+
+#: 概況を既定ページにする(url_path が "" になり、ルート URL で開く)。
+DEFAULT_URL_PATH = "overview"
+
+
+def _build_pages() -> dict[str, list[Any]]:
+    """``NAV_SECTIONS`` を ``st.navigation`` が取る ``{セクション: [st.Page]}`` にする。"""
+    return {
+        section: [
+            st.Page(
+                fn,
+                title=title,
+                icon=icon,
+                url_path=url_path,
+                default=url_path == DEFAULT_URL_PATH,
+            )
+            for title, url_path, icon, fn in items
+        ]
+        for section, items in NAV_SECTIONS.items()
+    }
+
+
 def main() -> None:
+    # CSS 層(44px タップターゲット・行間・フォーカスリング)は再実行のたびに要る。
+    # ナビゲーションより先に注入して、初回描画で小さいリンクが一瞬見える状態を避ける。
+    dads.inject()
     st.sidebar.title("Ryza 運用ダッシュボード")
     st.sidebar.caption(
         "Cloud Run + IAP で公開(許可アカウントのみ。認証は IAP に全面委譲)+ローカル。"
         "役員室以外は読み取り専用。操作(Kill Switch 等)は Discord から。"
     )
-    # 並びは「概況(監視面)→ 概況からドリルダウンする詳細 → 組織・統治 → その他」。
-    page = st.sidebar.radio(
-        "ページ",
-        [
-            "概況",
-            "成績",
-            "リスク",
-            "ジョブ",
-            "コスト",
-            "取込",
-            "承認・通知",
-            "報道",
-            "市場観",
-            "計画",
-            "組織",
-            "規則",
-            "役員室",
-            "開発ステータス",
-        ],
-    )
-    if page == "開発ステータス":
-        page_dev_status()
-        return
-    if page == "役員室":
-        page_boardroom()  # 書込可の専用接続を自前で持つ(READ ONLY 接続は使わない)
-        return
-    if page == "組織":
-        # 台帳(config/org.yaml)が主。アイコンの上書き(0020)の読取にだけ DB を使うため、
-        # 接続できなくても台帳だけでページを出す(編集 UI は隠す)。
-        try:
-            org_conn = _conn()
-        except Exception:  # noqa: BLE001 - DB 停止時も組織ページは表示する
-            org_conn = None
-        page_org(org_conn)
-        return
-    if page == "規則":
-        page_rules()  # config/governance.yaml のみ(DB 不要)
-        return
-    try:
-        conn = _conn()
-    except Exception as exc:  # noqa: BLE001 - DB 停止時も UI は説明を出して生かす
-        st.error(f"DB に接続できない: {exc}")
-        st.caption("compose.yaml の PostgreSQL 起動と RYZA_DATABASE_URL を確認。")
-        return
-    {
-        "概況": page_overview,
-        "成績": page_performance,
-        "リスク": page_risk,
-        "ジョブ": page_jobs,
-        "承認・通知": page_approvals,
-        "計画": page_plan,
-        "取込": page_ingest,
-        "報道": page_press,
-        "コスト": page_cost,
-        "市場観": page_market_view,
-    }[page](conn)
+    # expanded=True。既定(False)は 13 ページ以上で 10 件に折り畳み「View 4 more」を
+    # 出すが、監視面は**全ページが常に見えている**ことが要件(どこに何があるかを
+    # 探させない)。折り畳みボタン自体もタップターゲットを1つ増やす。
+    st.navigation(_build_pages(), position="sidebar", expanded=True).run()
 
 
 main()

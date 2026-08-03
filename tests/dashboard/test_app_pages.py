@@ -10,10 +10,20 @@ jsonb のキー、``st.progress`` の値域など)を CI で捕まえる必要�
 これによりアプリは commit された実データを見ず、投入したテストデータは rollback で
 消える。**GitHub REST** は「計画」ページが叩くためスタブ化する(CI をネットワークに
 依存させない)。
+
+**ページの指名方法**(2026-08-03 の ``st.navigation`` 移行に伴う変更): 旧実装は
+サイドバーの ``st.radio`` を ``set_value`` して切り替えていたが、``st.navigation`` の
+ページリンクはウィジェットではなく専用の ForwardMsg なので AppTest から操作できない。
+``AppTest.switch_page`` もファイルベースのページ専用で、callable ページには使えない。
+そこで Streamlit 内部と同じ経路 —— ページのハッシュは ``calc_hash(url_path)`` であり、
+``AppTest._page_hash`` がリラン要求の ``page_script_hash`` になる —— を使って指名する。
+``_page_hash`` は private だが ``AppTest.switch_page`` 自身が同じ属性を書き換えており、
+これ以外にページを選ぶ手段が無い。
 """
 
 from __future__ import annotations
 
+import ast
 import re
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -27,26 +37,48 @@ import github_api  # noqa: E402
 import queries  # noqa: E402
 import streamlit as st  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
+from streamlit.util import calc_hash  # noqa: E402
 
 _APP = Path(__file__).resolve().parents[2] / "dashboard" / "app.py"
 
-#: サイドバーに出る全ページ(順序は app.main の radio と一致させること)。
-ALL_PAGES = [
-    "概況",
-    "成績",
-    "リスク",
-    "ジョブ",
-    "コスト",
-    "取込",
-    "承認・通知",
-    "報道",
-    "市場観",
-    "計画",
-    "組織",
-    "規則",
-    "役員室",
-    "開発ステータス",
-]
+#: ナビゲーションの宣言(セクション → [(タイトル, url_path, ページ見出し)])。
+#: ``dashboard/app.py`` の ``NAV_SECTIONS`` と一致していることを
+#: :func:`test_navigation_sections_match_the_declared_structure` が突き合わせる
+#: (app.py は import すると ``main()`` が走ってしまうため AST で読む)。
+#: ``url_path`` はページの同一性そのもの(ハッシュの導出元)なので、タイトルを
+#: 変えても url_path は変えないこと。
+NAV_SECTIONS: dict[str, list[tuple[str, str, str]]] = {
+    "監視": [
+        ("概況", "overview", "概況"),
+        ("ジョブ", "jobs", "ジョブ"),
+        ("取込", "ingest", "取込"),
+        ("報道", "press", "報道(press.outbox)"),
+        ("市場観", "market-view", "市場観(docs.market_view)"),
+    ],
+    "成績・リスク": [
+        ("成績", "performance", "成績"),
+        ("リスク", "risk", "リスク"),
+        ("コスト", "cost", "コスト(meta.runs.cost)"),
+    ],
+    "組織・統治": [
+        ("組織", "org", "組織"),
+        ("規則", "rules", "規則(定款の機械可読版 config/governance.yaml)"),
+        ("承認・通知", "approvals", "承認・通知"),
+        ("役員室", "boardroom", "役員室"),
+    ],
+    "開発": [
+        ("計画", "plan", "計画"),
+        ("開発ステータス", "dev-status", "開発・運用ステータス"),
+    ],
+}
+
+#: 全ページの ``url_path``(パラメータ化テスト用)。
+ALL_PAGES = [url_path for items in NAV_SECTIONS.values() for _, url_path, _ in items]
+
+#: url_path → 期待するページ見出し。
+PAGE_HEADERS = {
+    url_path: header for items in NAV_SECTIONS.values() for _, url_path, header in items
+}
 
 _NOW = datetime.now(UTC)
 
@@ -167,14 +199,15 @@ def _app_factory(conn, monkeypatch):
     st.cache_resource.clear()
 
     def _open(page: str | None = None) -> AppTest:
+        """``url_path`` でページを指名して描画する(``page=None`` は既定ページ)。"""
         # cache_data(ttl=60) はページ間で持ち越さない — テストは毎回実データを見る。
         st.cache_data.clear()
         at = AppTest.from_file(str(_APP), default_timeout=120)
-        at.run()
-        assert not at.exception, f"初期描画で例外: {at.exception}"
         if page is not None:
-            at.sidebar.radio[0].set_value(page).run()
-            assert not at.exception, f"{page} の描画で例外: {at.exception}"
+            # ページのハッシュは url_path から導出される(StreamlitPage._script_hash)。
+            at._page_hash = calc_hash(page)
+        at.run()
+        assert not at.exception, f"{page or '(既定)'} の描画で例外: {at.exception}"
         return at
 
     return _open
@@ -216,9 +249,49 @@ def test_every_page_renders_without_exception(app, page):
     assert not at.exception
 
 
-def test_sidebar_lists_every_page_in_declared_order(app):
-    at = app()
-    assert at.sidebar.radio[0].options == ALL_PAGES
+@pytest.mark.parametrize("page", ALL_PAGES)
+def test_every_page_is_reachable_by_its_url_path(app, page):
+    """ナビ再構成後も全 14 ページに到達できること(受け入れ基準)。
+
+    ``st.navigation`` は指名されたハッシュが未登録なら**黙って既定ページへ落とす**。
+    「例外が出ない」だけでは url_path のタイプミスを検出できないため、そのページ
+    固有の見出しが出ていることまで確認する。
+    """
+    assert [h.value for h in app(page).header] == [PAGE_HEADERS[page]]
+
+
+def test_navigation_sections_match_the_declared_structure():
+    """``app.py`` の ``NAV_SECTIONS`` と本ファイルの宣言が一致していること。
+
+    app.py は import すると ``main()`` が走る(Streamlit のエントリポイント)ため、
+    AST で ``NAV_SECTIONS`` の定義だけを読み取って突き合わせる。ページを増減した
+    ときにテスト側の宣言を直し忘れると、上の到達性テストが素通りしてしまう。
+    """
+    tree = ast.parse(_APP.read_text(encoding="utf-8"))
+    node = next(
+        n.value
+        for n in ast.walk(tree)
+        if isinstance(n, ast.AnnAssign)
+        and isinstance(n.target, ast.Name)
+        and n.target.id == "NAV_SECTIONS"
+    )
+    actual = {
+        ast.literal_eval(key): [
+            (ast.literal_eval(item.elts[0]), ast.literal_eval(item.elts[1]))
+            for item in value.elts
+        ]
+        for key, value in zip(node.keys, node.values, strict=True)
+    }
+    expected = {
+        section: [(title, url_path) for title, url_path, _ in items]
+        for section, items in NAV_SECTIONS.items()
+    }
+    assert actual == expected
+
+
+def test_navigation_url_paths_are_unique():
+    """url_path はページのハッシュそのもの。重複すると片方が到達不能になる。"""
+    assert len(ALL_PAGES) == len(set(ALL_PAGES)) == 14
 
 
 def test_every_page_declares_the_question_it_answers(app):
@@ -231,7 +304,7 @@ def test_every_page_declares_the_question_it_answers(app):
 
 # ── 概況: 6 ブロック固定の監視面 ───────────────────────────────────────────────
 def test_overview_has_six_fixed_blocks(app):
-    text = _texts(app("概況"))
+    text = _texts(app("overview"))
     for block in (
         "① 取引状態",
         "② NAV",
@@ -244,12 +317,12 @@ def test_overview_has_six_fixed_blocks(app):
 
 
 def test_overview_nav_carries_comparison_context(app):
-    text = _texts(app("概況"))
+    text = _texts(app("overview"))
     assert "前日比" in text and "設定来" in text
 
 
 def test_overview_dd_bullet_shows_usage_against_limit(app):
-    at = app("概況")
+    at = app("overview")
     # DD 0.25 / dd_hard 0.25 → 使用率 100%・リミット到達で赤。
     bars = [b.proto.text for b in at.get("progress")]
     assert any("使用率 100%" in b and b.startswith(":red[") for b in bars), bars
@@ -257,27 +330,27 @@ def test_overview_dd_bullet_shows_usage_against_limit(app):
 
 def test_overview_names_the_active_latches(app):
     """重要-4: DD 使用率だけでなく、いま発注を止めているラッチを概況で名指しする。"""
-    text = _texts(app("概況"))
+    text = _texts(app("overview"))
     assert "リスクフラグ" in text
     assert "作動中: dd_soft" in text  # fixture は dd_soft のみ true
 
 
 def test_overview_cost_uses_calendar_month_and_shows_recorded_share(app):
     """中-9: 予算(月次)と分子(当月)の期間を揃え、コスト記録率を添える。"""
-    text = _texts(app("概況"))
+    text = _texts(app("overview"))
     assert "⑥ LLM コスト予算消化(当月)" in text
     assert "コスト記録のある実行" in text
 
 
 def test_overview_has_no_raw_runs_table(app):
     """meta.runs の 30 行テーブルは「ジョブ」へ移した(概況は一画面に収める)。"""
-    assert len(app("概況").dataframe) == 0
-    assert len(app("ジョブ").dataframe) > 0
+    assert len(app("overview").dataframe) == 0
+    assert len(app("jobs").dataframe) > 0
 
 
 # ── 成績 ──────────────────────────────────────────────────────────────────────
 def test_performance_shows_nav_line_and_underwater(app):
-    at = app("成績")
+    at = app("performance")
     text = _texts(at)
     assert "NAV 推移" in text
     assert "アンダーウォーター(設定来ピーク比の下落率)" in text
@@ -291,14 +364,14 @@ def test_performance_shows_nav_line_and_underwater(app):
 
 def test_performance_declares_missing_benchmark_instead_of_faking_it(app):
     """無い比較(等配分 BH 対照)を推定値で埋めず、明示行として出す。"""
-    frame = app("成績").dataframe[0].value
+    frame = app("performance").dataframe[0].value
     column = list(frame["対照(等配分 buy-and-hold)"])
     assert set(column[:3]) == {"未実装"}
     assert column[-1] == "対照系列は未実装(T-019 候補)"
 
 
 def test_performance_period_return_table_has_all_periods(app):
-    frame = app("成績").dataframe[0].value
+    frame = app("performance").dataframe[0].value
     assert list(frame["期間"])[:3] == ["1W(7日)", "1M(30日)", "設定来"]
 
 
@@ -308,7 +381,7 @@ def test_performance_table_declares_window_base_day(app):
     fixture の NAV は 8/1〜8/3 の 3 日分。1W(7日)・1M(30日)は cutoff 以前の
     スナップショットが無いため「期間未充足」で値なし、設定来のみ起点 8/1 で有効。
     """
-    frame = app("成績").dataframe[0].value
+    frame = app("performance").dataframe[0].value
     rows = frame.set_index("期間")
     assert rows.loc["1W(7日)", "リターン"] == "—"
     assert rows.loc["1W(7日)", "起点日"] == "—"
@@ -323,7 +396,7 @@ def test_performance_flags_external_flow_days_under_the_chart(app):
     フローは fixture ではなくマイグレーション由来(0006 の初期出資 8/2・0011 の
     増資 8/3)。NAV スナップショットの日付をそれに合わせてある。
     """
-    captions = [str(c.value) for c in app("成績").caption]
+    captions = [str(c.value) for c in app("performance").caption]
     flow_note = next((c for c in captions if "外部フロー発生日" in c), None)
     assert flow_note is not None, captions
     assert "2026-08-02 出資" in flow_note and "2026-08-03 出資" in flow_note
@@ -332,20 +405,20 @@ def test_performance_flags_external_flow_days_under_the_chart(app):
 
 # ── リスク ────────────────────────────────────────────────────────────────────
 def test_risk_lists_bullets_sorted_by_usage(app):
-    at = app("リスク")
+    at = app("risk")
     usages = [b.proto.value for b in at.get("progress")]
     assert len(usages) == 4  # dd_soft / dd_hard / 実現ボラ / ES95
     assert usages == sorted(usages, reverse=True)
 
 
 def test_risk_shows_latch_state_as_text(app):
-    text = _texts(app("リスク"))
+    text = _texts(app("risk"))
     assert "DD ソフト(新規建て枠半減)" in text and "作動中" in text
     assert "DD ハード(全新規発注停止・復帰は委員会のみ)" in text and "未作動" in text
 
 
 def test_risk_bullets_carry_limits_from_ips(app):
-    bars = [b.proto.text for b in app("リスク").get("progress")]
+    bars = [b.proto.text for b in app("risk").get("progress")]
     joined = "\n".join(bars)
     assert "上限 25.0%" in joined  # dd_hard_limit
     assert "上限 15.0%" in joined  # dd_soft_limit / realized_vol_limit
@@ -357,7 +430,7 @@ def test_risk_vol_and_es_are_unknown_when_observations_insufficient(app_insuffic
 
     ラッチが「未作動」なのに使用率が超過を示す、同一画面での矛盾を潰す。
     """
-    bars = [b.proto.text for b in app_insufficient("リスク").get("progress")]
+    bars = [b.proto.text for b in app_insufficient("risk").get("progress")]
     unknown = [b for b in bars if b.startswith(":gray[")]
     assert len(unknown) == 2, bars  # 実現ボラ / ES95
     assert all("観測不足で判定無効(n=3/20)" in b for b in unknown)
@@ -368,19 +441,19 @@ def test_risk_vol_and_es_are_unknown_when_observations_insufficient(app_insuffic
 
 def test_risk_unknown_bullets_are_listed_first(app_insufficient):
     """低-12: 測れていないリミットは「安全」ではないので最下段に沈めない。"""
-    bars = [b.proto.text for b in app_insufficient("リスク").get("progress")]
+    bars = [b.proto.text for b in app_insufficient("risk").get("progress")]
     assert bars[0].startswith(":gray[") and bars[1].startswith(":gray[")
 
 
 def test_risk_vol_and_es_are_measured_when_sufficient(app):
-    bars = [b.proto.text for b in app("リスク").get("progress")]
+    bars = [b.proto.text for b in app("risk").get("progress")]
     assert not any(b.startswith(":gray[") for b in bars)
     assert any("実現ボラ(EWMA 年率)" in b and "11.0%" in b for b in bars), bars
 
 
 # ── コスト: 累計 vanity を出さず比率で見せる ────────────────────────────────────
 def test_cost_page_shows_budget_ratio_and_per_run(app):
-    at = app("コスト")
+    at = app("cost")
     text = _texts(at)
     assert "月次予算の消化(当月・" in text  # 暦月起点(中-9)
     assert "1 実行あたり" in text
@@ -397,7 +470,7 @@ def test_app_source_has_no_raw_progress_or_json():
 
 def test_plan_page_uses_helper_progress_with_denominator(app):
     """生 st.progress を置き換えた進捗バーが分母つきで出ている。"""
-    bars = [b.proto.text for b in app("計画").get("progress")]
+    bars = [b.proto.text for b in app("plan").get("progress")]
     assert bars, "ロードマップの進捗バーが無い"
     assert all("/" in b for b in bars)
     assert any("全体進捗(マイルストーン完了)" in b for b in bars)
@@ -405,6 +478,6 @@ def test_plan_page_uses_helper_progress_with_denominator(app):
 
 # ── 承認・通知 ────────────────────────────────────────────────────────────────
 def test_approvals_summary_row_counts_and_oldest_age(app):
-    text = _texts(app("承認・通知"))
+    text = _texts(app("approvals"))
     assert "未配送の通知" in text
     assert "最古" in text
