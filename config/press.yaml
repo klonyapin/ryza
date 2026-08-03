@@ -1,0 +1,61 @@
+# config/press.yaml — 報道部（朝刊 T-007・速報 T-008）の閾値・上限・画像タグ。
+#
+# 30-press-discord.md §2〜§4・§6・§7 に準拠。決定論コード（topics/linter/flash/images）が
+# これを読む。LLM はこの閾値に一切触れない（報道価値の一次判定スコアは LLM が出すが、
+# 採否・レート制御・落板は決定論ルールがこの値で行う）。
+
+version: "1"
+
+# ── 朝刊トピック（§2）────────────────────────────────────────────────────────
+topics:
+  max_topics: 5           # 上位最大 5 件（§2「上位最大5件を選定」）
+  min_chars: 200          # トピックあたり最小字数（空白除く・L-3）
+  max_chars: 400          # トピックあたり最大字数（空白除く・L-3）
+  min_sentences: 4        # 文数下限（L-3）
+  max_sentences: 8        # 文数上限（L-3）
+  max_regens: 2           # リンター不合格時の再生成上限（§2「再生成最大2回」）
+  # 報道価値 = 新規性 × 影響度 × 確度（§2）。各因子は 0-1、積を基礎スコアとする。
+  policy_geo_bonus: 0.15  # 政策・地政学カテゴリへの定常加点（§2 編集方針②）
+  policy_geo_categories:
+    - news_monetary_policy
+    - news_policy
+    - news_geopolitics
+    - policy
+    - gov
+  # 新規性の逓減: 直近この日数内に同一素材を既報していれば新規性を減衰。
+  novelty_lookback_days: 7
+
+# ── 速報（§3）────────────────────────────────────────────────────────────────
+flash:
+  newsworthiness_threshold: 60   # 軽量 LLM 一次判定（0-100）。未満は記録のみ（§3）
+  per_hour: 3                    # 時間あたり上限（§3 初期値）
+  per_day: 12                    # 日あたり上限（§3 初期値）
+  dedup_similarity: 0.9          # 同一トピック重複速報の抑止しきい値（埋め込み類似度・§3）
+  max_regens: 1                  # 速報の短縮リンター再生成上限
+  # 予兆速報（速報②）の既定の検証猶予（時間）。writer が verify_by を出さない場合の保険。
+  default_verify_hours: 72
+
+# ── 画像（§6）────────────────────────────────────────────────────────────────
+# 画像ボード API をタグ検索し URL 参照する。AI 生成画像は除外（ユーザー指示）。
+# 完全非公開サーバー限定運用。取得失敗時は画像なしで投稿。
+images:
+  board: safebooru
+  base_url: "https://safebooru.org/index.php"
+  # AI 生成系タグは除外条件に入れる（§6 共通規則①）。検索クエリに -tag で付与する。
+  exclude_tags:
+    - ai_generated
+    - ai-generated
+    - stable_diffusion
+    - midjourney
+    - novelai
+    - ai_art
+  # 玲音の投稿画像（§6）。
+  mascot_tags:
+    - iwakura_lain
+    - serial_experiments_lain
+  # 記事サムネイル用の curated「かわいい任意のキャラクター」タグ（§6）。
+  thumbnail_tags:
+    - 1girl
+    - solo
+    - original
+  max_rating: safe          # safebooru は元来 safe のみだが明示
