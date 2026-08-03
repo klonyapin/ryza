@@ -118,6 +118,10 @@ protected_areas:
     area: deploy_path
   - path: CLAUDE.md # 不変原則・議論規約の写し(C-1)
     area: constitution
+  - path: src/ryza/audit/** # 監査部門コード(A-13/A-16 系。自己申告 notes の「未登録」警告を解消)
+    area: audit
+  - path: ops/deploy-a13.sh # 監査ジョブのデプロイ経路(PR #40)
+    area: deploy_path
   # risk_limits: リスクエンジン実装時に src パスを追記すること(C-2。それまで機械可読側は config/ips.yaml の
   #   hard_limits が実体であり、その保護は area: ips でカバー済み)
   # audit: 監査部門コードは実装時にパスを追記すること(A-13 が「宣言のみ」として警告する)
@@ -180,3 +184,23 @@ controls:
     enforcement: declaration # 役員室実装時に決議フローで強制
     kind: 予防
     verification: 同上
+  - rule: 開発管理 §2-1(全変更 PR 化 — 2026-08-03 代表指示。保護領域に限らず全変更を PR 経由とする)
+    risk: レビューを経ない直 push・非 PR マージで main が変更される
+    enforcement: gate # 予防=GitHub ブランチ保護(PR 必須・CI 必須・force push 禁止・管理者含む。2026-08-03 設定)
+    kind: 予防
+    verification: 発見の二重底は A-13-4 — 基準コミット(PR_RULE_BASELINE_COMMIT=4c7f6e9)以降の main first-parent で、直 push と PR マージ件名を持たないマージを列挙。例外なし(Approved トレーラ付きでも違反)
+  - rule: 開発管理 §2-3(検証 — CI による全テスト・lint・YAML 検証)
+    risk: 検証されないコードが main に入る
+    enforcement: ci # required status check 'test'
+    kind: 予防
+    verification: GitHub Actions ci.yml(pytest 全件+ruff+YAML パース)。required check のため未通過はマージ不能
+  - rule: 開発管理 §3-1(保護領域・新規モジュールの独立審査と意見書保存)
+    risk: 起草者のみの判断で保護領域が変更される
+    enforcement: declaration # 審査なし統合の機械検出は未実装(A-13 拡張候補)。現状は手続+docs/reviews の保存実績で監査
+    kind: 予防
+    verification: docs/reviews の意見書と保護領域 PR の対応を四半期棚卸しで確認
+  - rule: 開発管理 §4-2(エージェントによる GitHub 設定変更の禁止)
+    risk: エージェントが代表の認証でブランチ保護等を解除する
+    enforcement: declaration # fine-grained token 分離まで技術的予防なし(正直な自己申告)
+    kind: 予防
+    verification: 四半期棚卸しで token 分離の実装可否を再評価

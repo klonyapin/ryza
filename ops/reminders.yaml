@@ -117,7 +117,7 @@ reminders:
     status: pending
 
   - id: a13-protected-areas-registration
-    what: "protected_areas への src/ryza/audit/** 追記(governance.yaml は L1 のため代表明示承認とセット)"
+    what: "(完了)protected_areas への src/ryza/audit/** 追記 — 2026-08-03 PR #51 を代表がマージし発効"
     conditions:
       - type: date_after
         date: "2026-08-10"
@@ -126,7 +126,7 @@ reminders:
       title: "governance.yaml protected_areas に監査部門コード(src/ryza/audit/**)を追記"
       labels: [decision]
       body: "定款第5条により監査部門コードは保護領域。A-13 実装(src/ryza/audit/)の main 統合後、config/governance.yaml の protected_areas に `src/ryza/audit/**`(area: audit)を追記する。governance.yaml は L1 文書のため代表の明示承認が必要(定款第4条)。A-13 自身が未登録を notes で警告し続ける。"
-    status: pending
+    status: done # 2026-08-03 PR #51(代表明示承認)で完了
 
   - id: a13-github-pr-verification
     what: "A-13-1 の PR 実在照合を GitHub API で実装(実弾移行の前提条件)"
