@@ -19,9 +19,30 @@ def test_api_key_env(monkeypatch):
     assert jquants.api_key() == "KEY123"
 
 
-def test_api_key_missing_raises(monkeypatch):
+def test_api_key_env_takes_priority_over_secret(monkeypatch, fake_secret_manager):
+    """env があれば Secret Manager へアクセスしない(Issue #30)。"""
+    calls = fake_secret_manager({"jquants-api-key": "SMKEY"})
+    monkeypatch.setenv("RYZA_JQUANTS_API_KEY", "ENVKEY")
+    monkeypatch.setenv("GCP_PROJECT", "proj")
+    assert jquants.api_key() == "ENVKEY"
+    assert calls == []
+
+
+def test_api_key_secret_manager_fallback(monkeypatch, fake_secret_manager):
+    """env 未設定でも VM(GCP_PROJECT あり)なら Secret 'jquants-api-key' から取得。"""
+    fake_secret_manager({"jquants-api-key": "SMKEY"})
     monkeypatch.delenv("RYZA_JQUANTS_API_KEY", raising=False)
     monkeypatch.delenv("JQUANTS_API_KEY", raising=False)
+    monkeypatch.setenv("GCP_PROJECT", "proj")
+    assert jquants.api_key() == "SMKEY"
+
+
+def test_api_key_missing_raises(monkeypatch, fake_secret_manager):
+    """env も Secret も無ければ JQuantsAuthError(daily では skipped 扱い)。"""
+    fake_secret_manager({})  # Secret 未登録(404)
+    monkeypatch.delenv("RYZA_JQUANTS_API_KEY", raising=False)
+    monkeypatch.delenv("JQUANTS_API_KEY", raising=False)
+    monkeypatch.delenv("GCP_PROJECT", raising=False)
     with pytest.raises(jquants.JQuantsAuthError):
         jquants.api_key()
 

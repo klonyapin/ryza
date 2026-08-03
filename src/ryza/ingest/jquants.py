@@ -24,7 +24,6 @@ HTTP は ``Fetcher`` 越し（テストはモック）。日足の各バーは�
 from __future__ import annotations
 
 import argparse
-import os
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
@@ -36,6 +35,7 @@ from ryza.ingest import base
 from ryza.ingest.base import Fetcher
 from ryza.provenance import EvidenceStore, Run, record
 from ryza.provenance import run as run_ctx
+from ryza.secrets import load_secret
 
 _API_BASE = "https://api.jquants.com"
 SOURCE = "jquants"
@@ -47,11 +47,16 @@ class JQuantsAuthError(RuntimeError):
 
 
 def api_key() -> str:
-    """API キーを取得する（Secret 優先・環境変数フォールバック）。
+    """API キーを取得する（env 優先 → Secret Manager ``jquants-api-key``）。
 
-    Secret Manager 連携は運用基盤側で環境変数に注入される想定。ここでは env を見る。
+    env ``RYZA_JQUANTS_API_KEY`` / ``JQUANTS_API_KEY`` を優先し、無ければ VM（GCE）上で
+    Secret Manager ``jquants-api-key`` を取得する（``ryza.secrets.load_secret``、
+    Issue #30）。Secret ``jquants-refresh-token`` も登録されているが V2 は API キー認証
+    のみのため使用しない（V1 の遺物）。
     """
-    key = os.environ.get("RYZA_JQUANTS_API_KEY") or os.environ.get("JQUANTS_API_KEY")
+    key = load_secret(
+        env=("RYZA_JQUANTS_API_KEY", "JQUANTS_API_KEY"), secret="jquants-api-key"
+    )
     if not key:
         raise JQuantsAuthError(
             "J-Quants API キー未設定（Secret 'jquants-api-key' / "

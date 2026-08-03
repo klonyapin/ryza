@@ -26,6 +26,18 @@ def _wire(fetcher):
     fetcher.add_bytes("documents/S100BBBB", b"PK\x03\x04csvzip-B")
 
 
+def test_api_key_env_only(monkeypatch, fake_secret_manager):
+    """EDINET は Secret 未登録のため env のみ。Secret Manager へはアクセスしない(Issue #30)。"""
+    calls = fake_secret_manager({"edinet-api-key": "SMKEY"})
+    monkeypatch.delenv("RYZA_EDINET_API_KEY", raising=False)
+    monkeypatch.delenv("EDINET_API_KEY", raising=False)
+    monkeypatch.setenv("GCP_PROJECT", "proj")
+    assert edinet.api_key() is None          # 未設定でも例外にせず None(キー任意の API)
+    assert calls == []
+    monkeypatch.setenv("RYZA_EDINET_API_KEY", "ENVKEY")
+    assert edinet.api_key() == "ENVKEY"
+
+
 def test_ingest_date_ok_with_csv(conn, run, store, fetcher):
     _wire(fetcher)
     res = edinet.ingest_date(

@@ -19,12 +19,17 @@ rollback 隔離はテスト自身の書込にしか効かないため、別セ�
 
 from __future__ import annotations
 
+import base64
+import io
+import json
 import os
+import urllib.error
 
 import psycopg
 import pytest
 from psycopg import conninfo, errors
 
+from ryza import secrets
 from ryza.db import migrate
 from ryza.db.conn import database_url
 
@@ -57,6 +62,10 @@ def pytest_configure(config: pytest.Config) -> None:
     global _ADMIN_URL
     _ADMIN_URL = database_url()
     os.environ["RYZA_DATABASE_URL"] = _test_database_url(_ADMIN_URL)
+    # VM(GCE)上でテストを実行しても Secret Manager フォールバック(Issue #30)が
+    # 実メタデータ・実 Secret へ到達しないよう、環境の GCP_PROJECT は外す。
+    # 必要なテストは monkeypatch.setenv("GCP_PROJECT", ...) で明示設定する。
+    os.environ.pop("GCP_PROJECT", None)
 
 
 @pytest.fixture(scope="session")
@@ -126,3 +135,33 @@ def clear_residual():
             cur.execute(_CLEAR_EVIDENCE_SQL)
 
     return _clear
+
+
+@pytest.fixture
+def fake_secret_manager(monkeypatch):
+    """``ryza.secrets`` の GCE メタデータ + Secret Manager REST をモックする(Issue #30)。
+
+    ``fake_secret_manager({"jquants-api-key": "K"})`` のように登録済み Secret を渡すと
+    ``ryza.secrets._urlopen`` を差し替え、アクセスされた URL のリストを返す(env 優先の
+    検証は「リストが空のまま」であることを見る)。未登録 Secret へのアクセスは 404。
+    実ネットワークは一切呼ばない。
+    """
+
+    def _install(values: dict[str, str]) -> list[str]:
+        calls: list[str] = []
+
+        def _fake(req, timeout):
+            url = req.full_url
+            calls.append(url)
+            if "metadata.google.internal" in url:
+                return io.BytesIO(json.dumps({"access_token": "TOKEN"}).encode())
+            name = url.split("/secrets/")[1].split("/")[0]
+            if name not in values:
+                raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+            data = base64.b64encode(values[name].encode()).decode()
+            return io.BytesIO(json.dumps({"payload": {"data": data}}).encode())
+
+        monkeypatch.setattr(secrets, "_urlopen", _fake)
+        return calls
+
+    return _install

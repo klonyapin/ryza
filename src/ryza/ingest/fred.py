@@ -17,7 +17,6 @@ FRED API から取得し ``market.indicators`` へ書き込む。対象系列は
 from __future__ import annotations
 
 import argparse
-import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,6 +30,7 @@ from ryza.ingest import base
 from ryza.ingest.base import Fetcher
 from ryza.provenance import EvidenceStore, Run, record
 from ryza.provenance import run as run_ctx
+from ryza.secrets import load_secret
 
 _API_BASE = "https://api.stlouisfed.org/fred"
 SOURCE_NAME = "FRED"
@@ -45,7 +45,8 @@ class FredAuthError(RuntimeError):
 
 
 def api_key() -> str:
-    key = os.environ.get("RYZA_FRED_API_KEY") or os.environ.get("FRED_API_KEY")
+    """API キーを取得する（env 優先 → Secret Manager ``fred-api-key``、Issue #30）。"""
+    key = load_secret(env=("RYZA_FRED_API_KEY", "FRED_API_KEY"), secret="fred-api-key")
     if not key:
         raise FredAuthError(
             "FRED API キー未設定（Secret 'fred-api-key' / env FRED_API_KEY）"

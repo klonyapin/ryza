@@ -32,7 +32,12 @@ SOURCE_NAME = "EDINET"
 
 
 def api_key() -> str | None:
-    """EDINET API キー（Secret 優先・環境変数フォールバック）。無ければ None。"""
+    """EDINET API キー（env ``RYZA_EDINET_API_KEY`` / ``EDINET_API_KEY``）。無ければ None。
+
+    **env のみ**: Secret Manager に ``edinet-api-key`` は登録されていないため、他ソースと
+    異なり Secret Manager フォールバック（Issue #30）を持たない。Secret を登録したら
+    ``ryza.secrets.load_secret`` へ切り替えること。
+    """
     return os.environ.get("RYZA_EDINET_API_KEY") or os.environ.get("EDINET_API_KEY")
 
 

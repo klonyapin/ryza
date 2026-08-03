@@ -7,8 +7,8 @@ T-012 一括拡張バッチ（設計 20-research §2）。対象統計表は ``c
 
 ## e-Stat API の仕様メモ（https://www.e-stat.go.jp/api/api-info/api-spec）
 
-- 認証: **appId**（アプリケーション ID）。Secret ``estat-app-id`` / 環境変数
-  ``RYZA_ESTAT_APP_ID``（Secret Manager 連携は運用基盤側で env に注入される想定）
+- 認証: **appId**（アプリケーション ID）。環境変数 ``RYZA_ESTAT_APP_ID`` 優先、無ければ
+  Secret Manager ``estat-app-id`` を直接取得（``ryza.secrets.load_secret``、Issue #30）
 - エラーは HTTP 200 のまま ``RESULT.STATUS``（0=正常）で返る → STATUS を必ず検査
 - 大きい統計表は ``RESULT_INF.NEXT_KEY`` でページング（``startPosition`` に渡す）
 - 明確なレート制限の公表は無いが、利用規約上の大量アクセス禁止に従い逐次取得のみ
@@ -25,7 +25,6 @@ HTTP は ``Fetcher`` 越し（テストはモック）。取得レスポンス�
 from __future__ import annotations
 
 import argparse
-import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,6 +38,7 @@ from ryza.ingest import base
 from ryza.ingest.base import Fetcher
 from ryza.provenance import EvidenceStore, Run, record
 from ryza.provenance import run as run_ctx
+from ryza.secrets import load_secret
 
 _API_BASE = "https://api.e-stat.go.jp/rest/3.0/app/json"
 SOURCE_NAME = "e-Stat"
@@ -53,8 +53,8 @@ class EstatAuthError(RuntimeError):
 
 
 def app_id() -> str:
-    """appId を取得する（Secret 'estat-app-id' → env 注入・環境変数フォールバック）。"""
-    key = os.environ.get("RYZA_ESTAT_APP_ID") or os.environ.get("ESTAT_APP_ID")
+    """appId を取得する（env 優先 → Secret Manager ``estat-app-id``、Issue #30）。"""
+    key = load_secret(env=("RYZA_ESTAT_APP_ID", "ESTAT_APP_ID"), secret="estat-app-id")
     if not key:
         raise EstatAuthError(
             "e-Stat appId 未設定（Secret 'estat-app-id' / env RYZA_ESTAT_APP_ID）"

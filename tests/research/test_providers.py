@@ -195,3 +195,35 @@ def test_dryrun_provider_returns_valid_shapes():
     assert validate(topic.content, MORNING_TOPIC_SCHEMA) == []
     lvl1 = [s for s in topic.content["sentences"] if s["level"] == 1]
     assert lvl1 and lvl1[0]["source_ids"] == [7]
+
+
+# ── load_api_key(Issue #30: ryza.secrets へ抽出後の後方互換)───────────────────
+def test_load_api_key_env_priority(monkeypatch, fake_secret_manager):
+    calls = fake_secret_manager({"anthropic-api-key": "SMKEY"})
+    monkeypatch.setenv("RYZA_ANTHROPIC_API_KEY", "ENVKEY")
+    monkeypatch.setenv("GCP_PROJECT", "proj")
+    from ryza.research.providers import load_api_key
+
+    assert load_api_key() == "ENVKEY"
+    assert calls == []
+
+
+def test_load_api_key_secret_fallback(monkeypatch, fake_secret_manager):
+    fake_secret_manager({"anthropic-api-key": "SMKEY"})
+    monkeypatch.delenv("RYZA_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("GCP_PROJECT", "proj")
+    from ryza.research.providers import load_api_key
+
+    assert load_api_key() == "SMKEY"
+
+
+def test_load_api_key_missing_raises_provider_error(monkeypatch, fake_secret_manager):
+    fake_secret_manager({})
+    monkeypatch.delenv("RYZA_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GCP_PROJECT", raising=False)
+    from ryza.research.providers import load_api_key
+
+    with pytest.raises(ProviderError):
+        load_api_key()

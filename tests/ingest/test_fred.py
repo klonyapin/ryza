@@ -23,9 +23,30 @@ def test_load_series_active_only():
     assert {"DGS10", "CPIAUCSL", "UNRATE"} <= ids
 
 
-def test_api_key_missing_raises(monkeypatch):
+def test_api_key_env_takes_priority_over_secret(monkeypatch, fake_secret_manager):
+    """env があれば Secret Manager へアクセスしない(Issue #30)。"""
+    calls = fake_secret_manager({"fred-api-key": "SMKEY"})
+    monkeypatch.setenv("RYZA_FRED_API_KEY", "ENVKEY")
+    monkeypatch.setenv("GCP_PROJECT", "proj")
+    assert fred.api_key() == "ENVKEY"
+    assert calls == []
+
+
+def test_api_key_secret_manager_fallback(monkeypatch, fake_secret_manager):
+    """env 未設定でも VM(GCP_PROJECT あり)なら Secret 'fred-api-key' から取得。"""
+    fake_secret_manager({"fred-api-key": "SMKEY"})
     monkeypatch.delenv("RYZA_FRED_API_KEY", raising=False)
     monkeypatch.delenv("FRED_API_KEY", raising=False)
+    monkeypatch.setenv("GCP_PROJECT", "proj")
+    assert fred.api_key() == "SMKEY"
+
+
+def test_api_key_missing_raises(monkeypatch, fake_secret_manager):
+    """env も Secret も無ければ FredAuthError(daily では skipped 扱い)。"""
+    fake_secret_manager({})
+    monkeypatch.delenv("RYZA_FRED_API_KEY", raising=False)
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+    monkeypatch.delenv("GCP_PROJECT", raising=False)
     with pytest.raises(fred.FredAuthError):
         fred.api_key()
 

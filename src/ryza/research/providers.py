@@ -34,6 +34,7 @@ from typing import Any, Protocol
 import yaml
 
 from ryza.research.llm import MalformedOutputError, ProviderResult
+from ryza.secrets import load_secret
 
 _API_URL = "https://api.anthropic.com/v1/messages"
 _CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "llm.yaml"
@@ -133,35 +134,21 @@ def load_api_key(
 ) -> str:
     """Anthropic API キーを取得。env 優先、無ければ Secret Manager(GCE メタデータ + REST)。
 
-    T-006 bot(``ryza.bot.main.load_token``)と同じ stdlib REST 方式。SDK を使わないのは
-    proto-plus/protobuf の版差で壊れやすいため。
+    実体は共通ヘルパ ``ryza.secrets.load_secret``(Issue #30 で ingest と共通化)。
+    シグネチャ・「未設定なら ``ProviderError``」の挙動は従来どおり。
     """
-    import os
-
-    key = os.environ.get("RYZA_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-    if key:
-        return key
-    project = project or os.environ.get("GCP_PROJECT", "")
-    if not project:
+    key = load_secret(
+        env=("RYZA_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
+        secret=secret,
+        project=project,
+        timeout=timeout,
+    )
+    if not key:
         raise ProviderError(
             "Anthropic API キー未設定(env RYZA_ANTHROPIC_API_KEY / "
             "ANTHROPIC_API_KEY、または GCP_PROJECT + Secret 'anthropic-api-key')"
         )
-    import base64
-
-    meta = urllib.request.Request(
-        "http://metadata.google.internal/computeMetadata/v1/instance/"
-        "service-accounts/default/token",
-        headers={"Metadata-Flavor": "Google"},
-    )
-    access_token = json.load(urllib.request.urlopen(meta, timeout=timeout))["access_token"]
-    req = urllib.request.Request(
-        f"https://secretmanager.googleapis.com/v1/projects/{project}"
-        f"/secrets/{secret}/versions/latest:access",
-        headers={"Authorization": f"Bearer {access_token}"},
-    )
-    payload = json.load(urllib.request.urlopen(req, timeout=timeout))
-    return base64.b64decode(payload["payload"]["data"]).decode("utf-8")
+    return key
 
 
 # ── JSON 抽出(頑健化)─────────────────────────────────────────────────────────

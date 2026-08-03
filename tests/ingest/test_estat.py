@@ -30,9 +30,30 @@ def test_load_tables_active_only():
     assert "0003427113" in ids
 
 
-def test_app_id_missing_raises(monkeypatch):
+def test_app_id_env_takes_priority_over_secret(monkeypatch, fake_secret_manager):
+    """env があれば Secret Manager へアクセスしない(Issue #30)。"""
+    calls = fake_secret_manager({"estat-app-id": "SMID"})
+    monkeypatch.setenv("RYZA_ESTAT_APP_ID", "ENVID")
+    monkeypatch.setenv("GCP_PROJECT", "proj")
+    assert estat.app_id() == "ENVID"
+    assert calls == []
+
+
+def test_app_id_secret_manager_fallback(monkeypatch, fake_secret_manager):
+    """env 未設定でも VM(GCP_PROJECT あり)なら Secret 'estat-app-id' から取得。"""
+    fake_secret_manager({"estat-app-id": "SMID"})
     monkeypatch.delenv("RYZA_ESTAT_APP_ID", raising=False)
     monkeypatch.delenv("ESTAT_APP_ID", raising=False)
+    monkeypatch.setenv("GCP_PROJECT", "proj")
+    assert estat.app_id() == "SMID"
+
+
+def test_app_id_missing_raises(monkeypatch, fake_secret_manager):
+    """env も Secret も無ければ EstatAuthError(daily では skipped 扱い)。"""
+    fake_secret_manager({})
+    monkeypatch.delenv("RYZA_ESTAT_APP_ID", raising=False)
+    monkeypatch.delenv("ESTAT_APP_ID", raising=False)
+    monkeypatch.delenv("GCP_PROJECT", raising=False)
     with pytest.raises(estat.EstatAuthError):
         estat.app_id()
 
