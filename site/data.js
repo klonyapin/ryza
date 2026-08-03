@@ -1,6 +1,6 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-03 11:17 JST",
- "phase": "実装フェーズ(T-010 進行中/T-011 待機)",
+ "generated_at": "2026-08-03 11:23 JST",
+ "phase": "実装フェーズ(T-010 階層0前処理 進行中)",
  "milestones": [
   {
    "name": "全体設計 v3.2",
@@ -20,43 +20,36 @@ window.RYZA_DATA = {
   {
    "name": "GCP セットアップ",
    "detail": "ryza-main・API有効化・Billing Export 済み",
-   "issue": 7,
    "status": "done"
   },
   {
    "name": "T-001〜T-003 DB・会計・証憑",
    "detail": "マイグレーション+帳簿制約・記帳/締め/財務諸表・リネージ",
-   "issue": 3,
    "status": "done"
   },
   {
    "name": "T-004/T-005 週次ジョブ・統合",
    "detail": "ops-weekly(Cloud Run Job+Scheduler)稼働中",
-   "issue": 14,
    "status": "done"
   },
   {
    "name": "T-006 Discord Bot 基盤",
    "detail": "GCE e2-micro 常駐・4チャンネル・承認/KillSwitch・日報",
-   "issue": 17,
    "status": "done"
   },
   {
    "name": "T-009 データ取込",
    "detail": "J-Quants/TDnet/EDINET/RSS/FRED/カレンダー",
-   "issue": 18,
    "status": "done"
   },
   {
    "name": "T-010 階層0前処理",
    "detail": "重複排除・分類・銘柄タグ・一次重要度・埋め込み",
-   "issue": 21,
    "status": "doing"
   },
   {
    "name": "T-011 分析エージェント+市場観",
    "detail": "macro/micro/sentiment/editor・慣性ルール・反証拠テスト",
-   "issue": 22,
    "status": "todo"
   },
   {
@@ -67,19 +60,16 @@ window.RYZA_DATA = {
   {
    "name": "T-012 取込ソース一括拡張",
    "detail": "EDGAR・e-Stat・海外中銀・国際機関",
-   "issue": 20,
    "status": "todo"
   },
   {
    "name": "第1回フル実装監査",
    "detail": "別ベンダー AI によるコード監査(最初の運用可能版の後)",
-   "issue": 15,
    "status": "todo"
   },
   {
    "name": "IPS v1.0 確定",
    "detail": "DD25%・レバ2.0x・集中度20%・政策ミックス。§7論点の判断待ち",
-   "issue": 4,
    "status": "todo"
   },
   {
@@ -88,9 +78,8 @@ window.RYZA_DATA = {
    "status": "todo"
   },
   {
-   "name": "デモ口座開設(保留)",
+   "name": "デモ口座開設(IBKR・保留)",
    "detail": "執行層実装の2〜3週間前に IBKR のみ申請。それまで自前シミュレータで代替",
-   "issue": 8,
    "status": "user"
   },
   {
@@ -106,7 +95,8 @@ window.RYZA_DATA = {
    "state": "CLOSED",
    "labels": [
     "impl"
-   ]
+   ],
+   "milestone": null
   },
   {
    "number": 2,
@@ -114,7 +104,8 @@ window.RYZA_DATA = {
    "state": "CLOSED",
    "labels": [
     "impl"
-   ]
+   ],
+   "milestone": null
   },
   {
    "number": 3,
@@ -122,7 +113,8 @@ window.RYZA_DATA = {
    "state": "CLOSED",
    "labels": [
     "impl"
-   ]
+   ],
+   "milestone": null
   },
   {
    "number": 4,
@@ -130,23 +122,26 @@ window.RYZA_DATA = {
    "state": "OPEN",
    "labels": [
     "decision"
-   ]
+   ],
+   "milestone": "IPS v1.0 確定"
   },
   {
    "number": 5,
    "title": "報道部 詳細設計",
-   "state": "OPEN",
+   "state": "CLOSED",
    "labels": [
     "design"
-   ]
+   ],
+   "milestone": "T-007/T-008 朝刊・速報"
   },
   {
    "number": 6,
    "title": "リサーチ層 詳細設計",
-   "state": "OPEN",
+   "state": "CLOSED",
    "labels": [
     "design"
-   ]
+   ],
+   "milestone": "T-011 分析エージェント+市場観"
   },
   {
    "number": 7,
@@ -154,7 +149,8 @@ window.RYZA_DATA = {
    "state": "CLOSED",
    "labels": [
     "user-action"
-   ]
+   ],
+   "milestone": null
   },
   {
    "number": 8,
@@ -162,7 +158,8 @@ window.RYZA_DATA = {
    "state": "OPEN",
    "labels": [
     "user-action"
-   ]
+   ],
+   "milestone": "デモ口座開設(IBKR・保留)"
   },
   {
    "number": 9,
@@ -171,7 +168,8 @@ window.RYZA_DATA = {
    "labels": [
     "impl",
     "design"
-   ]
+   ],
+   "milestone": null
   },
   {
    "number": 10,
@@ -179,7 +177,8 @@ window.RYZA_DATA = {
    "state": "OPEN",
    "labels": [
     "impl"
-   ]
+   ],
+   "milestone": null
   },
   {
    "number": 11,
@@ -187,7 +186,8 @@ window.RYZA_DATA = {
    "state": "CLOSED",
    "labels": [
     "user-action"
-   ]
+   ],
+   "milestone": null
   },
   {
    "number": 12,
@@ -195,7 +195,8 @@ window.RYZA_DATA = {
    "state": "CLOSED",
    "labels": [
     "impl"
-   ]
+   ],
+   "milestone": null
   },
   {
    "number": 13,
@@ -203,7 +204,8 @@ window.RYZA_DATA = {
    "state": "OPEN",
    "labels": [
     "user-action"
-   ]
+   ],
+   "milestone": null
   },
   {
    "number": 14,
@@ -211,7 +213,8 @@ window.RYZA_DATA = {
    "state": "CLOSED",
    "labels": [
     "impl"
-   ]
+   ],
+   "milestone": null
   },
   {
    "number": 15,
@@ -219,7 +222,8 @@ window.RYZA_DATA = {
    "state": "OPEN",
    "labels": [
     "design"
-   ]
+   ],
+   "milestone": "第1回フル実装監査"
   },
   {
    "number": 16,
@@ -227,7 +231,8 @@ window.RYZA_DATA = {
    "state": "OPEN",
    "labels": [
     "digest"
-   ]
+   ],
+   "milestone": null
   },
   {
    "number": 17,
@@ -235,7 +240,8 @@ window.RYZA_DATA = {
    "state": "CLOSED",
    "labels": [
     "impl"
-   ]
+   ],
+   "milestone": null
   },
   {
    "number": 18,
@@ -243,7 +249,8 @@ window.RYZA_DATA = {
    "state": "CLOSED",
    "labels": [
     "impl"
-   ]
+   ],
+   "milestone": null
   },
   {
    "number": 19,
@@ -251,7 +258,8 @@ window.RYZA_DATA = {
    "state": "CLOSED",
    "labels": [
     "user-action"
-   ]
+   ],
+   "milestone": null
   },
   {
    "number": 20,
@@ -259,7 +267,8 @@ window.RYZA_DATA = {
    "state": "OPEN",
    "labels": [
     "impl"
-   ]
+   ],
+   "milestone": "T-012 取込ソース一括拡張"
   },
   {
    "number": 21,
@@ -268,7 +277,8 @@ window.RYZA_DATA = {
    "labels": [
     "impl",
     "in-progress"
-   ]
+   ],
+   "milestone": "T-010 階層0前処理"
   },
   {
    "number": 22,
@@ -276,7 +286,8 @@ window.RYZA_DATA = {
    "state": "OPEN",
    "labels": [
     "impl"
-   ]
+   ],
+   "milestone": "T-011 分析エージェント+市場観"
   },
   {
    "number": 23,
@@ -285,10 +296,21 @@ window.RYZA_DATA = {
    "labels": [
     "impl",
     "in-progress"
-   ]
+   ],
+   "milestone": "T-010 階層0前処理"
   }
  ],
  "commits": [
+  {
+   "hash": "7768796",
+   "date": "08/03 11:21",
+   "subject": "wip(preprocess): テスト一式 (T-010)"
+  },
+  {
+   "hash": "f95d94d",
+   "date": "08/03 11:17",
+   "subject": "chore(site): ロードマップを現状に更新・進行中判定を in-progress ラベル連動に"
+  },
   {
    "hash": "63af2bd",
    "date": "08/03 11:16",
@@ -328,16 +350,6 @@ window.RYZA_DATA = {
    "hash": "6d849bc",
    "date": "08/03 03:03",
    "subject": "fix(bot): Secret 取得を stdlib REST 化(proto-plus 互換性クラッシュの回避)"
-  },
-  {
-   "hash": "1c01639",
-   "date": "08/03 03:00",
-   "subject": "fix(bot): owner_ids プロパティと discord.py 親クラスの衝突を修正、deploy を PG17/冪等化"
-  },
-  {
-   "hash": "4d9a598",
-   "date": "08/03 02:46",
-   "subject": "feat(bot): Ryza Discord Bot 基盤 (T-006)"
   }
  ]
 };
