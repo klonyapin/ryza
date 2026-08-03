@@ -1,0 +1,26 @@
+# config/market_view.yaml — 市場観ステートの決定論的更新規約のパラメータ（設計 20-research §5）。
+#
+# ryza.research.market_view がこれを読み、editor の更新案（提案）を決定論ルールで適用する。
+# LLM は一切この閾値に触れない。ルールをコード外に置くことで改訂→再評価を容易にする。
+
+version: "1"
+
+# 慣性ルール（§5-2）: regime の反転は「複数ソース・複数日にわたる証拠の蓄積」を要する。
+# 単一ニュース・単一日での反転を禁止し、追従性・過敏性を抑制する。
+# 反転が適用されるのは、蓄積が下記 3 条件をすべて満たしたとき。
+inertia:
+  min_days: 2        # 反転先へ向かう証拠が観測された相異なる営業日数の下限
+  min_sources: 2     # 相異なる独立ソース数の下限（提案の source_count を合算）
+  min_weight: 1.0    # 蓄積した証拠 weight（0-1 の和）の下限
+
+# 変化量スコア magnitude（§5-3）: 適用された差分の種類ごとの寄与。合算してクランプ（0-1）。
+# regime 反転 = 大、リスク確度の微調整 = 小。
+magnitude:
+  regime_flip: 0.70              # 既存次元の regime 反転が適用された
+  regime_add: 0.20               # 新規の regime 次元を追加した（反転ではない）
+  key_risk_add: 0.15             # 注目リスクを追加した
+  key_risk_confidence_scale: 0.50  # 確度変更の寄与 = |Δ確度| × これ
+  key_risk_resolve: 0.20         # リスクを解消した
+
+# 速報トリガ（§5-3）: この magnitude 以上の更新で報道部へフック発火。
+flash_threshold: 0.50
