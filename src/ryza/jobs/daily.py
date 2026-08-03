@@ -71,12 +71,22 @@ IngestSource = Callable[[datetime], Any]
 
 
 def _default_ingest_sources() -> list[tuple[str, IngestSource]]:
-    """T-009 の実取込ソース(名前, 実行コーラブル)を順序付きで返す。
+    """実取込ソース(名前, 実行コーラブル)を順序付きで返す(T-009 + T-012 一括拡張)。
 
     各ソースは自前の autocommit 接続・Run・Fetcher・証憑ストアを持つ CLI ``main`` を呼ぶ
     (``src/ryza/ingest/`` は **import 利用のみ**・変更しない)。``main`` は成功時 0 を返す。
     """
-    from ryza.ingest import calendar, edinet, fred, jquants, news_rss, tdnet
+    from ryza.ingest import (
+        calendar,
+        edgar,
+        edinet,
+        estat,
+        fred,
+        intl_banks,
+        jquants,
+        news_rss,
+        tdnet,
+    )
 
     def _date(as_of: datetime) -> str:
         return as_of.astimezone(JST).date().isoformat()
@@ -88,15 +98,20 @@ def _default_ingest_sources() -> list[tuple[str, IngestSource]]:
         ("news_rss", lambda as_of: news_rss.main([])),
         ("fred", lambda as_of: fred.main([])),
         ("calendar", lambda as_of: calendar.main([])),
+        # ── T-012 一括拡張分 ────────────────────────────────────────────────
+        ("edgar", lambda as_of: edgar.main([])),
+        ("estat", lambda as_of: estat.main([])),
+        ("intl_banks", lambda as_of: intl_banks.main([])),
     ]
 
 
 def _auth_error_types() -> tuple[type[BaseException], ...]:
     """資格情報未設定を表す取込側の例外型(これらは失敗でなく skipped として報告する)。"""
+    from ryza.ingest.estat import EstatAuthError
     from ryza.ingest.fred import FredAuthError
     from ryza.ingest.jquants import JQuantsAuthError
 
-    return (JQuantsAuthError, FredAuthError)
+    return (JQuantsAuthError, FredAuthError, EstatAuthError)
 
 
 def run_ingest_sources(

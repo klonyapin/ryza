@@ -191,11 +191,14 @@ def test_run_ingest_sources_dry_run_skips_network():
 
 
 def test_default_ingest_sources_are_wired():
-    # 6 ソースが名前付きで登録されている(呼び出しはしない)。
+    # T-009 6 ソース + T-012 3 ソースが名前付きで登録されている(呼び出しはしない)。
     from ryza.jobs.daily import _default_ingest_sources
 
     names = [n for n, _ in _default_ingest_sources()]
-    assert names == ["jquants", "tdnet", "edinet", "news_rss", "fred", "calendar"]
+    assert names == [
+        "jquants", "tdnet", "edinet", "news_rss", "fred", "calendar",
+        "edgar", "estat", "intl_banks",
+    ]
 
 
 def test_daily_with_default_ingest_stage(

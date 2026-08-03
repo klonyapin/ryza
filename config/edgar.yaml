@@ -1,0 +1,32 @@
+# config/edgar.yaml — SEC EDGAR の取込対象（CIK ウォッチリスト）。
+#
+# ingest.edgar がこのリストを読み、submissions（開示メタデータ → docs.documents）と
+# companyfacts（XBRL 財務ファクト → market.indicators、facts: true のみ）を日次取得する。
+# 13F 提出者（運用会社）は facts: false（事業会社の XBRL を持たないため）。
+#
+# SEC 規約: 10 req/s 上限・User-Agent 連絡先申告必須（env RYZA_EDGAR_CONTACT。
+# 詳細は src/ryza/ingest/edgar.py の docstring）。
+#
+# 初期セット（私案）: 保有・ウォッチ銘柄に応じて追加する。CIK は
+# https://www.sec.gov/cgi-bin/browse-edgar の company search で確認できる。
+
+companies:
+  # ── 事業会社（submissions + companyfacts）─────────────────────────────────
+  - cik: "0000320193"
+    name: Apple Inc.
+    active: true
+  - cik: "0000789019"
+    name: Microsoft Corp
+    active: true
+  - cik: "0001018724"
+    name: Amazon.com Inc
+    active: true
+  - cik: "0001045810"
+    name: NVIDIA Corp
+    active: true
+
+  # ── 13F 提出者（保有報告のみ。facts: false）────────────────────────────────
+  - cik: "0001067983"
+    name: Berkshire Hathaway Inc
+    facts: false
+    active: true

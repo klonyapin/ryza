@@ -30,6 +30,36 @@ feeds:
     source_type: central_bank
     active: true
 
+  # ── 主要国統計局・国際機関（T-012 一括拡張・§2）────────────────────────────
+  # URL は 2026-08 時点の私案。初回ポーリングで取得失敗するものは URL を実地確認して
+  # 差し替える（失敗は ingest_all の errors と freshness で検知される）。
+  # IMF は国際機関だが source_type の語彙（0003_docs.sql: news|filing|paper|social|
+  # gov|court|policy + central_bank）に新語を増やさず gov 扱いとする。
+  - name: 総務省統計局
+    url: https://www.stat.go.jp/rss/whatsnew.xml
+    source_type: gov
+    active: true
+  - name: 米労働統計局BLS
+    url: https://www.bls.gov/feed/news_release.rss
+    source_type: gov
+    active: true
+  - name: 米経済分析局BEA
+    url: https://apps.bea.gov/rss/rss.xml
+    source_type: gov
+    active: true
+  - name: ECB
+    url: https://www.ecb.europa.eu/rss/press.html
+    source_type: central_bank
+    active: true
+  - name: BOE
+    url: https://www.bankofengland.co.uk/rss/news
+    source_type: central_bank
+    active: true
+  - name: IMF
+    url: https://www.imf.org/external/cntpst/prfeed.aspx
+    source_type: gov
+    active: true
+
   # ── 一般報道（私案・設計リード確認待ち: active=false）─────────────────────────
   # 朝刊編集方針の回答を反映して確定する。候補（公開 RSS の提供有無を要確認）:
   # - Reuters（ワールド/マーケット）  https://www.reutersagency.com/feed/

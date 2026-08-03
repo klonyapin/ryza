@@ -1,0 +1,26 @@
+# config/estat_series.yaml — e-Stat の取込対象統計表（statsDataId ウォッチリスト）。
+#
+# ingest.estat がこのリストを読み getStatsData で取得、market.indicators へ
+# ESTAT:{statsDataId}:{分類次元...} の系列として書き込む。appId は Secret
+# 'estat-app-id'（env RYZA_ESTAT_APP_ID）。
+#
+# statsDataId は統計表ごとに振られる ID。e-Stat のデータセット詳細ページの URL
+# （…/dbview?sid=XXXXXXXXXX）で確認できる。基準改定で表が切り替わると ID も変わる
+# ため、改定時はここを更新する。
+#
+# 注意: 下記 ID は 2026-08 時点の私案。**初回実行前に e-Stat 上で ID を実地確認**
+# すること（誤 ID は STATUS エラーになり freshness の no_data 警告で検知される）。
+
+tables:
+  # 消費者物価指数（CPI・2020年基準 全国 中分類）
+  - id: "0003427113"
+    name: 消費者物価指数(全国・中分類)
+    active: true
+  # 労働力調査（完全失業率ほか 基本集計・全国・月次）
+  - id: "0002060047"
+    name: 労働力調査(基本集計・月次)
+    active: true
+  # 候補（ID 確認後に有効化）:
+  # - 家計調査（二人以上世帯・支出）
+  # - 鉱工業指数（IIP・経産省）
+  # - 毎月勤労統計（現金給与総額・厚労省）

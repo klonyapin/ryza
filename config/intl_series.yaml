@@ -1,0 +1,43 @@
+# config/intl_series.yaml — 海外中銀・国際機関の取込対象系列。
+#
+# ingest.intl_banks がこのリストを読み、market.indicators へ
+# {ECB|BOE|IMF}:{path の '/' を '.' に置換} の系列として書き込む。
+#
+# path の形式（詳細は src/ryza/ingest/intl_banks.py の docstring）:
+# - ecb: {flow}/{key}   … ECB Data Portal のデータフロー/系列キー
+# - boe: IADB 系列コード
+# - imf: {dataset}/{key} … IMF SDMX の DB 名/系列キー
+#
+# 注意: 下記キーは 2026-08 時点の私案。**初回実行前に各ポータルで実地確認**すること
+# （誤キーは取得エラーになり freshness の no_data 警告で検知される）。
+
+series:
+  # ── ECB（ユーロ圏）──────────────────────────────────────────────────────
+  - provider: ecb
+    path: EXR/D.USD.EUR.SP00.A
+    name: ECB 参照為替 USD/EUR(日次)
+    active: true
+  - provider: ecb
+    path: EXR/D.JPY.EUR.SP00.A
+    name: ECB 参照為替 JPY/EUR(日次)
+    active: true
+  - provider: ecb
+    path: FM/B.U2.EUR.4F.KR.MRR_FR.LEV
+    name: ECB 主要リファイナンスオペ金利(MRO)
+    active: true
+
+  # ── BOE(英国)────────────────────────────────────────────────────────────
+  - provider: boe
+    path: IUDBEDR
+    name: BOE 政策金利(Bank Rate・日次)
+    active: true
+
+  # ── IMF(国際機関)────────────────────────────────────────────────────────
+  - provider: imf
+    path: IFS/M.JP.PCPI_IX
+    name: IMF IFS 日本 CPI 指数(月次)
+    active: true
+  - provider: imf
+    path: IFS/M.US.PCPI_IX
+    name: IMF IFS 米国 CPI 指数(月次)
+    active: true

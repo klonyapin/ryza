@@ -56,6 +56,21 @@ DEFAULT_SLAS: list[FreshnessSLA] = [
     FreshnessSLA("EDINET 開示", "documents", "EDINET", timedelta(hours=26)),
     FreshnessSLA("J-Quants 日足", "bars", "jquants", timedelta(hours=26)),
     FreshnessSLA("FRED マクロ統計", "indicators", "FRED:%", timedelta(hours=26)),
+    # ── T-012 一括拡張分 ────────────────────────────────────────────────────
+    # RSS（日次巡回想定。更新頻度が低い機関は緩め）。
+    FreshnessSLA("総務省統計局", "documents", "総務省統計局", timedelta(days=7)),
+    FreshnessSLA("米労働統計局BLS", "documents", "米労働統計局BLS", timedelta(days=3)),
+    FreshnessSLA("米経済分析局BEA", "documents", "米経済分析局BEA", timedelta(days=7)),
+    FreshnessSLA("ECB プレス", "documents", "ECB", timedelta(days=3)),
+    FreshnessSLA("BOE ニュース", "documents", "BOE", timedelta(days=3)),
+    FreshnessSLA("IMF プレス", "documents", "IMF", timedelta(days=7)),
+    # API 系。EDGAR は日次バッチ、e-Stat は月次統計中心、中銀系列は日次〜月次混在。
+    FreshnessSLA("SEC EDGAR 開示", "documents", "EDGAR", timedelta(hours=50)),
+    FreshnessSLA("EDGAR XBRL", "indicators", "EDGAR:%", timedelta(days=35)),
+    FreshnessSLA("e-Stat 統計", "indicators", "ESTAT:%", timedelta(days=40)),
+    FreshnessSLA("ECB 統計", "indicators", "ECB:%", timedelta(days=7)),
+    FreshnessSLA("BOE 統計", "indicators", "BOE:%", timedelta(days=7)),
+    FreshnessSLA("IMF 統計", "indicators", "IMF:%", timedelta(days=40)),
 ]
 
 
