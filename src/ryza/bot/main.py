@@ -1,7 +1,8 @@
 """Ryza Discord Bot 常駐エントリポイント(discord.py 2.6 / GCE 常駐)。
 
 systemd(Restart=always)で常駐し:
-- 5秒間隔で ``press.outbox`` を配送(``outbox.deliver_pending``)
+- 5秒間隔で開発室(``ops.dev_chat``・0024)の未中継の代表発言を #dev へ中継し
+  (``devchat.relay_pending``)、続けて ``press.outbox`` を配送(``outbox.deliver_pending``)
 - 18:00 JST に日報を投入(``daily.enqueue_daily``)
 - ``#承認`` のボタン押下を ``governance.decisions`` に記録(オーナー検証)
 - ``/kill``(凍結)``/winddown``(計画的現金化)``/flatten``(緊急清算・2段階)
@@ -43,6 +44,7 @@ from ryza.bot import daily as daily_mod
 from ryza.bot.approvals import KINDS, NotOwnerError, parse_proposal, record_decision
 from ryza.bot.daily import JST
 from ryza.db.conn import connect
+from ryza.governance import devchat
 from ryza.provenance import start_run
 
 log = logging.getLogger("ryza.bot")
@@ -270,6 +272,11 @@ class RyzaBot(commands.Bot):
         # _deliver_once は同期 DB I/O と run_coroutine_threadsafe(...).result() を含むため、
         # イベントループ上で直接実行するとハートビートを塞ぎ自己デッドロックする。
         # 必ずワーカースレッドへ逃がす。
+        #
+        # 開発室(0024)の中継を配送より**先**に回す。中継は press.outbox への enqueue
+        # なので、同じティック内で続く deliver_pending がそのまま Discord へ流す
+        # (専用ポーラーを増やさず、代表の連絡が最短で届く)。
+        await asyncio.to_thread(self._relay_dev_chat_sync)
         await asyncio.to_thread(self._deliver_sync)
 
     @poll_outbox.before_loop
@@ -288,6 +295,29 @@ class RyzaBot(commands.Bot):
     @daily_report.before_loop
     async def _before_daily(self) -> None:
         await self.wait_until_ready()
+
+    def _relay_dev_chat_sync(self) -> None:
+        """開発室(``ops.dev_chat``・0024)の未中継の代表発言を #dev へ中継する。
+
+        代表がダッシュボードから書いた連絡を、設計リードが見ている Discord の
+        ブリッジチャンネルへ流す唯一の経路。中継の実体は ``press.outbox`` への
+        enqueue で、Discord API は叩かない(配送の冪等・リトライは既存経路に委ねる)。
+
+        未中継が無いときは ``meta.runs`` に行を作らない — 5 秒ごとの空振りで実行記録を
+        埋めないため(``devchat.has_pending``)。
+        """
+        try:
+            with connect() as conn:
+                if not devchat.has_pending(conn):
+                    return
+                r = start_run("bot.devchat.relay", conn=conn)
+                relayed = devchat.relay_pending(conn, r.run_id)
+                r.finish("success")
+                conn.commit()
+            if relayed:
+                log.info("開発室を %d 件中継した: %s", len(relayed), relayed)
+        except Exception:  # noqa: BLE001 - 中継の失敗で配送ループを死なせない
+            log.exception("開発室の中継でエラー")
 
     def _deliver_sync(self) -> None:
         loop = self.loop
