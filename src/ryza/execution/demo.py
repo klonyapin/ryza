@@ -95,6 +95,34 @@ def latest_close(
     return None if bar is None else bar.close
 
 
+def close_on(
+    conn: psycopg.Connection, instrument_id: int, day: date
+) -> Decimal | None:
+    """**その日ちょうど**の日足終値。その日のバーが無ければ None(遡らない)。
+
+    ``latest_close``(on_or_before)との違いは意図的である(独立審査 新-6): 過去日の
+    評価替えを打ち直す再締めが遡り取得を使うと、別日の終値でその日を評価しながら
+    ``priced_at`` にはその日を書く**虚偽の証憑**ができ、しかも当該日は以後 stale では
+    ないため誤価格が恒久固定される。過去日の再評価は「その日のバーがある」ときだけ
+    行い、無い日は再適用しない(全か無かの門を『価格の有無』でなく『その日のバーの
+    有無』で切る)。ライブの執行・当日の締めは従来どおり遡り取得でよい — あちらは
+    「今知っている最新値」で建てる規約だからである。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT close FROM market.bars
+            WHERE instrument_id = %s AND timeframe = '1d' AND close IS NOT NULL
+              AND (ts AT TIME ZONE 'Asia/Tokyo')::date = %s
+            ORDER BY as_of DESC
+            LIMIT 1
+            """,
+            (instrument_id, day),
+        )
+        row = cur.fetchone()
+    return None if row is None else Decimal(row[0])
+
+
 class DemoBroker:
     """デモ市場(market.bars の日足)に対する ``Broker`` 実装。DB は読み取りのみ。"""
 
@@ -203,4 +231,4 @@ class DemoBroker:
         return fee.quantize(_QUANTUM, rounding=ROUND_CEILING)
 
 
-__all__ = ["DailyBar", "DemoBroker", "latest_close", "latest_daily_bar"]
+__all__ = ["DailyBar", "DemoBroker", "close_on", "latest_close", "latest_daily_bar"]
