@@ -318,6 +318,31 @@ def main() -> None:
     client = GitHubClient(token, repo, dry_run=dry_run)
     fired = run_weekly(client)
     log.info("ops-weekly 完了。発火: %s", fired or "なし")
+    run_a13_if_configured(dry_run=dry_run)
+
+
+def run_a13_if_configured(*, dry_run: bool) -> None:
+    """A-13 監査(規則⇔実装トレーサビリティ)を週次で実行する(opt-in)。
+
+    A-13 は git 履歴(ローカル checkout)と DB(press.outbox)を必要とするため、両方に届く
+    実行環境(GCE VM 等)で ``A13_REPO_PATH`` を設定したときだけ走る。Cloud Run 版 ops-weekly
+    (checkout も DB も無い)では未設定のまま = スキップ。監査の失敗は握って週次ジョブ本体は
+    継続する(ダイジェスト投稿を道連れにしない)が、ログには残す。
+    """
+    repo_path = os.environ.get("A13_REPO_PATH")
+    if not repo_path:
+        log.info("A-13 監査はスキップ(A13_REPO_PATH 未設定)")
+        return
+    from ryza.audit import a13
+
+    try:
+        result = a13.run_and_report(repo_path, dry_run=dry_run)
+        log.info(
+            "A-13 監査完了: 違反 %d / 不整合 %d / 宣言 %d",
+            len(result["violations"]), len(result["mismatches"]), len(result["declarations"]),
+        )
+    except Exception:
+        log.exception("A-13 監査の実行に失敗(週次ジョブ自体は継続)")
 
 
 if __name__ == "__main__":
