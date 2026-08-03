@@ -4,7 +4,7 @@
 ``StructuredLLM`` の裏で Anthropic Messages API を叩く唯一の口。構造化出力の検証・リトライ・
 コスト記録は ``StructuredLLM`` 側が担うため、本モジュールの責務は次に限る:
 
-- **リクエスト組立**: system に「スキーマ適合 JSON のみを返せ」という指示を足し Messages API へ POST。
+- **リクエスト組立**: system に「スキーマ適合 JSON のみを返せ」指示を足し Messages API へ POST。
 - **レスポンス解釈**: content の text ブロックから JSON を頑健に抽出して ``ProviderResult`` にする。
 - **HTTP リトライ・タイムアウト**: 429/5xx/タイムアウトを指数バックオフで再試行(スキーマ検証の
   再試行は ``StructuredLLM`` の管轄。ここは通信レベルのみ)。
@@ -201,7 +201,7 @@ def _json_directive(schema: dict[str, Any]) -> str:
     return (
         "\n\n---\n"
         "出力形式(厳守): 以下の JSON Schema に適合する **単一の JSON オブジェクトのみ** を返せ。"
-        "前置き・後書き・コードフェンス・説明を一切付けず JSON オブジェクトそのものだけを出力せよ。\n"
+        "前置き・後書き・コードフェンスを付けず JSON オブジェクトそのものだけを出力せよ。\n"
         f"JSON Schema:\n{json.dumps(schema, ensure_ascii=False)}"
     )
 
