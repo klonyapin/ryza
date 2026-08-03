@@ -81,14 +81,13 @@ def test_close_end_to_end_confirmed(conn, run_id, passed_order, insert_bar, toda
     assert (Decimal(snap[0]), snap[1]) == (Decimal("9999936.00"), "confirmed")
 
 
-# ── 再締め: 審査シナリオ G(締め後の同日出資)─────────────────────────────────
-# 独立審査 重要-2(docs/reviews/risk-navflow-rollforward-independent-review.md):
+# ── 再締め: 審査シナリオ G と再審査の対照実験 ─────────────────────────────────
+# 独立審査 重要-2 / 再-1(docs/reviews/risk-navflow-rollforward-independent-review.md):
 # 締めが走った**後**に同じ日付で立った仕訳は当日のスナップショットに入らない。navflow は
 # その仕訳を当日の flow_eop として NAV から引くため、当日に偽の下振れ・翌日に同額の偽の
-# 上振れという ±X% の対が立つ。翌営業日の締めが同じ日付を再計算すれば対は消える。
-_G_D0 = date(2026, 9, 1)   # シード出資(8/2・8/3)より後の日付を使う
-_G_D1 = date(2026, 9, 2)   # この日の締めの後に出資が立つ
-_G_D2 = date(2026, 9, 3)   # 翌営業日の締め = 再締めが走る日
+# 上振れという ±X% の対が立つ。判定は必ず book_returns(観測量)で行う — NAV 値だけを
+# 固定すると窓境界の偽リターンを「仕様」として固定してしまう(再審査の指摘)。
+_G_DAYS = [date(2026, 9, d) for d in range(1, 7)]  # シード出資(8/2・8/3)より後
 
 
 def _post_contribution(conn, run_id, day, amount: Decimal) -> None:
@@ -113,66 +112,123 @@ def _returns(conn) -> list[float]:
     return book_returns(load_nav_flow_data(conn, "DEMO_FUND").points)
 
 
-def _scenario_g(conn, run_id, *, reclose_business_days: int):
-    cfg = make_test_config(reclose_business_days=reclose_business_days)
-    for day in (_G_D0, _G_D1):
-        run_demo_close(conn, book_id="DEMO_FUND", date=day, run_id=run_id, config=cfg)
-    _post_contribution(conn, run_id, _G_D1, Decimal(5_000_000))  # ← 締めの後に立つ
-    # この時点で D1 の NAV は出資を含まないのに flow_eop だけ引かれる = 偽の −50%。
-    assert _returns(conn) == [-0.5]
-    return run_demo_close(conn, book_id="DEMO_FUND", date=_G_D2, run_id=run_id, config=cfg)
-
-
-def test_reclose_disabled_reproduces_false_return_pair(conn, run_id):
-    """再締めなしでは ±50% の偽リターン対が残る(審査が再現した不具合そのもの)。"""
-    result = _scenario_g(conn, run_id, reclose_business_days=0)
-    assert result["reclose"] == []
-    assert _returns(conn) == [-0.5, 0.5]
+def _close(conn, run_id, day):
+    return run_demo_close(conn, book_id="DEMO_FUND", date=day, run_id=run_id)
 
 
 def test_reclose_resolves_false_return_pair(conn, run_id):
-    """再締め(N=3)で D1 の NAV が出資を取り込み、偽リターン対が消える。"""
-    result = _scenario_g(conn, run_id, reclose_business_days=3)
+    """シナリオ G: 締め後の同日出資 → 翌日の締めで ±50% の偽リターン対が消える。"""
+    d0, d1, d2 = _G_DAYS[0], _G_DAYS[1], _G_DAYS[2]
+    _close(conn, run_id, d0)
+    _close(conn, run_id, d1)
+    _post_contribution(conn, run_id, d1, Decimal(5_000_000))  # ← d1 の締めの後に立つ
+    # 出資が NAV に入らないまま flow_eop だけ引かれる = 偽の −50%(不具合の再現)。
+    assert _returns(conn) == [-0.5]
 
-    # D1 だけが書き換わる(D0 は出資日より前なので値が変わらない)。
-    assert [(r["date"], r["nav_before"], r["nav_after"]) for r in result["reclose"]] == [
-        (_G_D1, Decimal(10_000_000), Decimal(15_000_000))
-    ]
+    result = _close(conn, run_id, d2)
     assert _returns(conn) == [0.0, 0.0]
+    restated = [r for r in result["reclose"] if r["restated"]]
+    assert [(r["date"], r["nav_before"], r["nav_after"]) for r in restated] == [
+        (d1, Decimal(10_000_000), Decimal(15_000_000))
+    ]
+    assert restated[0]["age_business_days"] == 1  # 締め 1 回前 = urgent ではない
 
-    # risk.nav_daily(0016 の risk 用ビュー)も追随し、nav_snapshots と一致する。
-    assert result["reclose"][0]["nav_daily_missing"] is False
+
+def test_reclose_catches_entries_older_than_any_fixed_window(conn, run_id):
+    """再審査 再-1 の対照実験: 固定窓 N=3 なら窓外に落ちる古い遅延仕訳も水位で拾う。
+
+    d0〜d4 を締めた**後**に d1 付けの出資が立つ(4 営業日遅れの記帳)。固定窓 N=3 の
+    実装は d2〜d4 だけを書き換えて d1 を残すため、窓境界に恒久的な +50% を作った
+    (審査実測 ``[-0.5, +0.5, 0, 0, 0]``)。水位検出は d1 以降すべてを stale と判定する。
+    """
+    days = _G_DAYS[:5]
+    for day in days:
+        _close(conn, run_id, day)
+    _post_contribution(conn, run_id, days[1], Decimal(5_000_000))
+    assert _returns(conn) == [-0.5, 0.0, 0.0, 0.0]  # 窓外の偽リターン(修正前)
+
+    result = _close(conn, run_id, _G_DAYS[5])
+    assert _returns(conn) == [0.0, 0.0, 0.0, 0.0, 0.0]  # 窓の縁が存在しない
+    restated = [r["date"] for r in result["reclose"] if r["restated"]]
+    assert restated == days[1:]  # d0 は出資日より前なので対象外
+
+
+def test_reclose_advances_watermark_for_nav_neutral_entries(conn, run_id):
+    """再審査 再-4: NAV 中立の遅延仕訳でも水位を進め、翌日以降の再検出を止める。"""
+    d0, d1, d2 = _G_DAYS[0], _G_DAYS[1], _G_DAYS[2]
+    _close(conn, run_id, d0)
+    # 資産の振替のみ(現金 → 証券・手数料ゼロ)= NAV は動かないが仕訳は立つ。
+    posting.post_entry(
+        conn, book_id="DEMO_FUND", entry_date=d0,
+        description="NAV 中立の遅延記帳(テスト)",
+        lines=[
+            {"account_id": "securities", "debit": Decimal(1000), "currency": "JPY",
+             "instrument_id": 1},
+            {"account_id": "cash", "credit": Decimal(1000), "currency": "JPY"},
+        ],
+        evidence={"kind": "decision", "payload": {"test": "neutral"}, "source": "test"},
+        run_id=run_id, posted_by="test.execution",
+    )
+
+    first = _close(conn, run_id, d1)
+    detected = [r for r in first["reclose"] if r["date"] == d0]
+    assert len(detected) == 1
+    assert detected[0]["late_entries"] is True
+    assert detected[0]["restated"] is False  # NAV は動いていない
+    assert detected[0]["watermark_after"] > detected[0]["watermark_before"]
+
+    # 2 回目の締めでは水位が最新なので同じ日を再検出しない(偽検出の永続化を防ぐ)。
+    second = _close(conn, run_id, d2)
+    assert [r["date"] for r in second["reclose"]] == []
+
+
+def test_reclose_invalidates_stale_positions_detail(conn, run_id):
+    """再審査 再-2/再-3: 訂正した日の建玉明細は残さず、restated の事実を書く。"""
+    d0, d1 = _G_DAYS[0], _G_DAYS[1]
+    _close(conn, run_id, d0)
+    _post_contribution(conn, run_id, d0, Decimal(5_000_000))
+    _close(conn, run_id, d1)
+
     with conn.cursor() as cur:
         cur.execute(
-            """
-            SELECT d.nav, s.nav, d.detail -> 'reclose' ->> 'nav_before', d.run_id
-            FROM risk.nav_daily d
-            JOIN ledger.nav_snapshots s
-              ON s.book_id = d.book_id AND s.snap_date = d.nav_date
-            WHERE d.book_id = 'DEMO_FUND' AND d.nav_date = %s
-            """,
-            (_G_D1,),
+            "SELECT status, detail FROM ledger.nav_snapshots "
+            "WHERE book_id = 'DEMO_FUND' AND snap_date = %s",
+            (d0,),
         )
-        nav_daily, nav_snapshot, nav_before, row_run_id = cur.fetchone()
-    assert Decimal(nav_daily) == Decimal(nav_snapshot) == Decimal(15_000_000)
-    assert Decimal(nav_before) == Decimal(10_000_000)
-    assert row_run_id == run_id  # 書き手の run へ差し替わる(リネージ)
+        status, detail = cur.fetchone()
+    assert status == "confirmed"  # status は締め時点の照合の結論(据え置き)
+    assert detail["restated"] is True  # restated はその後の会計訂正
+    assert detail["positions_stale"] is True and "positions" not in detail
+    assert detail["mtm_not_reapplied"] is True
+    assert Decimal(detail["assets"]) == Decimal(15_000_000)  # 集計値は訂正後に揃う
+
+    # risk.nav_daily 側も同じ扱い(建玉・価格を落とし、元の run を残す)。
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT nav, detail, run_id FROM risk.nav_daily "
+            "WHERE book_id = 'DEMO_FUND' AND nav_date = %s",
+            (d0,),
+        )
+        nav, nd_detail, row_run_id = cur.fetchone()
+    assert Decimal(nav) == Decimal(15_000_000)
+    assert "positions" not in nd_detail and nd_detail["positions_stale"] is True
+    assert nd_detail["reclose"][0]["previous_run_id"] == run_id
+    assert row_run_id == run_id
 
 
 def test_reclose_reports_missing_nav_daily_row(conn, run_id):
     """nav_snapshots だけ動いて nav_daily の行が無い日は、合成せず痕跡を返す。"""
-    cfg = make_test_config()
-    run_demo_close(conn, book_id="DEMO_FUND", date=_G_D1, run_id=run_id, config=cfg)
+    d0, d1 = _G_DAYS[0], _G_DAYS[1]
+    _close(conn, run_id, d0)
     with conn.cursor() as cur:  # 執行段を経ていない日を模す
-        cur.execute("DELETE FROM risk.nav_daily WHERE nav_date = %s", (_G_D1,))
-    _post_contribution(conn, run_id, _G_D1, Decimal(5_000_000))
+        cur.execute("DELETE FROM risk.nav_daily WHERE nav_date = %s", (d0,))
+    _post_contribution(conn, run_id, d0, Decimal(5_000_000))
 
-    result = run_demo_close(
-        conn, book_id="DEMO_FUND", date=_G_D2, run_id=run_id, config=cfg
-    )
-    assert result["reclose"][0]["nav_daily_missing"] is True
+    result = _close(conn, run_id, d1)
+    restated = [r for r in result["reclose"] if r["restated"]]
+    assert restated[0]["nav_daily_missing"] is True
     with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM risk.nav_daily WHERE nav_date = %s", (_G_D1,))
+        cur.execute("SELECT count(*) FROM risk.nav_daily WHERE nav_date = %s", (d0,))
         assert cur.fetchone()[0] == 0  # 合成しない(執行照合を経ていない confirmed を作らない)
 
 

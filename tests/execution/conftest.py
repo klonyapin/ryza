@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from ryza.db.conn import connect
-from ryza.execution.config import CloseSpec, ExecutionConfig, FeeSpec, SlippageSpec
+from ryza.execution.config import ExecutionConfig, FeeSpec, SlippageSpec
 from ryza.gate.compliance import OrderProposal
 from ryza.gate.orders import gate_and_record
 from ryza.ledger import create_run
@@ -145,7 +145,7 @@ def today_jst() -> date:
     return datetime.now(UTC).astimezone(JST).date()
 
 
-def make_test_config(*, reclose_business_days: int = 3, **fee_overrides) -> ExecutionConfig:
+def make_test_config(**fee_overrides) -> ExecutionConfig:
     """数値検証用の固定パラメータ(発効 config とは独立に手計算値と突合する)。"""
     fees = {
         "default": FeeSpec(commission_rate=Decimal(0)),
@@ -163,5 +163,4 @@ def make_test_config(*, reclose_business_days: int = 3, **fee_overrides) -> Exec
             max_bps=Decimal(100),
         ),
         fees=fees,
-        close=CloseSpec(reclose_business_days=reclose_business_days),
     )

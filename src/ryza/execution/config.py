@@ -37,17 +37,6 @@ def _dec(raw: Any, field: str) -> Decimal:
     return value
 
 
-def _int(raw: Any, field: str) -> int:
-    """非負整数として読む(営業日数などの計数値)。"""
-    try:
-        value = int(raw)
-    except (TypeError, ValueError) as exc:
-        raise ExecutionConfigError(f"{field} が整数でない: {raw!r}") from exc
-    if value < 0:
-        raise ExecutionConfigError(f"{field} は非負: {value}")
-    return value
-
-
 @dataclass(frozen=True)
 class FeeSpec:
     """1 資産クラスの売買委託手数料。fee = clamp(rate×約定代金, min_fee, max_fee)。"""
@@ -67,20 +56,12 @@ class SlippageSpec:
 
 
 @dataclass(frozen=True)
-class CloseSpec:
-    """締めの再実行窓。日次の締めは当日に加えて直近 N 営業日の NAV を再計算・上書きする。"""
-
-    reclose_business_days: int
-
-
-@dataclass(frozen=True)
 class ExecutionConfig:
     """``config/execution.yaml`` の内容。"""
 
     version: str
     slippage: SlippageSpec
     fees: dict[str, FeeSpec]
-    close: CloseSpec
 
     @classmethod
     def load(cls, path: str | Path = _CONFIG_PATH) -> ExecutionConfig:
@@ -117,21 +98,7 @@ class ExecutionConfig:
                 f"fees.{_DEFAULT_FEE_KEY} が無い(未知の資産クラスの引き当て先)"
             )
 
-        # close セクションも必須。既定値をコード側に持つと「窓の広さ」がハードコード
-        # されるため(値の根拠は yaml のコメントが正)、欠落は即座にエラーにする。
-        close_raw = data.get("close") or {}
-        if "reclose_business_days" not in close_raw:
-            raise ExecutionConfigError("close.reclose_business_days が無い")
-        reclose_days = _int(
-            close_raw["reclose_business_days"], "close.reclose_business_days"
-        )
-
-        return cls(
-            version=str(data.get("version", "1")),
-            slippage=slippage,
-            fees=fees,
-            close=CloseSpec(reclose_business_days=reclose_days),
-        )
+        return cls(version=str(data.get("version", "1")), slippage=slippage, fees=fees)
 
     def fee_for(self, asset_class: str | None) -> FeeSpec:
         """資産クラス → 手数料スペック。未知・欠損は default(高コスト側)。"""
@@ -140,10 +107,4 @@ class ExecutionConfig:
         return self.fees[_DEFAULT_FEE_KEY]
 
 
-__all__ = [
-    "CloseSpec",
-    "ExecutionConfig",
-    "ExecutionConfigError",
-    "FeeSpec",
-    "SlippageSpec",
-]
+__all__ = ["ExecutionConfig", "ExecutionConfigError", "FeeSpec", "SlippageSpec"]

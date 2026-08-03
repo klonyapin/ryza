@@ -7,15 +7,18 @@ run_daily_close:
   4. NAV 算出 → nav_snapshots に provisional で保存
   5. recon の照合結果が全件 matched なら confirmed に更新、不一致なら provisional のまま
 
-reclose_recent(独立審査 重要-2):
-  締めが走った**後**に同じ日付で立った仕訳は当日のスナップショットに入らない。日次の
-  締めはそのため当日に加えて直近 N 営業日の NAV を再計算し、値が変わった日だけ
-  上書きする(``_upsert_nav`` は冪等)。詳細は関数 docstring。
+reclose_stale(独立審査 重要-2 / 再審査 再-1):
+  締めが走った**後**に同じ日付で立った仕訳は当日のスナップショットに入らない。対象日を
+  「直近 N 営業日」という固定窓で決めると、窓の外に落ちた仕訳が窓境界に恒久的な偽
+  リターンを立てる(再審査の実測: 対照 `[0,0,0]` に対し固定窓 N=3 は `[+0.5,0,0]`)。
+  そこで**水位検出**を採る — 各スナップショットは自分が見た仕訳の水位
+  (``detail.producer.input_refs``)を持つので、水位より後ろの ``entry_id`` を持つ
+  遅延仕訳がある日を 1 クエリで列挙し、その日だけ再計算する。窓の縁が存在しない。
 
 nav_snapshots のリネージ(不変原則3):
   ``detail`` は jsonb であり、``detail.producer`` に producer_job / run_id /
   code_version / as_of / input_refs(仕訳の水位)を書く。既存列で足りるためスキーマ
-  変更(保護領域)は不要。
+  変更(保護領域)は不要。水位は遅延仕訳の検出器そのものでもある(再審査 再-5)。
 """
 
 from __future__ import annotations
@@ -36,7 +39,18 @@ _BOOK_TRACK = {"DEMO_FUND": "demo", "LIVE_FUND": "live"}
 
 # nav_snapshots.detail.producer.job に記録するジョブ名(リネージの追跡単位)。
 _JOB_DAILY_CLOSE = "ledger.closing.run_daily_close"
-_JOB_RECLOSE = "ledger.closing.reclose_recent"
+_JOB_RECLOSE = "ledger.closing.reclose_stale"
+
+#: ``detail.producer.input_refs`` の水位キー。``entry_id`` は IDENTITY(単調増加)なので
+#: 「そのスナップショットが見た仕訳」と「後から立った仕訳」を厳密に切り分けられる
+#: (タイムスタンプより強い — 独立審査 再-5)。
+WATERMARK_KEY = "ledger.journal_entries.max_entry_id"
+
+#: 確定 NAV の書き換え(restatement)を urgent で上げる古さ(営業日)。当日〜数日の訂正は
+#: 締めの正常な運用だが、これより古い日の書き換えは「既に外部へ報告済みの値が動く」意味を
+#: 持つため必ず目立たせる(上限や承認は設けない — 是正を止めるより可視化を優先する)。
+#: 営業日は祝日カレンダーではなくスナップショットの実績数で数える(締めが走った日=営業日)。
+RESTATEMENT_URGENT_BUSINESS_DAYS = 5
 
 # price_source は callable(instrument_id)->price、または dict{instrument_id: price}
 PriceSource = Callable[[int], Any] | dict[int, Any]
@@ -242,9 +256,7 @@ def _producer(
         "run_id": int(run_id),
         "code_version": row[0] if row else None,
         "as_of": as_of.isoformat(),
-        "input_refs": {"ledger.journal_entries.max_entry_id": _entries_watermark(
-            conn, book_id, as_of
-        )},
+        "input_refs": {WATERMARK_KEY: _entries_watermark(conn, book_id, as_of)},
         "written_at": datetime.now(UTC).isoformat(),
     }
 
@@ -259,12 +271,23 @@ def _upsert_nav(
     run_id: int,
     *,
     job: str = _JOB_DAILY_CLOSE,
+    prior_producer: dict[str, Any] | None = None,
 ) -> None:
     """nav_snapshots を upsert する(同日再締めは上書き。provisional→confirmed の更新に対応)。
 
     ``detail.producer`` に書き手のリネージを載せる — 「いつの締めが作った値か」を
     後から辿れるようにする(不変原則3)。detail は jsonb なので列の追加は不要。
+
+    ``prior_producer`` を渡すと ``detail.producer_history`` の末尾に積む。再締めが
+    2 回以上走った日でも痕跡が連鎖する(独立審査 再-8: 上書きで最初の書き手が消える)。
+    当日の締め(provisional→confirmed の 2 度書き)は同じ run による確定過程であり
+    restatement ではないため履歴に積まない。
     """
+    if prior_producer is not None:
+        history = detail.get("producer_history")
+        history = list(history) if isinstance(history, list) else []
+        history.append(prior_producer)
+        detail = {**detail, "producer_history": history}
     detail = {**detail, "producer": _producer(conn, book_id, snap_date, run_id, job)}
     with conn.cursor() as cur:
         cur.execute(
@@ -278,56 +301,89 @@ def _upsert_nav(
         )
 
 
-#: 再締めの対象日。**既にスナップショットが確定している直近の日**を新しい順に取る。
-#: 「営業日」を祝日カレンダーで定義せず実績で定義する — 締めが走った日 = 帳簿にとっての
-#: 営業日であり、外部カレンダーへの依存を持ち込まずに済む。締めが**走らなかった**日は
-#: そもそもスナップショットが無く、その日の外部フローは navflow のロールフォワードが
-#: 次の点へ寄せる(重要-5 の是正)。つまり再締めが救うべき対象は「確定済みの日」で
-#: 必要十分である。
-_RECENT_SNAP_DATES_SQL = """
-SELECT snap_date FROM ledger.nav_snapshots
-WHERE book_id = %s AND snap_date < %s
-ORDER BY snap_date DESC
-LIMIT %s
+#: 遅延仕訳のある日(stale 日)を 1 クエリで列挙する。各スナップショットが記録した水位
+#: ``detail.producer.input_refs`` と、いま同じ条件(``entry_date <= snap_date``)で測った
+#: 水位を比べ、後者が進んでいる日 = 締めの後に仕訳が立った日である。``entry_id`` は
+#: IDENTITY で単調、``journal_entries`` は追記オンリー(``forbid_mutation``)なので
+#: 「進んだ」以外の差は原理的に起きない。水位を持たない日(本機能より前に書かれた
+#: スナップショット)は判定材料が無いため stale 扱いにして水位を埋める(fail-safe)。
+#:
+#: ``age_business_days`` は「その日より後に締めが走った回数」= 営業日の実績カウント。
+#: 祝日カレンダーを持ち込まずに restatement の古さを測る(通知の材料性判定に使う)。
+_STALE_SNAPSHOTS_SQL = """
+WITH snap AS (
+    SELECT s.snap_date,
+           (s.detail -> 'producer' -> 'input_refs' ->> %(wm_key)s)::bigint
+               AS stored_watermark,
+           row_number() OVER (ORDER BY s.snap_date DESC) - 1 AS age_business_days
+    FROM ledger.nav_snapshots s
+    WHERE s.book_id = %(book)s AND s.snap_date <= %(through)s
+), measured AS (
+    SELECT snap.snap_date, snap.stored_watermark, snap.age_business_days,
+           (SELECT max(je.entry_id) FROM ledger.journal_entries je
+             WHERE je.book_id = %(book)s AND je.entry_date <= snap.snap_date)
+               AS current_watermark
+    FROM snap
+)
+SELECT snap_date, stored_watermark, current_watermark, age_business_days
+FROM measured
+WHERE stored_watermark IS NULL
+   OR coalesce(current_watermark, 0) > stored_watermark
+ORDER BY snap_date
 """
 
+#: 再締めが打ち直さないもの(証憑としての snapshot に必ず書く注記 — 独立審査 再-6)。
+_RESTATEMENT_NOTE = (
+    "再締めは記帳済み仕訳の集計のみをやり直す(MTM は打ち直さない)。"
+    "遅延約定を含む日の建玉は取得原価のままで時価ではない。"
+)
 
-def reclose_recent(
+
+def reclose_stale(
     conn: psycopg.Connection,
     *,
     book_id: str,
     through: _date,
-    days: int,
     run_id: int,
 ) -> list[dict[str, Any]]:
-    """直近 ``days`` 営業日ぶんの NAV を再計算し、値が変わった日だけ上書きする。
+    """締めの後に仕訳が立った日(stale 日)を水位で検出し、その日だけ再計算する。
 
-    **何を直すか**(独立審査 重要-2): 締めが走った後に同じ日付で立った仕訳(典型は
-    出資・払戻)は、その日のスナップショットに入らない。``risk.navflow`` はその仕訳を
-    当日の ``flow_eop`` として NAV から引くため、当日は偽の下振れ、翌日は同額の偽の
-    上振れという ±X% の対を生む。翌営業日の締めで同じ日付を再計算すれば仕訳は NAV 側に
-    入り、対は消える。
+    **なぜ固定窓ではないか**(独立審査 再-1): 「直近 N 営業日」で対象を決めると、窓の
+    外に落ちた遅延仕訳がスナップショットに永久に入らず、窓の境界に恒久的な偽日次
+    リターンを立てる。しかも 1 度報告した後は差分が無くなるため以後は無言になる
+    (実測: 対照 ``[0,0,0]`` に対し N=3 は ``[+0.5,0,0]``)。水位検出は「見た仕訳より
+    後ろの仕訳があるか」を各日について直接問うため、窓の縁そのものが存在しない。
 
-    **MTM を打ち直さない理由**: ここでは ``statements.book_totals`` の再計算と
-    スナップショットの上書きだけを行い、``run_daily_close`` は呼ばない。
-    ``post_mark_to_market`` は現在の保有数量(``replay_position`` は日付で切らない)を
-    使うため、過去日付で呼ぶと**その日には存在しなかった建玉**を過去日付の仕訳として
-    書いてしまう。過去日への新規記帳は行わず、既に記帳された仕訳の集計だけをやり直す。
+    **上書き条件は「NAV 変化 OR 水位変化」**(独立審査 再-4): 手数料ゼロの遅延約定の
+    ように NAV が動かない仕訳でも水位は進む。NAV 等値でスキップすると水位が古いまま
+    残り、同じ日を毎日 stale と誤検出し続ける(かつ本当の遅延を見分けられない)。
 
-    ``status`` は据え置く。遅れて立った拠出資本の仕訳は執行照合・ポジション照合の
-    結論(= status の意味)を変えないため。値が変わった日は戻り値で返すので、
-    呼び出し側が通知・監査に載せること(確定値の書き換えは黙って行わない)。
+    **MTM を打ち直さない理由**(独立審査 再-6 で追認): ``post_mark_to_market`` は
+    ``replay_position``(``entry_date`` で絞らない)の現在数量を使うため、過去日付で
+    呼ぶとその日に存在しなかった建玉を過去日付の仕訳として書いてしまう。過去日への
+    新規記帳は行わず、既に記帳された仕訳の集計だけをやり直す。代償として遅延約定の
+    ある日の建玉は取得原価のままになるので、``detail`` にその旨を明記する。
 
-    戻り値: 値が変わった日の ``[{date, nav_before, nav_after, status}, ...]``(日付昇順)。
+    **status と restated の区別**(独立審査 再-2 に対する設計リード裁定):
+    ``status``(provisional/confirmed)は**執行照合・ポジション照合の結論**であり、
+    締めの時点で行われた照合の記録である。``detail.restated`` は**その後に判明した
+    会計訂正**であり、照合の結論を書き換えるものではない。したがって再締めは status を
+    据え置き、代わりに ``restated`` / ``positions_stale`` を立てる。古い日の
+    restatement は ``urgent_restatements`` が urgent 通知の対象として拾う。
+
+    戻り値(日付昇順): ``[{date, nav_before, nav_after, status, restated, late_entries,
+    age_business_days, watermark_before, watermark_after}, ...]``。``restated`` が True の
+    日は確定 NAV が動いた日 = 呼び出し側が必ず通知すること。
     """
-    if days <= 0:
-        return []
     with conn.cursor() as cur:
-        cur.execute(_RECENT_SNAP_DATES_SQL, (book_id, through, days))
-        snap_dates = [r[0] for r in cur.fetchall()]
+        cur.execute(
+            _STALE_SNAPSHOTS_SQL,
+            {"book": book_id, "through": through, "wm_key": WATERMARK_KEY},
+        )
+        stale = cur.fetchall()
 
-    changed: list[dict[str, Any]] = []
-    for snap_date in reversed(snap_dates):  # 古い順に処理(監査ログの読み順に合わせる)
+    results: list[dict[str, Any]] = []
+    for snap_date, stored_wm, current_wm, age in stale:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT nav, status, detail FROM ledger.nav_snapshots "
@@ -336,29 +392,99 @@ def reclose_recent(
             )
             prev_nav, status, prev_detail = cur.fetchone()
         prev_nav = _util.to_decimal(prev_nav)
-        nav = statements.book_totals(conn, book_id, snap_date)["nav"]
-        if nav == prev_nav:
-            continue
-
         prev_detail = prev_detail if isinstance(prev_detail, dict) else {}
-        detail = {
-            **prev_detail,
-            "reclose": {
-                "nav_before": str(prev_nav),
-                "reason": "締め後に同日付で立った仕訳の取り込み(独立審査 重要-2)",
-                "previous_producer": prev_detail.get("producer"),
-            },
-        }
-        _upsert_nav(conn, book_id, snap_date, nav, status, detail, run_id, job=_JOB_RECLOSE)
-        changed.append(
+        totals = statements.book_totals(conn, book_id, snap_date)
+        nav = totals["nav"]
+
+        # 水位を持たない日(本機能より前のスナップショット)は「遅延仕訳があった」と
+        # 断定できない。NAV も変わらないならリネージの後追い記録だけを行い、
+        # restatement としては扱わない — 起きていない訂正を主張しないため。
+        late_entries = stored_wm is not None and (current_wm or 0) > stored_wm
+        restated = nav != prev_nav
+        detail = (
+            _restated_detail(prev_detail, totals, run_id, prev_nav, nav)
+            if (late_entries or restated)
+            else dict(prev_detail)
+        )
+
+        _upsert_nav(
+            conn, book_id, snap_date, nav, status, detail, run_id,
+            job=_JOB_RECLOSE, prior_producer=prev_detail.get("producer"),
+        )
+        results.append(
             {
                 "date": snap_date,
                 "nav_before": prev_nav,
                 "nav_after": nav,
                 "status": status,
+                "restated": restated,
+                "late_entries": late_entries,
+                "age_business_days": int(age),
+                "watermark_before": stored_wm,
+                "watermark_after": current_wm,
             }
         )
-    return changed
+    return results
 
 
-__all__ = ["reclose_recent", "run_daily_close"]
+def _restated_detail(
+    prev_detail: dict[str, Any],
+    totals: dict[str, Decimal],
+    run_id: int,
+    nav_before: Decimal,
+    nav_after: Decimal,
+) -> dict[str, Any]:
+    """再締め後の ``detail``。古い建玉明細を**残さず**訂正の事実を書く(独立審査 再-2/再-3)。
+
+    再計算するのは集計値(``book_totals``)だけなので、``positions``(締め時点の建玉と
+    評価額)は再締め後の NAV と整合しない。嘘のデータを残すより落として
+    ``positions_stale`` を立てるほうが証憑として正しい。``reclose`` は 2 回目以降の
+    訂正で最初の ``nav_before`` が消えないよう配列で追記する(独立審査 再-8)。
+    """
+    history = prev_detail.get("reclose")
+    history = list(history) if isinstance(history, list) else []
+    history.append(
+        {
+            "nav_before": str(nav_before),
+            "nav_after": str(nav_after),
+            "at": datetime.now(UTC).isoformat(),
+            "run_id": int(run_id),
+            "reason": "締め後に立った仕訳の取り込み(独立審査 重要-2)",
+        }
+    )
+    detail = {k: v for k, v in prev_detail.items() if k != "positions"}
+    detail.update(
+        assets=str(totals["assets"]),
+        liabilities=str(totals["liabilities"]),
+        net_income=str(totals["net_income"]),
+        positions_stale=True,
+        mtm_not_reapplied=True,
+        restatement_note=_RESTATEMENT_NOTE,
+        restated=True,
+        restated_at=datetime.now(UTC).isoformat(),
+        restated_by_run=int(run_id),
+        reclose=history,
+    )
+    return detail
+
+
+def urgent_restatements(reclosed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """urgent で上げるべき restatement(``RESTATEMENT_URGENT_BUSINESS_DAYS`` より古い日)。
+
+    しきい値は通知の材料性基準であり IPS の判定値ではない(``risk.navflow`` の
+    ``PENDING_MATERIALITY_NAV`` と同じ位置づけ)。当日〜数営業日の訂正は締めの正常な
+    運用だが、それより古い日の確定 NAV が動くのは既報値の書き換えである。
+    """
+    return [
+        r for r in reclosed
+        if r["restated"] and r["age_business_days"] > RESTATEMENT_URGENT_BUSINESS_DAYS
+    ]
+
+
+__all__ = [
+    "RESTATEMENT_URGENT_BUSINESS_DAYS",
+    "WATERMARK_KEY",
+    "reclose_stale",
+    "run_daily_close",
+    "urgent_restatements",
+]

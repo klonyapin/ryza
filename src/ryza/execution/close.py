@@ -12,9 +12,9 @@
    約定再生と執行系ポジションの独立クロスチェックになる)
 3. ``risk.nav_daily`` へ book_id×date×nav を upsert。status は執行照合(1)と
    ポジション照合(2)の両方が一致したときのみ confirmed
-4. ``ledger.closing.reclose_recent`` — 直近 N 営業日(``config/execution.yaml`` の
-   ``close.reclose_business_days``)の NAV を再計算し、締めの**後**に同じ日付で立った
-   仕訳を取り込む(独立審査 重要-2)。値が変わった日は ``risk.nav_daily`` 側も追随させる
+4. ``ledger.closing.reclose_stale`` — 締めの**後**に同じ日付で立った仕訳がある日を
+   水位(``detail.producer.input_refs``)で検出し、その日だけ NAV を再計算する
+   (独立審査 重要-2 / 再-1)。値が変わった日は ``risk.nav_daily`` 側も追随させる
 
 **NAV 二表の役割分担(T-015 統合時の設計リード裁定 2026-08-03)**:
 ``ledger.nav_snapshots`` が NAV の正(ledger が所有・T-015 の ``risk/daily.py`` は
@@ -37,7 +37,6 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Json
 
-from ryza.execution.config import ExecutionConfig
 from ryza.execution.demo import latest_close
 from ryza.ledger import closing
 
@@ -176,13 +175,13 @@ def run_demo_close(
     date: _date,
     run_id: int,
     on_break: BreakCallback | None = None,
-    config: ExecutionConfig | None = None,
 ) -> dict[str, Any]:
     """日次締め: 執行照合 → MTM/NAV/ポジション照合(ledger)→ risk.nav_daily → 再締め。
 
     戻り値: ``{nav, status, exec_recon, ledger, reclose}``。コミットは呼び出し側
-    (ledger.posting と同じ流儀)。``reclose`` は直近 N 営業日の再締めで**値が変わった
-    日**のリスト(独立審査 重要-2)— 確定値の書き換えは黙って行わず呼び出し側に返す。
+    (ledger.posting と同じ流儀)。``reclose`` は水位検出で再計算した日のリスト
+    (独立審査 重要-2 / 再-1)。``restated`` が True の要素は確定 NAV が動いた日で、
+    呼び出し側が必ず通知すること — 確定値の書き換えは黙って行わない。
     """
     exec_recon = reconcile_executions(conn, book_id=book_id, date=date, on_break=on_break)
 
@@ -226,16 +225,11 @@ def run_demo_close(
     }
     _upsert_nav_daily(conn, book_id, date, nav, status, detail, run_id)
 
-    # 直近 N 営業日の再締め(独立審査 重要-2)。当日の締めより**後**に置く: 当日の
-    # スナップショットを先に確定させておけば、再締めの窓(snap_date < date)と当日の
-    # 処理が重ならない。
-    cfg = config if config is not None else ExecutionConfig.load()
-    reclosed = closing.reclose_recent(
-        conn,
-        book_id=book_id,
-        through=date,
-        days=cfg.close.reclose_business_days,
-        run_id=run_id,
+    # 遅延仕訳のある日の再締め(独立審査 重要-2 / 再-1)。当日の締めより**後**に置く:
+    # 当日のスナップショットを先に確定させておけば、当日は水位が最新になり自動的に
+    # 検出対象から外れる(自分自身を再締めしない)。
+    reclosed = closing.reclose_stale(
+        conn, book_id=book_id, through=date, run_id=run_id
     )
     _sync_nav_daily_after_reclose(conn, book_id, reclosed, run_id)
 
@@ -260,16 +254,25 @@ def _sync_nav_daily_after_reclose(
     nav_daily は執行照合を重ねた risk 用ビュー)。再締めが片側だけを動かすと、リスク
     エンジンとダッシュボードが別々の NAV を見ることになる。
 
-    ``status`` は据え置く(``reclose_recent`` と同じ理由 — 遅れて立った拠出資本の仕訳は
-    照合の結論を変えない)。行が無い日は**作らない**: nav_daily の行は執行段の締めが
-    書くもので、ここで合成すると「執行照合を経ていない confirmed」が生まれる。
-    代わりに戻り値(``reclose`` の各要素)へ ``nav_daily_missing`` を立てて呼び出し側に返す。
+    ``status`` は据え置く(``reclose_stale`` と同じ理由 — status は締め時点の照合の
+    結論、``restated`` はその後の会計訂正)。``run_id`` は書き手を指すので訂正した run に
+    差し替えるが、**元の締めの run_id を ``detail.reclose[].previous_run_id`` に残す** —
+    nav_daily のリネージは run_id 列だけなので、差し替えで消すと元の code_version まで
+    辿れなくなる(独立審査 再-8)。``reclose`` は複数回の訂正が消えないよう配列で追記する。
+
+    行が無い日は**作らない**: nav_daily の行は執行段の締めが書くもので、ここで合成すると
+    「執行照合を経ていない confirmed」が生まれる。代わりに戻り値(``reclose`` の各要素)へ
+    ``nav_daily_missing`` を立てて呼び出し側に返す。
     """
     for item in reclosed:
+        item["nav_daily_missing"] = False
+        if not item["restated"]:
+            continue  # 水位だけ進んだ日は nav が動かないので nav_daily は無変更
         nav_date = item["date"]
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT detail FROM risk.nav_daily WHERE book_id = %s AND nav_date = %s",
+                "SELECT detail, run_id FROM risk.nav_daily "
+                "WHERE book_id = %s AND nav_date = %s",
                 (book_id, nav_date),
             )
             row = cur.fetchone()
@@ -277,14 +280,23 @@ def _sync_nav_daily_after_reclose(
             item["nav_daily_missing"] = True
             continue
         prev_detail = row[0] if isinstance(row[0], dict) else {}
-        detail = {
-            **prev_detail,
-            "reclose": {
+        prev_run_id = row[1]
+        history = prev_detail.get("reclose")
+        history = list(history) if isinstance(history, list) else []
+        history.append(
+            {
                 "nav_before": str(item["nav_before"]),
-                "source": "ledger.closing.reclose_recent",
-                "reason": "締め後に同日付で立った仕訳の取り込み(独立審査 重要-2)",
-            },
-        }
+                "nav_after": str(item["nav_after"]),
+                "previous_run_id": prev_run_id,
+                "source": "ledger.closing.reclose_stale",
+                "reason": "締め後に立った仕訳の取り込み(独立審査 重要-2)",
+            }
+        )
+        # 建玉・価格は締め時点のもので訂正後の NAV と整合しないため落とす(再-3)。
+        detail = {k: v for k, v in prev_detail.items() if k not in ("positions", "prices")}
+        detail.update(
+            reclose=history, positions_stale=True, restated=True, restated_by_run=run_id
+        )
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -294,7 +306,6 @@ def _sync_nav_daily_after_reclose(
                 """,
                 (item["nav_after"], Json(detail), run_id, book_id, nav_date),
             )
-        item["nav_daily_missing"] = False
 
 
 def _upsert_nav_daily(

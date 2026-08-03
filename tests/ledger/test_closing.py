@@ -169,79 +169,111 @@ def _snapshot(conn, day: date) -> tuple[Decimal, str, dict]:
         return cur.fetchone()
 
 
+def _reclose(conn, run_id, through: date):
+    return closing.reclose_stale(
+        conn, book_id="DEMO_FUND", through=through, run_id=run_id
+    )
+
+
 def test_reclose_absorbs_entry_posted_after_close(conn, run_id):
-    """締めの後に同日付で立った仕訳を、翌営業日の再締めが NAV に取り込む(重要-2)。"""
+    """締めの後に同日付で立った仕訳を、次の締めの再締めが NAV に取り込む(重要-2)。"""
     first = closing.run_daily_close(
         conn, book_id="DEMO_FUND", date=DAY, price_source={}, run_id=run_id
     )
     assert first["nav"] == D(10_000_000)  # 0006+0011 の出資のみ
 
     _post_contribution(conn, run_id, DAY, D(5_000_000))  # ← 締めの後に立った仕訳
-    # 締め直後の状態: スナップショットは古い NAV のまま(これが偽リターンの原因)。
-    assert _snapshot(conn, DAY)[0] == D(10_000_000)
+    assert _snapshot(conn, DAY)[0] == D(10_000_000)  # 締め直後は古い NAV のまま
 
-    changed = closing.reclose_recent(
-        conn, book_id="DEMO_FUND", through=DAY + timedelta(days=1), days=3, run_id=run_id
-    )
+    changed = _reclose(conn, run_id, DAY + timedelta(days=1))
     assert [c["date"] for c in changed] == [DAY]
-    assert changed[0]["nav_before"] == D(10_000_000)
-    assert changed[0]["nav_after"] == D(15_000_000)
+    assert (changed[0]["nav_before"], changed[0]["nav_after"]) == (
+        D(10_000_000), D(15_000_000)
+    )
+    assert changed[0]["restated"] is True and changed[0]["late_entries"] is True
 
     nav, status, detail = _snapshot(conn, DAY)
     assert nav == D(15_000_000)
-    assert status == "provisional"  # status は据え置き(照合の結論は変わらない)
-    assert D(detail["reclose"]["nav_before"]) == D(10_000_000)
+    assert status == "provisional"  # status = 締め時点の照合の結論(据え置き)
+    assert D(detail["reclose"][0]["nav_before"]) == D(10_000_000)
 
 
-def test_reclose_is_noop_when_nothing_changed(conn, run_id):
-    """値が変わらない日は書き込まない(確定値の producer を無駄に上書きしない)。"""
-    closing.run_daily_close(
-        conn, book_id="DEMO_FUND", date=DAY, price_source={}, run_id=run_id
-    )
-    before = _snapshot(conn, DAY)[2]["producer"]
-    changed = closing.reclose_recent(
-        conn, book_id="DEMO_FUND", through=DAY + timedelta(days=1), days=3, run_id=run_id
-    )
-    assert changed == []
-    after = _snapshot(conn, DAY)[2]
-    assert after["producer"] == before
-    assert "reclose" not in after
-
-
-def test_reclose_window_bounds_which_days_are_rewritten(conn, run_id):
-    """窓の外の日は書き換えない(過去を書き換えうる期間を N 営業日に閉じる)。"""
-    days = [DAY, DAY + timedelta(days=1), DAY + timedelta(days=2)]
+def test_reclose_detects_by_watermark_not_by_recency(conn, run_id):
+    """検出は水位で行う — どれだけ古い日でも遅延仕訳があれば対象、無ければ対象外。"""
+    days = [DAY + timedelta(days=i) for i in range(4)]
     for d in days:
         closing.run_daily_close(
             conn, book_id="DEMO_FUND", date=d, price_source={}, run_id=run_id
         )
-    _post_contribution(conn, run_id, DAY, D(5_000_000))
+    _post_contribution(conn, run_id, days[0], D(5_000_000))  # 最古の日に遅れて記帳
 
-    # 窓 2 営業日: 直近 2 日(DAY+1, DAY+2)だけが再計算され、DAY は窓の外で据え置き。
-    changed = closing.reclose_recent(
-        conn, book_id="DEMO_FUND", through=DAY + timedelta(days=3), days=2, run_id=run_id
-    )
-    assert [c["date"] for c in changed] == [DAY + timedelta(days=1), DAY + timedelta(days=2)]
-    assert _snapshot(conn, DAY)[0] == D(10_000_000)
-
-    # 窓 3 営業日なら DAY も入り、残りの 1 日が解消する。
-    changed = closing.reclose_recent(
-        conn, book_id="DEMO_FUND", through=DAY + timedelta(days=3), days=3, run_id=run_id
-    )
-    assert [c["date"] for c in changed] == [DAY]
-    assert _snapshot(conn, DAY)[0] == D(15_000_000)
+    changed = _reclose(conn, run_id, days[-1])
+    # 遅延仕訳の日以降すべてが stale(固定窓なら最古が落ちる — 再審査 再-1)。
+    assert [c["date"] for c in changed] == days
+    assert all(c["restated"] for c in changed)
+    # 直後にもう一度走らせても、水位が最新なので何も拾わない(冪等)。
+    assert _reclose(conn, run_id, days[-1]) == []
 
 
-def test_reclose_rejects_nonpositive_window(conn, run_id):
-    """窓 0 は再締めなし(再締めを止めたい運用のための明示的な無効化)。"""
+def test_reclose_counts_age_in_business_days_for_urgency(conn, run_id):
+    """restatement の古さはスナップショットの実績数で数え、しきい値超えを urgent にする。"""
+    days = [DAY + timedelta(days=i) for i in range(8)]
+    for d in days:
+        closing.run_daily_close(
+            conn, book_id="DEMO_FUND", date=d, price_source={}, run_id=run_id
+        )
+    _post_contribution(conn, run_id, days[0], D(5_000_000))
+
+    changed = _reclose(conn, run_id, days[-1])
+    ages = {c["date"]: c["age_business_days"] for c in changed}
+    assert ages[days[0]] == 7 and ages[days[-1]] == 0  # 最古 = 締め 7 回前
+
+    urgent = closing.urgent_restatements(changed)
+    threshold = closing.RESTATEMENT_URGENT_BUSINESS_DAYS
+    assert [u["date"] for u in urgent] == [
+        d for d in days if ages[d] > threshold
+    ]
+    assert len(urgent) == 2  # 締め 7 回前・6 回前(しきい値 5 営業日)
+
+
+def test_reclose_chains_producer_and_reclose_history(conn, run_id):
+    """2 回以上の訂正で最初の書き手・最初の nav_before が消えない(再審査 再-8)。"""
     closing.run_daily_close(
         conn, book_id="DEMO_FUND", date=DAY, price_source={}, run_id=run_id
     )
     _post_contribution(conn, run_id, DAY, D(5_000_000))
-    assert closing.reclose_recent(
-        conn, book_id="DEMO_FUND", through=DAY + timedelta(days=1), days=0, run_id=run_id
-    ) == []
-    assert _snapshot(conn, DAY)[0] == D(10_000_000)
+    _reclose(conn, run_id, DAY + timedelta(days=1))
+    _post_contribution(conn, run_id, DAY, D(1_000_000))
+    _reclose(conn, run_id, DAY + timedelta(days=1))
+
+    detail = _snapshot(conn, DAY)[2]
+    assert [D(r["nav_before"]) for r in detail["reclose"]] == [
+        D(10_000_000), D(15_000_000)
+    ]
+    assert [p["job"] for p in detail["producer_history"]] == [
+        "ledger.closing.run_daily_close", "ledger.closing.reclose_stale"
+    ]
+    assert detail["producer"]["job"] == "ledger.closing.reclose_stale"
+
+
+def test_reclose_backfills_lineage_without_claiming_restatement(conn, run_id):
+    """水位を持たない旧スナップショットは、値が同じなら訂正扱いにしない。"""
+    with conn.cursor() as cur:  # 本機能より前に書かれた行を模す
+        cur.execute(
+            """
+            INSERT INTO ledger.nav_snapshots (book_id, snap_date, nav, status, detail)
+            VALUES ('DEMO_FUND', %s, 10000000, 'confirmed', '{}'::jsonb)
+            """,
+            (DAY,),
+        )
+    changed = _reclose(conn, run_id, DAY)
+    assert [c["date"] for c in changed] == [DAY]
+    assert changed[0]["restated"] is False and changed[0]["late_entries"] is False
+
+    detail = _snapshot(conn, DAY)[2]
+    assert "restated" not in detail  # 起きていない訂正を主張しない
+    assert detail["producer"]["input_refs"][closing.WATERMARK_KEY] is not None
+    assert _reclose(conn, run_id, DAY) == []  # 水位が埋まったので以後は静か
 
 
 def test_nav_snapshot_records_producer_lineage(conn, run_id):
@@ -253,22 +285,19 @@ def test_nav_snapshot_records_producer_lineage(conn, run_id):
     assert producer["job"] == "ledger.closing.run_daily_close"
     assert producer["run_id"] == run_id
     assert producer["as_of"] == DAY.isoformat()
-    assert producer["input_refs"]["ledger.journal_entries.max_entry_id"] is not None
+    assert producer["input_refs"][closing.WATERMARK_KEY] is not None
     with conn.cursor() as cur:
         cur.execute("SELECT code_version FROM meta.runs WHERE run_id = %s", (run_id,))
         assert producer["code_version"] == cur.fetchone()[0]
 
-    # 再締めで書き換えた値は「誰が書いたか」も差し替わり、前の producer が残る。
+    # 再締めで書き換えた値は水位が進んでいる = 後から立った仕訳を見た値だと辿れる。
     _post_contribution(conn, run_id, DAY, D(5_000_000))
-    closing.reclose_recent(
-        conn, book_id="DEMO_FUND", through=DAY + timedelta(days=1), days=3, run_id=run_id
-    )
-    detail = _snapshot(conn, DAY)[2]
-    assert detail["producer"]["job"] == "ledger.closing.reclose_recent"
-    assert detail["reclose"]["previous_producer"]["job"] == "ledger.closing.run_daily_close"
-    # 水位(input_refs)が進んでいる = 後から立った仕訳を見たうえでの値だと辿れる。
-    key = "ledger.journal_entries.max_entry_id"
-    assert detail["producer"]["input_refs"][key] > producer["input_refs"][key]
+    _reclose(conn, run_id, DAY + timedelta(days=1))
+    after = _snapshot(conn, DAY)[2]["producer"]
+    assert after["job"] == "ledger.closing.reclose_stale"
+    assert after["input_refs"][closing.WATERMARK_KEY] > producer["input_refs"][
+        closing.WATERMARK_KEY
+    ]
 
 
 def _mk_evidence(cur) -> int:

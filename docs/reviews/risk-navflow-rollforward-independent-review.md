@@ -18,3 +18,18 @@
 - 本 PR 内で是正: **重要-1 の BOP/EOP 分離を採用**(審査提示の式。審査シナリオ B/C/H を回帰テスト化し真値一致を固定。未マージのうちに正しい定義へ)、重要-3(ES95 記述の削除)、重要-4(pending 注記を先頭挿入または独立フィールド)、中-5(pending の urgent は「次の締めを1回跨いだ場合」または NAV 比 0.5% 以上の場合に限定 — 決定論ルール)、中-6(1クエリ・1キャッシュ化)、中-7(明細表の先頭行注記)。
 - 同時に別 PR(L1): `src/ryza/risk/**` の protected_areas 登録(重要-8 — 設計リードが起票し #承認 通知・独立審査記録は本意見書を参照)。
 - リマインダー登録: `ledger-reclose-recent-days`(重要-2: 締めの直近 N 営業日再締め+nav_snapshots の producer リネージ。期限 2026-08-10)、`flow-entry-date-evidence-check`(敵対的指摘: 出資・払戻 entry_date と証憑値付け日の突合。期限 2026-08-24)。
+
+## 再締め審査記録(2026-08-04 独立役員 — 重要-2 の是正 `3698ebe`)
+
+- 対象: `src/ryza/ledger/closing.py`(**保護領域 ledger_engine**)・`src/ryza/execution/close.py`・`config/execution.yaml`・`jobs/daily.py`。手法: 実 DB でプローブテストを走らせ `book_returns` で観測(対照=再締めなし・全期間窓を併走)
+- **判定: 差し戻し。** 重要-2 の主症状(締め後の同日出資)は解消を確認したが、窓の外に落ちた仕訳で**新たな偽リターンを作る**ため、この2点の是正まで保護領域への統合に同意しない
+- **再-1(重大)**: 部分再締めは再締めなしより悪い。同一シナリオで対照(N=0)は returns `[0,0,0]`、本実装(N=3・フローは窓の外)は `[+0.5,0,0]`、全期間窓(N=5)は `[0,0,0]`。窓が仕訳日を覆わないと窓境界に **+50% の偽日次リターンが恒久的に立ち**、1 回目の報告後は `reclose` が `[]` を返し完全に無言になる。これは `ewma_vol` 経由で誤 `vol_exceeded` を出しうる(重要-1 と同じ経路)。是正: 固定 N を廃し、**窓の最古日が変化した/水位が進んだ日があれば1日ずつ遡って延長**(上限到達時はアラート)
+- **再-2(重大)**: `status` 据え置きの根拠(「遅れて立つのは拠出資本だけ」)がコードと不一致。差分の性質を見ずに `book_totals` 全体を再計算するため、`confirmed` 日に遅延約定が入ると NAV だけ書き換わり **status は confirmed のまま・`detail.positions` は旧建玉のまま**(実測 10,010,000→10,009,900)。`_record_unrecorded_fills` は `entry_date=filled_at::date` で過去日付に書くため通常経路。是正: 差分に拠出資本以外を含む日は provisional へ降格しブレイク通知
+- **再-3(重要)**: 再締めが `detail.assets/liabilities/positions` を更新しないため、証憑としての snapshot が自己矛盾する(実測 nav=15,000,000 / detail 由来 10,000,000)。`book_totals` は全項目を返しており追加コストはゼロ
+- **再-4(重要)**: 変化検出が NAV 等値なので、手数料ゼロの遅延約定(NAV 中立)は `[]` を返し永久に取りこぼす(水位は 3325→3326 と動いている)
+- **再-5(重要・肯定+未完)**: `input_refs` の水位設計は妥当で、`entry_id` が IDENTITY(単調)なので「後から立った仕訳を見たか」に厳密に答えられ、`entry_id > stored ∧ entry_date <= as_of` で遅延仕訳を**一意に列挙**できる(タイムスタンプより強い)。`code_version` を `meta.runs` から引く判断も正しい。**問題は読む側が無いこと** — 実測で窓外 D0 のみ `stale=True`・窓内3日は `False` と正しく判別できており、この1クエリ/日で再-1 は検出可能。逸脱3(窓外の先送り)はこの検出器を書けば不要
+- **再-6(中)**: 逸脱1(過去日に `run_daily_close` を再実行しない)は**検証の結果正しい** — `_util.replay_position`(`_util.py:215-264`)は `entry_date` で絞らず全期間再生し、`post_mark_to_market`(`posting.py:298-316`)がその現在数量を使うため、過去日呼び出しはその日に存在しなかった建玉を過去日付で記帳する。帰結として遅延約定の日の NAV は原価のままで時価でない旨を明記すべき
+- **再-7(中)**: 通知が弱い。確定値の書き換え(= restatement)が `_build_ops_embed`(`daily.py:379-404`)で ✅ 付き 1 行に埋もれ `[:1024]` で切られる — 重要-4 で指摘した欠陥の再現。ブレイクと同格の専用 embed にすること
+- **再-8(中)**: `_sync_nav_daily_after_reclose` が `run_id` を差し替えるため nav_daily 唯一のリネージ(元の締めの run/code_version)が失われる。`detail.reclose.previous_run_id` を残すこと。また同じ日を 2 回書き換えると `detail.reclose` がまるごと置換され最初の `nav_before` が消える(実測 10M→15M→16M で 15,000,000 のみ残存)— `reclose` は配列で append すること
+- **再-9(中・手続)**: `config/execution.yaml` は protected_areas 未登録だが `close.reclose_business_days` は会計エンジンの restatement 深度を決める値になった(`0` で是正が無言で無効化される)。登録するか窓の値を日次サマリに毎日出すこと。また `src/ryza/ledger/**` は保護領域で `3698ebe` に `Approved:` トレーラが無い — 本審査 → #承認 → 48h を経ずにマージしないこと
+- **回帰テスト(シナリオ G)の実効性: 部分的**。修正前 `[-0.5,+0.5]` と修正後 `[0.0,0.0]` を **`book_returns` という観測量で**両方固定した点は正しい様式。ただし `test_reclose_window_bounds_which_days_are_rewritten` は窓外の日を NAV 値だけで固定しリターン系列を検査していないため、**再-1 の不具合を「仕様」として固定してしまっている**(同テストに `book_returns` の assert を足せば即座に赤くなる)。confirmed 日の建玉変化・detail 陳腐化・NAV 中立の遅延仕訳・2 回書き換えも未固定

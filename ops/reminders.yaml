@@ -554,6 +554,18 @@ reminders:
       body: "boardroom.conduct_meeting は、ルータが誰も選ばなかった場合に進行役の定型文(LLM 呼び出しなし)を返した後も、残枠があるため反応ラウンドのルータを1回回す(独立役員 再確認審査 懸念C)。『誰も反応すべきでない』と判断した直後に『反応すべき役職はいるか』を問い直す構造は筋が通らず、ルータ呼び出し1回ぶんの無駄でもある。整理の選択肢: (a) 進行役フォールバックの場合は反応ラウンドをスキップする(意味論としては最も素直)、(b) 進行役の定型文をトランスクリプトに入れずに反応ラウンドを回す、(c) 現行を維持し『代表発言の再解釈の機会』として docstring に根拠を明記する。いずれかを選び、テストで固定すること。挙動の是非は実運用のログ(meta.runs.params.runtime.rounds)を数ターン分見てから判断してよい。"
     status: pending
 
+  - id: protect-execution-config
+    what: "config/execution.yaml を protected_areas に登録する(再締め審査 再-9)"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "governance.yaml protected_areas に config/execution.yaml を追記"
+      labels: [decision, governance]
+      body: "config/execution.yaml は protected_areas 未登録だが、E4『全コスト込み』評価の入力(手数料・スリッページ)を持つため、値の変更はデモ成績の測定そのものを動かす。再締めの実装で一時この yaml に会計エンジンの restatement 深度(`close.reclose_business_days`)を置きかけた経緯があり(値 0 で是正が無言で無効化される構造だった)、独立審査 再-9 が登録を要求した。最終実装は水位検出に切り替えて当該キーを廃止したため即時の危険は下がっているが、手数料・スリッページが未保護である事実は残る。governance.yaml は L1 文書のため代表の明示承認が必要(定款第4条)。同時に `src/ryza/execution/**`(執行・締めの配線)の登録有無も棚卸しすること。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再締め審査記録 再-9。"
+    status: pending
+
   - id: risk-flow-rollforward-fix
     what: "【優先度高・リスク数値の実バグ】NAV スナップショットが無い日の外部フローがリターン計算から落ちる問題の修正(独立役員審査 T-018 重要-5)"
     conditions:
@@ -590,8 +602,8 @@ reminders:
       type: issue_create
       title: "ledger 締め: 直近 N 営業日の再締め + nav_snapshots の producer リネージ"
       labels: [impl, ledger]
-      body: "(完了済み)navflow のロールフォワード(2026-08-03)は『締めが走らなかった日』の外部フローを次のスナップショットへ寄せるが、**締めが走った後で同じ日付に立った仕訳**は救えず、±X% の対のリターンを生んでいた(独立審査の検証では +50% / −33% の対を再現)。是正実装: (1) `ledger.closing.reclose_recent` が直近 N 営業日(N=3・`config/execution.yaml` の `close.reclose_business_days`)の NAV を再計算し、値が変わった日だけ上書きする。対象日は『既にスナップショットが確定している直近の日』= 祝日カレンダーに依存しない営業日の定義。`run_daily_close` は再実行しない(`post_mark_to_market` が現在保有を使うため過去日に存在しなかった建玉を記帳してしまう)。(2) リネージは `ledger.nav_snapshots.detail.producer`(job / run_id / code_version / as_of / input_refs=仕訳の水位)へ埋め込み — detail が jsonb のため **migration 不要**(スキーマ=保護領域の手続は発生せず)。risk.nav_daily は run_id 列が meta.runs への FK なので detail への写しは不要、再締めで値が動いた日は nav を追随させる。(3) 審査シナリオ G(締め後の同日出資 → 翌日再締めで解消)を tests/execution/test_close.py に回帰テスト化(再締め無効時に ±50% の対が再現することも固定)。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 重要-2。"
-    status: done # 2026-08-03 実装: ledger.closing.reclose_recent + detail.producer(migration 不要)
+      body: "(完了済み)navflow のロールフォワード(2026-08-03)は『締めが走らなかった日』の外部フローを次のスナップショットへ寄せるが、**締めが走った後で同じ日付に立った仕訳**は救えず、±X% の対のリターンを生んでいた。是正実装(初版は固定窓 N=3 で独立審査が差し戻し — 窓外に落ちた仕訳が窓境界に恒久的な +50% を作るため。最終版は水位検出): (1) `ledger.closing.reclose_stale` が各スナップショットの水位(`detail.producer.input_refs`)より後ろの `entry_id` を持つ遅延仕訳がある日を 1 クエリで列挙し、その日だけ再計算する。窓の縁が構造的に存在しない。上書き条件は『NAV 変化 OR 水位変化』(NAV 中立の遅延約定でも水位を進めて再検出を止める)。`run_daily_close` は再実行しない(`post_mark_to_market` が現在保有を使うため過去日に存在しなかった建玉を記帳してしまう)。(2) リネージは `ledger.nav_snapshots.detail.producer` へ埋め込み — detail が jsonb のため **migration 不要**。2 回目以降の訂正は `producer_history` / `reclose` 配列に追記して痕跡を連鎖させる。(3) 訂正した日は `positions` を落として `positions_stale` / `restated` を立てる(status は締め時点の照合の結論なので据え置き)。(4) 5 営業日より古い日の書き換えは #運営 へ専用 embed で urgent 通知。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 重要-2 および再締め審査記録。"
+    status: done # 2026-08-04 実装: ledger.closing.reclose_stale(水位検出)+ detail.producer(migration 不要)
 
   - id: flow-entry-date-evidence-check
     what: "出資・払戻の entry_date と証憑の値付け日の突合を posting 側で検証する(独立審査の敵対的指摘)"
