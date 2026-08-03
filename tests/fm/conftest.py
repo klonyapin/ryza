@@ -98,6 +98,36 @@ def nav_snapshot(conn):
 
 
 @pytest.fixture
+def backdated_capital(conn, run):
+    """指定日に出資の仕訳を1本入れる(リプレイ検証用)。
+
+    FM は現金残高を **entry_date が as_of 以前の仕訳**から読む(point-in-time)。
+    したがってファンド設定日より前の as_of でリプレイすると現金が測定できず、ゲートが
+    fail-closed で block する — これは正しい挙動なので、過去リプレイでは会計側も
+    その時点の状態にしておく必要がある(本フィクスチャがその模擬)。
+    """
+
+    def _post(day: date, amount: Decimal = Decimal(10_000_000)) -> int:
+        from ryza.ledger import posting
+
+        return posting.post_entry(
+            conn,
+            book_id=BOOK,
+            entry_date=day,
+            description="リプレイ検証用の出資(テスト)",
+            lines=[
+                {"account_id": "cash", "debit": amount, "currency": "JPY"},
+                {"account_id": "capital", "credit": amount, "currency": "JPY"},
+            ],
+            evidence={"kind": "decision", "payload": {"test": "replay"}, "source": "test"},
+            run_id=run.run_id,
+            posted_by="test.fm",
+        )
+
+    return _post
+
+
+@pytest.fixture
 def instrument(conn):
     """``market.instruments`` に現行銘柄を1件作り instrument_id を返す。"""
 
@@ -107,16 +137,20 @@ def instrument(conn):
         asset_class: str = "equity",
         venue: str = "TSE",
         currency: str = "JPY",
+        valid_from: datetime | None = None,
     ) -> int:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO market.instruments
                     (symbol, asset_class, venue, currency, valid_from)
-                VALUES (%s, %s, %s, %s, now() - interval '30 days')
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING instrument_id
                 """,
-                (symbol, asset_class, venue, currency),
+                (
+                    symbol, asset_class, venue, currency,
+                    valid_from or (datetime.now(UTC) - timedelta(days=400)),
+                ),
             )
             return cur.fetchone()[0]
 
