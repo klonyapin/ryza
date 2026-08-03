@@ -23,8 +23,10 @@
 #   - **DB は 2 ロール構成**(重大-2 / 反対意見書2の代替案):
 #       ryza_dashboard … 読取専用。ryza のメンバーシップを持たず(IN ROLE 廃止)、
 #                        全スキーマに SELECT のみ+default_transaction_read_only = on。
-#       ryza_boardroom … 役員室の書込専用。governance.minutes / minute_resolutions /
-#                        stances の INSERT と meta.runs の INSERT/UPDATE のみ。
+#       ryza_boardroom … 役員室・開発室の書込専用。governance.minutes /
+#                        minute_resolutions / stances の INSERT、meta.runs の
+#                        INSERT/UPDATE、ops.org_icon_overrides(0020)と
+#                        ops.dev_chat(0024・SELECT/INSERT のみ)。
 #     それぞれ別 Secret の接続 URL を別 env で Cloud Run に注入する。
 #   - **既存サービスを壊さない**: bot/daily は postgresql://ryza:ryza@localhost のまま。
 #     role `ryza` のパスワードは変更しない(変更すると localhost の scram 認証で bot/daily が
@@ -284,6 +286,15 @@ SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON ops.org_icon_overrides TO
 SELECT format('GRANT INSERT ON ops.org_icon_override_log TO %I', '__BR_ROLE__')
  WHERE to_regclass('ops.org_icon_override_log') IS NOT NULL;
 \gexec
+-- 開発室(0024・代表指示 2026-08-03)。ダッシュボードの開発室ページが代表の連絡を
+-- **追記**し、スレッドを読み返すために SELECT と INSERT だけを与える。
+-- UPDATE を与えないのは意図的で、relayed_at(Discord へ中継済みか)は Bot だけが
+-- 立てる状態だからである。ダッシュボードに UPDATE があると、代表の操作で中継前の
+-- 連絡が「中継済み」になり Discord に永久に出ない経路ができる。
+-- DELETE も与えない(表自体が追記オンリー — 0024 のトリガが所有ロールにも効く)。
+SELECT format('GRANT SELECT, INSERT ON ops.dev_chat TO %I', '__BR_ROLE__')
+ WHERE to_regclass('ops.dev_chat') IS NOT NULL;
+\gexec
 -- meta.runs は開始 INSERT → 終了時に status/finished_at/cost を UPDATE する。UPDATE は
 -- **列レベル**に限定し、job_name / code_version / started_at / params の事後改竄を防ぐ
 -- (リネージの証跡性。再審査 条件3)。列名は migrations/0001_meta.sql に一致させること。
@@ -307,12 +318,12 @@ SELECT count(*) AS dashboard_secret_grants
 -- 役員室ロールの ops スキーマ権限(独立役員審査 0020 C-5)。上の GRANT は
 -- to_regclass ガード付きで、0020 未適用の DB では**黙ってスキップ**される。GRANT が
 -- 効いたか/余計な表に広がっていないかを、デプロイのたびにログへ残して検証する。
-\echo '-- 役員室ロールが ops で権限を持つ表(org_icon_overrides と org_icon_override_log の2表のみであること)'
+\echo '-- 役員室ロールが ops で権限を持つ表(org_icon_overrides / org_icon_override_log / dev_chat の3表のみであること)'
 SELECT table_name, string_agg(privilege_type, ',' ORDER BY privilege_type) AS privileges
   FROM information_schema.role_table_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
  GROUP BY table_name ORDER BY table_name;
-\echo '-- 役員室ロールの ops 権限の表数(2 であること。0 なら 0020 未適用で GRANT がスキップされた)'
+\echo '-- 役員室ロールの ops 権限の表数(3 であること。2 なら 0024 未適用で dev_chat の GRANT がスキップされた)'
 SELECT count(DISTINCT table_name) AS boardroom_ops_tables
   FROM information_schema.role_table_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops';
@@ -320,12 +331,17 @@ SELECT count(DISTINCT table_name) AS boardroom_ops_tables
 SELECT count(*) AS boardroom_unexpected_ops_grants
   FROM information_schema.role_table_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
-   AND table_name NOT IN ('org_icon_overrides', 'org_icon_override_log');
+   AND table_name NOT IN ('org_icon_overrides', 'org_icon_override_log', 'dev_chat');
 \echo '-- 履歴表への非 INSERT 権限(0 であること — 追記オンリー。UPDATE/DELETE/TRUNCATE を持たない)'
 SELECT count(*) AS boardroom_log_mutation_grants
   FROM information_schema.role_table_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
    AND table_name = 'org_icon_override_log' AND privilege_type <> 'INSERT';
+\echo '-- 開発室への非 SELECT/INSERT 権限(0 であること — relayed_at を立てられるのは Bot だけ)'
+SELECT count(*) AS boardroom_dev_chat_mutation_grants
+  FROM information_schema.role_table_grants
+ WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+   AND table_name = 'dev_chat' AND privilege_type NOT IN ('SELECT', 'INSERT');
 """
 
 sql = (
