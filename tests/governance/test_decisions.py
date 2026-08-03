@@ -626,3 +626,172 @@ def test_veto_is_append_only(conn):
                 (veto.veto_id,),
             )
     conn.rollback()
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 審査対象 SHA / 審査参照(0029 — reminders decision-reviewed-sha)
+#
+# トレーラの reviewed=<sha40> は書き手の申告でしかなく、A-18 に照合先が無かった。
+# 承認記録側に同じ主張を**別経路で**書かせることで、片側だけの改変が突合で出るようにする。
+# ────────────────────────────────────────────────────────────────────────────
+SHA_A = "a" * 40
+SHA_B = "b" * 40
+
+
+def test_reviewed_sha_and_review_ref_are_recorded(conn):
+    """審査対象 SHA と審査参照は構造化列に入り、現決定 view から読める。"""
+    got = record_deemed_approval(
+        conn, "reviewed-1", "pr", NOTICE,
+        reviewed_sha=SHA_A, review_ref="docs/reviews/x-review.md",
+    )
+    assert got.reviewed_sha == SHA_A and got.review_ref == "docs/reviews/x-review.md"
+    row = current_decision(conn, "reviewed-1")
+    assert row["reviewed_sha"] == SHA_A
+    assert row["review_ref"] == "docs/reviews/x-review.md"
+    conn.rollback()
+
+
+def test_reviewed_sha_is_normalized_to_lowercase(conn):
+    """大文字表記は不一致の誤検出になるため writer が正規化する(A-18-8 の突合前提)。"""
+    got = record_deemed_approval(conn, "reviewed-upper", "pr", NOTICE, reviewed_sha=SHA_A.upper())
+    assert got.reviewed_sha == SHA_A
+    assert current_decision(conn, "reviewed-upper")["reviewed_sha"] == SHA_A
+    conn.rollback()
+
+
+@pytest.mark.parametrize("bad", ["abc123", "z" * 40, "a" * 39, "a" * 41])
+def test_short_or_invalid_reviewed_sha_is_rejected(conn, bad):
+    """短縮・非 hex の SHA は拒否する(曖昧な参照は突合を「判定不能」にする)。"""
+    with pytest.raises(ValueError, match="40 桁 hex"):
+        record_deemed_approval(conn, f"reviewed-bad-{bad}", "pr", NOTICE, reviewed_sha=bad)
+    conn.rollback()
+
+
+def test_reviewed_sha_defaults_to_null(conn):
+    """申告が無い決定は NULL(独立審査が前置されない発効経路を必須化で塞がない)。"""
+    got = record_deemed_approval(conn, "reviewed-none", "pr", NOTICE)
+    assert got.reviewed_sha is None and got.review_ref is None
+    row = current_decision(conn, "reviewed-none")
+    assert row["reviewed_sha"] is None and row["review_ref"] is None
+    conn.rollback()
+
+
+def test_blank_review_ref_is_rejected(conn):
+    """空白だけの審査参照は「書いたが中身が無い」= 未記入と区別できないので弾く。"""
+    with pytest.raises(ValueError, match="review_ref"):
+        record_deemed_approval(conn, "reviewed-blank", "pr", NOTICE, review_ref="   ")
+    conn.rollback()
+
+
+def test_reviewed_sha_check_is_enforced_by_the_schema(conn):
+    """一次統制は DB 側(0029 の CHECK)— writer を迂回した INSERT も通らない。"""
+    with conn.cursor() as cur, pytest.raises(psycopg.errors.CheckViolation):
+        cur.execute(
+            """
+            INSERT INTO governance.decisions
+                (proposal_ref, kind, decision, decided_by, reviewed_sha)
+            VALUES ('bypass-writer', 'pr', 'deemed', 'system:deemed', 'DEADBEEF')
+            """
+        )
+    conn.rollback()
+
+
+def test_reviewed_sha_cannot_be_backfilled(conn):
+    """既存行に後から審査対象 SHA を埋められない(0021 の追記オンリー)。
+
+    列の追加は DDL であって行の UPDATE ではないため追記オンリー原則に触れないが、
+    「過去の決定を遡って審査済みに見せる」経路が開いていないことは確かめておく。
+    """
+    got = record_deemed_approval(conn, "reviewed-backfill", "pr", NOTICE)
+    with conn.cursor() as cur, pytest.raises(psycopg.errors.RaiseException):
+        cur.execute(
+            "UPDATE governance.decisions SET reviewed_sha = %s WHERE id = %s", (SHA_A, got.id)
+        )
+    conn.rollback()
+
+
+# ── 審査参照の実在検査(拒否ではなく警告)──────────────────────────────────
+def test_existing_review_ref_produces_no_warning():
+    assert decisions_mod.missing_review_ref_warning("config/governance.yaml") is None
+
+
+def test_missing_repository_path_review_ref_warns():
+    warning = decisions_mod.missing_review_ref_warning("docs/reviews/does-not-exist.md")
+    assert warning is not None and "does-not-exist" in warning
+
+
+def test_url_review_ref_is_not_checked():
+    """リポジトリ外(Issue・Discord スレッド)の参照は実在検査の対象にしない。"""
+    assert decisions_mod.missing_review_ref_warning("https://github.com/x/y/issues/1") is None
+    assert decisions_mod.missing_review_ref_warning("#承認/123") is None
+    assert decisions_mod.missing_review_ref_warning(None) is None
+
+
+def _build_args(argv: list[str]):
+    """CLI 引数を解析して Namespace にする(_resolve_deemed_args の直接検証用)。"""
+    return decisions_mod._build_parser().parse_args(argv)
+
+
+def test_cli_warns_but_does_not_refuse_a_missing_review_ref(fake_gh, capsys):
+    """実在しない審査参照は**警告のみ**(遡及登録・リポジトリ外の審査を塞がない)。"""
+    fake_gh(PR_JSON)
+    rc = main(["--deemed-for-pr", "99", "--review", "docs/reviews/nope.md", "--dry-run"])
+    assert rc == 0
+    assert "警告" in capsys.readouterr().err
+
+
+# ── CLI: 審査対象 SHA の自動取得・手動指定 ────────────────────────────────────
+PR_JSON_WITH_HEAD = {**PR_JSON, "head": {"sha": SHA_B}}
+
+
+def test_cli_deemed_for_pr_captures_the_head_sha(fake_gh, capsys):
+    """PR の head SHA が審査対象として自動で入る(手入力させない = 発効時刻に固定する)。"""
+    fake_gh(PR_JSON_WITH_HEAD)
+    target = decisions_mod._resolve_deemed_args(
+        _build_args(["--deemed-for-pr", "99", "--review", "docs/reviews/x.md"])
+    )
+    assert target.reviewed_sha == SHA_B
+    assert target.review_ref == "docs/reviews/x.md"
+    rc = main(["--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--dry-run"])
+    assert rc == 0
+    assert SHA_B in json.loads(capsys.readouterr().out)["description"]
+
+
+def test_cli_explicit_reviewed_sha_wins_over_the_head_sha(fake_gh):
+    """審査が head より前のコミットを対象としたときは手で書ける(実際に見た SHA を残す)。"""
+    fake_gh(PR_JSON_WITH_HEAD)
+    target = decisions_mod._resolve_deemed_args(
+        _build_args([
+            "--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--reviewed-sha", SHA_A,
+        ])
+    )
+    assert target.reviewed_sha == SHA_A
+
+
+def test_cli_head_sha_is_optional(fake_gh):
+    """head を返さない応答でも発効そのものは止めない(reviewed_sha は任意)。"""
+    fake_gh(PR_JSON)
+    target = decisions_mod._resolve_deemed_args(
+        _build_args(["--deemed-for-pr", "99", "--review", "docs/reviews/x.md"])
+    )
+    assert target.reviewed_sha is None
+
+
+def test_cli_reviewed_sha_reaches_the_notice_body_in_the_manual_form(capsys):
+    """旧来形でも --reviewed-sha は通知本文に出る(代表が通知だけで対象を確認できる)。"""
+    rc = main([
+        "--deemed", "--proposal-ref", "https://github.com/klonyapin/ryza/pull/7",
+        "--kind", "pr", "--notice", "保護領域 X の変更", "--reviewed-sha", SHA_A,
+        "--review", "config/governance.yaml", "--dry-run",
+    ])
+    assert rc == 0
+    assert SHA_A in json.loads(capsys.readouterr().out)["description"]
+
+
+def test_cli_rejects_an_invalid_reviewed_sha(capsys):
+    rc = main([
+        "--deemed", "--proposal-ref", "x", "--kind", "other", "--notice", "y",
+        "--reviewed-sha", "abc123", "--dry-run",
+    ])
+    assert rc == 1
+    assert "40 桁 hex" in capsys.readouterr().err

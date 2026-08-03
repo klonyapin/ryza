@@ -2096,3 +2096,189 @@ def test_run_a18_readonly_refuses_writes(repo, migrated_db, monkeypatch):
     monkeypatch.setattr(a18, "run_a18", writing_run_a18)
     with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
         a18.run_a18_readonly(r, since_commit=since, pr_since_commit=since)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# A-18-8 審査対象 SHA の突合(トレーラの reviewed= ⇔ 承認記録の reviewed_sha)
+#
+# reviewed= は書き手の申告でしかなく、0029 以前は照合先が存在しなかった(審査 重要-3)。
+# 本検査が捕まえるのは**片側だけの改変**である。両方に同じ嘘を書けば一致する点は
+# docstring・notes で開示しており、テストでもその意味の限界を固定する。
+# ────────────────────────────────────────────────────────────────────────────
+REVIEWED_A = "1" * 40
+REVIEWED_B = "2" * 40
+
+
+def _deemed_reviewed(conn, run_id, proposal_ref: str, reviewed_sha: str | None) -> int:
+    """審査対象 SHA つきのみなし承認を1件記録し decision id を返す。"""
+    from ryza.governance import notices
+
+    return notices.announce_deemed_approval(
+        conn, proposal_ref, "pr", "保護領域の変更", run_id,
+        reviewed_sha=reviewed_sha, review_ref="docs/reviews/x-review.md",
+    ).decision.id
+
+
+def _scan_a188(r: Path, since: str, conn):
+    return a18.check_reviewed_sha_agreement(r, a18.load_governance(r), conn, since_commit=since)
+
+
+def _commit_reviewed_trailer(r: Path, ref: str, reviewed: str) -> str:
+    return _commit(
+        r, "docs/protected.md", f"v-{reviewed[:6]}\n",
+        f"docs: 保護領域変更\n\nApproved: {ref} reviewed={reviewed}",
+    )
+
+
+def test_a18_8_matching_reviewed_sha_is_clean(repo, conn, run_id):
+    """2経路の申告が一致すれば所見なし。分母(突合できた件数)は必ず数える。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/801"
+    _deemed_reviewed(conn, run_id, url, REVIEWED_A)
+    _commit_reviewed_trailer(r, url, REVIEWED_A)
+    scan = _scan_a188(r, since, conn)
+    assert scan.findings == [] and scan.compared == 1 and scan.trailer_only == 0
+    conn.rollback()
+
+
+def test_a18_8_mismatched_reviewed_sha_is_a_finding(repo, conn, run_id):
+    """**本検査の実証ケース**: トレーラだけ別 SHA に差し替えると不一致で出る。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/802"
+    decision_id = _deemed_reviewed(conn, run_id, url, REVIEWED_A)
+    _commit_reviewed_trailer(r, url, REVIEWED_B)
+    scan = _scan_a188(r, since, conn)
+    assert len(scan.findings) == 1 and scan.compared == 1
+    finding = scan.findings[0]
+    assert finding["ref"] == url and finding["decision_id"] == decision_id
+    assert finding["trailer_reviewed"] == REVIEWED_B
+    assert finding["recorded_reviewed"] == REVIEWED_A
+    assert "一致しない" in finding["reason"]
+    conn.rollback()
+
+
+def test_a18_8_decision_id_reference_is_also_compared(repo, conn, run_id):
+    """``decision:<id>`` 形式の参照でも突合する(参照の書き方で検査が抜けない)。"""
+    r, since = repo
+    decision_id = _deemed_reviewed(conn, run_id, "https://github.com/x/y/pull/803", REVIEWED_A)
+    _commit_reviewed_trailer(r, f"decision:{decision_id}", REVIEWED_B)
+    assert len(_scan_a188(r, since, conn).findings) == 1
+    conn.rollback()
+
+
+def test_a18_8_case_difference_is_not_a_mismatch(repo, conn, run_id):
+    """表記揺れ(大文字)で不一致を誤検出しない — 両側とも小文字へ正規化して比べる。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/804"
+    _deemed_reviewed(conn, run_id, url, REVIEWED_A)
+    _commit_reviewed_trailer(r, url, REVIEWED_A.upper())
+    scan = _scan_a188(r, since, conn)
+    assert scan.findings == [] and scan.compared == 1
+    conn.rollback()
+
+
+def test_a18_8_record_without_reviewed_sha_is_disclosed_not_alerted(repo, conn, run_id):
+    """記録側が NULL(0029 以前・別経路の発効)は所見にせず件数で開示する。
+
+    移行期に全件鳴らすと本物の不一致が埋もれる。ただし沈黙もさせない —— 「突合が働いて
+    いない記録が何件あるか」は緑の意味を左右するため notes に出す。
+    """
+    r, since = repo
+    url = "https://github.com/x/y/pull/805"
+    _deemed_reviewed(conn, run_id, url, None)
+    _commit_reviewed_trailer(r, url, REVIEWED_A)
+    scan = _scan_a188(r, since, conn)
+    assert scan.findings == [] and scan.compared == 0 and scan.trailer_only == 1
+    result = _run_a18_deemed(r, since, conn)
+    assert any("reviewed_sha が無い決定 1 件" in n for n in result["notes"])
+    conn.rollback()
+
+
+def test_a18_8_v1_trailer_is_out_of_scope(repo, conn, run_id):
+    """様式 v1(reviewed 無し)は本検査の対象外(承継範囲の問題は A-18-1 の担当)。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/806"
+    _deemed_reviewed(conn, run_id, url, REVIEWED_A)
+    _commit_with_trailer(r, url)
+    scan = _scan_a188(r, since, conn)
+    assert scan.findings == [] and scan.compared == 0 and scan.trailer_only == 0
+    conn.rollback()
+
+
+def test_a18_8_unresolvable_reference_is_skipped(repo, conn):
+    """参照が解決できないこと自体は A-18-1/7 の担当(ここで二重に鳴らさない)。"""
+    r, since = repo
+    _commit_reviewed_trailer(r, "decision:999999999", REVIEWED_A)
+    scan = _scan_a188(r, since, conn)
+    assert scan.findings == [] and scan.compared == 0
+    conn.rollback()
+
+
+def test_a18_8_vetoed_decision_is_still_compared(repo, conn, run_id):
+    """否認済みでも突合する — 本検査が見るのは申告の一致であって決定の有効性ではない。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/807"
+    _deemed_reviewed(conn, run_id, url, REVIEWED_A)
+    _veto(conn, run_id, url)
+    _commit_reviewed_trailer(r, url, REVIEWED_B)
+    assert len(_scan_a188(r, since, conn).findings) == 1
+    conn.rollback()
+
+
+def test_a18_8_unknown_baseline_raises(repo, conn):
+    r, _since = repo
+    with pytest.raises(ValueError, match="基準コミット"):
+        _scan_a188(r, "0" * 40, conn)
+    conn.rollback()
+
+
+def test_a18_8_mismatch_reaches_result_and_report(repo, conn, run_id):
+    """不一致は run_a18 の結果・所見判定・報告 embed まで到達する。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/808"
+    _deemed_reviewed(conn, run_id, url, REVIEWED_A)
+    _commit_reviewed_trailer(r, url, REVIEWED_B)
+    result = _run_a18_deemed(r, since, conn)
+    assert len(result["reviewed_sha_mismatches"]) == 1
+    assert result["compared_reviewed_shas"] == 1
+    assert a18.has_findings(result)
+    embed = a18.build_alert_embed(result)
+    field = next(f for f in embed["fields"] if "A-18-8" in f["name"])
+    assert "⚠️" in field["name"] and "1/1 件" in field["name"]
+    conn.rollback()
+
+
+def test_a18_8_green_line_carries_the_denominator(repo, conn, run_id):
+    """緑には必ず分母を書く(移行期の「不一致 0」は「まだ突合していない」ことが多い)。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/809"
+    _deemed_reviewed(conn, run_id, url, REVIEWED_A)
+    _commit_reviewed_trailer(r, url, REVIEWED_A)
+    embed = a18.build_alert_embed(_run_a18_deemed(r, since, conn))
+    field = next(f for f in embed["fields"] if "A-18-8" in f["name"])
+    assert "突合できた決定 1 件" in field["value"] and "⚠️" not in field["name"]
+    conn.rollback()
+
+
+def test_a18_8_zero_target_is_stated_explicitly(repo, conn):
+    """突合 0 件を「一致の確認」と読ませない(沈黙で緑にしない)。"""
+    r, since = repo
+    embed = a18.build_alert_embed(_run_a18_deemed(r, since, conn))
+    field = next(f for f in embed["fields"] if "A-18-8" in f["name"])
+    assert "突合対象なし" in field["value"] and "一致の確認ではない" in field["value"]
+    conn.rollback()
+
+
+def test_a18_8_is_skipped_and_disclosed_without_conn(repo):
+    """DB 接続なしの実行では突合できない —— その事実を notes に出す。"""
+    r, since = repo
+    result = _run_a18_deemed(r, since)
+    assert result["reviewed_sha_mismatches"] == []
+    assert any("A-18-8" in n for n in result["notes"])
+
+
+def test_a18_8_limitation_is_always_disclosed(repo):
+    """「同じ値を両方に書けば一致する」限界は毎回開示する(強い保証に見せない)。"""
+    r, since = repo
+    result = _run_a18_deemed(r, since)
+    assert any("審査エージェント自身の署名は無い" in n for n in result["notes"])

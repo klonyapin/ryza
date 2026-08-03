@@ -1,6 +1,6 @@
 """A-18 規則⇔実装トレーサビリティ監査(定款第6条・config/governance.yaml controls)。
 
-7つの検査を実行し、構造化 dict を返す:
+8つの検査を実行し、構造化 dict を返す:
 
   A-18-1 保護領域突合   … `protected_areas` の glob に触れた発効日以後のコミットを列挙し、
                           (a) ``Approved:`` トレーラ (b) GitHub マージ PR 経由(Merge pull request
@@ -41,6 +41,14 @@
                           中-7)、叩き忘れは「通知なき発効」になる。A-18-5 が「記録はあるが
                           未配送」を見るのに対し、本検査は「記録そのものが無い」を見る。
                           緑には必ず分母(検査対象 PR 数)を出す。DB 接続がある実行でのみ動く
+  A-18-8 審査対象 SHA    … ``Approved:`` トレーラの ``reviewed=<sha40>`` と、その参照が指す
+                          承認記録の ``governance.decisions.reviewed_sha``(0029)が**両方ある**
+                          決定について一致を検査する。両者は別経路で書かれる同じ主張
+                          (トレーラ = PR 作成者 / 記録 = 発効 CLI が gh から取った head SHA)
+                          なので、片側だけの改変・取り違えは不一致として出る。**証明ではない**
+                          — どちらも起票者の申告であり審査エージェント自身の署名は無い
+                          (同じ嘘を両方に書けば一致する)。緑には必ず分母(突合できた件数)を
+                          出す。DB 接続がある実行でのみ動く
 
 **A-18-6 をここに置く理由**(ops-weekly VM 移設審査 2026-08-04 の代替案(d)・設計リード裁定):
 この指標は決議精緻化審査(2026-08-03)が新設した統制で、当初は週次ジョブ ops-weekly の
@@ -100,12 +108,14 @@ A-18 は既に(1)監査専用 clone ``/opt/ryza-audit`` から走り、(2)``--al
 v1(``reviewed`` 無し)のトレーラは移行期の経過措置として従来どおり有効だが、それによる
 承継の件数を notes に「reviewed 無しの承継 N 件」として開示する。
 
-**v2 の限界(既知・後継はリマインダー登録済み)**: ``reviewed`` はトレーラの書き手の申告で
-あり、「独立審査が実際にその SHA を見た」ことを A-18 は独立には確認できない(承認記録
-``governance.decisions`` に審査対象 SHA を持たせない限り照合先が無い)。第2親の祖先であること
-までは機械検査するが、``reviewed=<マージ直前のブランチ head>`` と書けば v1 と同じ被覆になる。
-恒久対策は ``ops/reminders.yaml`` の ``decision-reviewed-sha``(承認記録側に審査対象 SHA を
-持たせて突合する)。v1 経過措置の打ち切りは ``trailer-v1-sunset``。
+**v2 の限界(一部は 0029 + A-18-8 で縮小・残りは継続課題)**: ``reviewed`` はトレーラの
+書き手の申告である。0029 が承認記録側に ``reviewed_sha`` を作り A-18-8 が両者を突合するように
+なったため、**片側だけの改変**(マージ後にトレーラの ``reviewed`` を差し替える・別 PR の SHA を
+複写する)は不一致として検出できる。**残る限界**: どちらの値も発効を起票した側が書くもので、
+審査エージェント自身の署名は無い —— 同じ嘘を両方に書けば一致し、``reviewed=<マージ直前の
+ブランチ head>`` と書いて記録側も同じ値にすれば被覆は v1 と同じになる。到達点は審査
+エージェントの出力から機械的に埋まる経路であり、``ops/reminders.yaml`` の後続課題として残る。
+v1 経過措置の打ち切りは ``trailer-v1-sunset``。
 
 **PR 承継(2026-08-04 設計リード裁定)**: first-parent 上のマージ M が有効な ``Approved:``
 トレーラを持つとき、M が main に持ち込んだコミット群(M の配下でまだ main に無かったもの)は
@@ -187,6 +197,9 @@ STANDARD_DISCLOSURES: tuple[str, ...] = (
     "octopus マージは PR マージと見なさず違反にする",
     "Approved トレーラの reviewed=<sha40> は任意拡張。付いていれば承継は reviewed の祖先に"
     "限定され、無ければ PR マージ時点のブランチ全体に及ぶ(v1 経過措置 — 件数を開示する)",
+    "A-18-8 の一致は「トレーラと承認記録という2つの申告が食い違っていない」ことのみを意味する。"
+    "どちらも発効を起票した側が書く値であり、審査エージェント自身の署名は無い"
+    "(同じ値を両方に書けば一致する)",
 )
 
 # 文書⇔config のバージョン突合ペア(A-18-2)。(文書, config, config 内の version キー)
@@ -1634,6 +1647,139 @@ def check_unrecorded_protected_prs(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# A-18-8 審査対象 SHA の突合(トレーラの reviewed= ⇔ 承認記録の reviewed_sha)
+#
+# 様式 v2 の ``reviewed=<sha40>`` は**トレーラの書き手の申告**であり、A-18 はそれを
+# 「独立審査が実際に見た SHA」として検証できなかった —— 照合先が存在しなかったからである
+# (独立役員審査 2026-08-04 重要-3)。migration 0029 が承認記録の側に ``reviewed_sha`` /
+# ``review_ref`` を作ったことで、初めて**2つの独立した書込経路**が同じ主張を持つ:
+#   (1) コミットメッセージのトレーラ(git 履歴・PR 作成者が書く)
+#   (2) governance.decisions の列(発効 CLI が gh から取った head SHA を書く)
+# 本検査は両方ある決定について一致を要求する。片方だけを後から書き換えた偽装
+# (トレーラの reviewed を別 SHA に差し替える・別 PR の記録にトレーラを向ける)は不一致で出る。
+#
+# **これは証明ではない**(黙って強い保証に見せない): どちらの値も最終的には発効を起票した
+# 側の申告であり、審査エージェント自身の署名は無い。起票者が両方に同じ嘘を書けば一致する。
+# 「独立審査が実際に見た SHA」への到達点は審査エージェントの出力から機械的に埋まる経路であり、
+# 本検査はその**一歩**(突合先の新設と、片側改変の検出)にとどまる。
+# ────────────────────────────────────────────────────────────────────────────
+#: ``git log`` を1回で読むための区切り(コミットメッセージ本文に現れない制御文字)。
+_LOG_FIELD_SEP = "\x1f"
+_LOG_RECORD_SEP = "\x1e"
+
+
+@dataclass(frozen=True)
+class ReviewedShaScan:
+    """A-18-8 の走査結果。
+
+    ``compared`` は**緑の分母**(両方の値が揃っていて実際に突合できた件数)である。
+    件数の無い緑は「不一致が無い」と「そもそも1件も突合していない」を同じ表示にする
+    —— 0029 以前の記録は ``reviewed_sha`` が NULL なので、移行期の緑はほぼ後者である
+    (A-18-7 の分母と同じ流儀 — 後続配線審査 後-4)。
+
+    ``trailer_only`` は「トレーラに ``reviewed=`` はあるが承認記録に ``reviewed_sha`` が
+    無い」件数。移行期は正常だが、``--deemed-for-pr`` 以外の経路で発効させ続けている
+    兆候でもあるため notes に開示する。
+    """
+
+    findings: list[dict[str, Any]]
+    compared: int
+    trailer_only: int
+
+
+def _log_messages(repo: str | Path, since: str | None) -> list[tuple[str, str]]:
+    """``since..HEAD`` の ``(SHA, コミットメッセージ全文)`` を古い順に返す。
+
+    1コミットずつ ``git log -1`` を呼ぶと履歴に比例して subprocess が増えるため、
+    制御文字区切りの1回の ``git log`` で読む(A-18-1 が本文を読むのは保護領域に触れた
+    コミットだけなので個別呼び出しで足りるが、本検査は全コミットのトレーラを見る)。
+    """
+    rng = f"{since}..HEAD" if since else "HEAD"
+    out = _git(repo, "log", "--reverse", f"--format=%H{_LOG_FIELD_SEP}%B{_LOG_RECORD_SEP}", rng)
+    records: list[tuple[str, str]] = []
+    for raw in out.split(_LOG_RECORD_SEP):
+        if _LOG_FIELD_SEP not in raw:
+            continue
+        sha, message = raw.split(_LOG_FIELD_SEP, 1)
+        records.append((sha.strip(), message))
+    return records
+
+
+def check_reviewed_sha_agreement(
+    repo_path: str | Path,
+    gov: dict[str, Any],
+    conn: Any,
+    *,
+    since_commit: str | None = RATIFICATION_COMMIT,
+) -> ReviewedShaScan:
+    """A-18-8: トレーラの ``reviewed=<sha40>`` と承認記録の ``reviewed_sha`` を突合する。
+
+    突合は**トレーラ行単位**で行う。1行は ``Approved: <参照> reviewed=<sha>`` の形で
+    「この参照の決定は、この SHA を審査対象として発効した」と主張しているので、参照から引いた
+    決定の ``reviewed_sha`` と比べるのが主張どおりの検査になる(コミット単位でまとめて比べると、
+    複数の承認記録を挙げるコミットでどの参照の主張が食い違ったのか特定できない)。
+
+    所見にするのは**両方に値があって食い違う**場合だけである:
+
+    - 承認記録に ``reviewed_sha`` が無い(0029 以前の記録・PR 以外の発効経路)は所見にしない。
+      移行期に全件を鳴らすと本物の不一致が埋もれる。件数は ``trailer_only`` として開示する
+    - トレーラに ``reviewed=`` が無い(様式 v1)も所見にしない。v1 の承継範囲の問題は
+      A-18-1 の担当であり、打ち切りは reminders ``trailer-v1-sunset`` で扱う
+    - 否認済みの決定も突合対象に含める。本検査が見るのは「審査対象の申告が一致するか」で
+      あって決定の有効性ではない(有効性は A-18-1 が既に見ている)
+
+    **限界の開示**: 一致は「2つの申告が食い違っていない」ことしか意味しない。どちらの値も
+    発効を起票した側が書くため、**審査エージェント自身の署名は無く**、同じ値を両方に書けば
+    一致する。本検査が捕まえるのは片側だけの改変・取り違え(別 PR の SHA の複写、マージ後に
+    トレーラだけ書き換えた履歴、承認記録と無関係な SHA の申告)である。
+    """
+    repo = str(repo_path)
+    if since_commit and not _git_ok(repo, "cat-file", "-e", f"{since_commit}^{{commit}}"):
+        raise ValueError(f"審査対象 SHA 突合の基準コミットがリポジトリに存在しない: {since_commit}")
+
+    trailer = str(gov.get("approval_trailer") or "Approved:")
+    findings: list[dict[str, Any]] = []
+    compared = 0
+    trailer_only = 0
+    for sha, message in _log_messages(repo, since_commit):
+        for line in approval_trailers(message, trailer):
+            if _REVIEWED_KEY in line.duplicates:
+                continue  # 様式不備は A-18-1 が承継の起点から外して扱う(二重に鳴らさない)
+            declared = line.attrs.get(_REVIEWED_KEY)
+            if declared is None or not _FULL_SHA_RE.match(declared):
+                continue  # v1 様式・様式不備は本検査の対象外(上記 docstring)
+            row = _resolve_trailer_decision(conn, line.ref)
+            if row is None:
+                continue  # 参照が解決できないこと自体は A-18-1/7 の担当
+            recorded = str(row.get("reviewed_sha") or "").strip().lower()
+            if not recorded:
+                trailer_only += 1
+                continue
+            compared += 1
+            if recorded == declared.lower():
+                continue
+            findings.append(
+                {
+                    "commit": sha[:12],
+                    "commit_full": sha,
+                    "subject": _git(repo, "log", "-1", "--format=%s", sha).strip(),
+                    "ref": line.ref,
+                    "decision_id": row.get("decision_id"),
+                    "trailer_reviewed": declared.lower(),
+                    "recorded_reviewed": recorded,
+                    "reason": (
+                        f"Approved トレーラの reviewed={declared.lower()[:12]} と"
+                        f"承認記録(id={row.get('decision_id')})の reviewed_sha="
+                        f"{recorded[:12]} が一致しない"
+                        "(審査対象の申告が2経路で食い違っている — どちらが実際の審査対象か"
+                        "確認すること)"
+                    ),
+                }
+            )
+    return ReviewedShaScan(findings=findings, compared=compared, trailer_only=trailer_only)
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # 本体・報告
 # ────────────────────────────────────────────────────────────────────────────
 def run_a18(
@@ -1648,7 +1794,7 @@ def run_a18(
     verify_prs: bool = True,
     pr_verifier: PRVerifier | None = None,
 ) -> dict[str, Any]:
-    """A-18 の7検査を実行して構造化 dict を返す(A-18-5/6/7 は ``conn`` のある実行のみ)。
+    """A-18 の8検査を実行して構造化 dict を返す(A-18-5/6/7/8 は ``conn`` のある実行のみ)。
 
     ``conn`` を渡すと A-18-1 が ``Approved:`` トレーラの参照先(``governance.decisions``
     の ID 形式)を ``governance.current_decisions`` と突合する(read-only)。渡さない
@@ -1680,6 +1826,7 @@ def run_a18(
     resolution_bypass: dict[str, Any] | None = None
     unrecorded_prs: list[dict[str, Any]] = []
     deemed_scan: UnrecordedPRScan | None = None
+    reviewed_scan: ReviewedShaScan | None = None
     if conn is not None:
         unnotified, untracked_deemed = check_unnotified_deemed(conn)
         resolution_bypass = check_resolution_bypass(conn)
@@ -1687,6 +1834,9 @@ def run_a18(
             repo_path, gov, conn, since_commit=deemed_since_commit
         )
         unrecorded_prs = deemed_scan.findings
+        reviewed_scan = check_reviewed_sha_agreement(
+            repo_path, gov, conn, since_commit=since_commit
+        )
     return {
         "as_of": datetime.now(UTC).isoformat(),
         "since_commit": since_commit,
@@ -1716,6 +1866,10 @@ def run_a18(
         # 緑の分母(後-4)。検査した保護領域 PR マージ数と、リポジトリ部分を照合できたか。
         "checked_protected_prs": deemed_scan.checked if deemed_scan else 0,
         "deemed_repo_slug": deemed_scan.repo_slug if deemed_scan else None,
+        # A-18-8: トレーラ reviewed= ⇔ 承認記録 reviewed_sha の突合(conn のある実行のみ)。
+        "reviewed_sha_mismatches": reviewed_scan.findings if reviewed_scan else [],
+        "compared_reviewed_shas": reviewed_scan.compared if reviewed_scan else 0,
+        "trailer_only_reviewed": reviewed_scan.trailer_only if reviewed_scan else 0,
         # 既知の限界は毎回開示する(独立役員審査条件)+ 個別の注記(登録漏れ・鮮度)。
         "notes": [
             *_coverage_notes(gov),
@@ -1730,7 +1884,12 @@ def run_a18(
             *([] if conn is not None else [
                 "DB 接続なしの実行のため Approved トレーラの承認記録(否認済みか)と"
                 "みなし承認の通知配送(A-18-5)・決議の批判経由(A-18-6)・"
-                "保護領域 PR の承認記録(A-18-7)は未照合"
+                "保護領域 PR の承認記録(A-18-7)・審査対象 SHA の突合(A-18-8)は未照合"
+            ]),
+            *([] if reviewed_scan is None or not reviewed_scan.trailer_only else [
+                f"トレーラに reviewed= はあるが承認記録に reviewed_sha が無い決定 "
+                f"{reviewed_scan.trailer_only} 件 — A-18-8 の突合が働かない記録"
+                "(0029 以前の記録、または --deemed-for-pr 以外の経路での発効)"
             ]),
             *([] if deemed_scan is None or deemed_scan.repo_slug else [
                 "A-18-7 は origin remote から owner/repo を解決できず、承認記録の帰属を"
@@ -1818,6 +1977,7 @@ def has_findings(result: dict[str, Any]) -> bool:
         or result.get("unnotified_deemed")
         or result.get("unrecorded_prs")
         or (result.get("resolution_bypass") or {}).get("alert")
+        or result.get("reviewed_sha_mismatches")
         or vetoed_trailer_findings(result)
         or pr_verification_degraded(result)
     )
@@ -2034,6 +2194,41 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
                     if checked_prs
                     else "対象 PR なし(基準コミット以降に保護領域へ触れた PR マージが 0 件 — "
                          "squash マージ運用へ移行した場合も同じ表示になる)"
+                ),
+                "inline": False,
+            }
+        )
+
+    # A-18-8: 不一致は「2つの申告が食い違っている」= 事故か改変の signal。0 件でも1行載せ、
+    # **分母(突合できた件数)を必ず書く**(A-18-7 と同じ流儀 — 移行期の緑は「不一致が無い」
+    # ではなく「まだ1件も突合していない」であることが多い)。
+    reviewed_mismatches = result.get("reviewed_sha_mismatches") or []
+    compared_shas = result.get("compared_reviewed_shas") or 0
+    if reviewed_mismatches:
+        lines = [
+            f"- `{m['commit']}` {m['subject']}({m['ref']}: トレーラ "
+            f"{m['trailer_reviewed'][:12]} ⇔ 記録 {m['recorded_reviewed'][:12]})"
+            for m in reviewed_mismatches
+        ]
+        fields.append(
+            {
+                "name": (
+                    f"⚠️ A-18-8 審査対象 SHA の不一致 {len(reviewed_mismatches)}/{compared_shas} 件"
+                    "(トレーラの reviewed= ⇔ 承認記録の reviewed_sha)"
+                ),
+                "value": "\n".join(lines)[:1024],
+                "inline": False,
+            }
+        )
+    elif result.get("decision_refs_verified"):
+        fields.append(
+            {
+                "name": "A-18-8 審査対象 SHA の突合",
+                "value": (
+                    f"✅ 不一致なし(突合できた決定 {compared_shas} 件)"
+                    if compared_shas
+                    else "突合対象なし(トレーラの reviewed= と承認記録の reviewed_sha が"
+                         "揃った決定が 0 件 — 一致の確認ではない)"
                 ),
                 "inline": False,
             }

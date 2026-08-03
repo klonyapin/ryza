@@ -44,8 +44,14 @@ PR 番号だけで発効させる簡易形(参照・種別・文面を ``gh api`
         --review docs/reviews/xxxx-independent-review.md
 
 ``--review``(独立役員審査の参照)は ``--deemed-for-pr`` と ``--kind pr`` で必須である。
-ただし**実在は検査しない形式要件**であり、値は通知本文に残るだけで構造化列にはならない
-(事後の機械照合は ``decision-reviewed-sha`` リマインダーの課題)。
+値は通知本文に残るだけでなく ``governance.decisions.review_ref`` に構造化して記録し、
+``--deemed-for-pr`` では PR の head SHA を ``reviewed_sha`` として自動で埋める(0029)。
+これにより監査 A-18-8 が「トレーラの ``reviewed=<sha>``」と「承認記録の ``reviewed_sha``」を
+突合できる —— **別経路で書かれた2つの申告**なので、片方だけを書き換えた偽装は不一致で出る。
+
+**残る限界**: どちらの値も発効を起票した側が書く。審査エージェント自身の署名ではないため、
+起票者が両方に同じ嘘を書けば一致する。``--review`` の実在検査もリポジトリ内パス形式に
+限られ、**不在でも拒否はしない**(過去の審査を遡って登録する経路を塞がないため — 警告のみ)。
 
 **この CLI を叩き忘れると通知なき発効になる**。自動起票(PR イベント駆動)は未実装で
 (ops/reminders.yaml ``deemed-auto-announce``)、叩き忘れは監査 A-18-7(保護領域 PR の
@@ -56,9 +62,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -89,6 +97,12 @@ DEFAULT_DEEMED_SOURCE = "deemed"
 
 # governance.decision_vetoes.kind の語彙(0021 の CHECK と一致させる)。
 VETO_KINDS: tuple[str, ...] = ("veto", "revert_complete", "withdrawal")
+
+# 審査対象 SHA の様式(0029 の decisions_reviewed_sha_check と一致させる)。短縮 SHA を
+# 許すと A-18-8 の突合が「一致とも不一致とも言えない」状態を作るため完全 SHA のみ。
+# 監査側(audit/a18._FULL_SHA_RE)と同じ様式だが、audit は被監査モジュールを import しない
+# 方針なので定数は共有せず各々が持つ。
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 
 # 否認できる決定(0021 の check_veto_target トリガと一致させる)。
 # reject / question を否認可能にすると「却下されている」という阻止の根拠が消え、
@@ -138,6 +152,10 @@ class DeemedApproval:
     kind: str
     decided_by: str  # 'system:<source>'
     notice_ref: str
+    #: 審査対象コミット(40 桁 hex・小文字)。申告が無ければ None(0029)
+    reviewed_sha: str | None = None
+    #: 独立役員審査の参照(docs/reviews/... のパス・URL 等)
+    review_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -167,6 +185,8 @@ def record_deemed_approval(
     *,
     source: str = DEFAULT_DEEMED_SOURCE,
     note: str | None = None,
+    reviewed_sha: str | None = None,
+    review_ref: str | None = None,
 ) -> DeemedApproval:
     """みなし承認を ``governance.decisions`` に ``decision='deemed'`` で記録する。
 
@@ -178,19 +198,31 @@ def record_deemed_approval(
             A-18 の無承認変更にあたる。``channel_msg_id`` 列に記録する
         source: 発効源。``decided_by`` は ``'system:<source>'`` になる
         note: 補足(任意)
+        reviewed_sha: 審査対象コミットの完全 SHA(0029)。小文字へ正規化して記録する。
+            監査 A-18-8 が ``Approved:`` トレーラの ``reviewed=<sha40>`` と突合する
+        review_ref: 独立役員審査の参照(``docs/reviews/...`` のパス・URL 等)
 
     Raises:
-        ValueError: 未知の kind、または proposal_ref / notice_ref / source が空
+        ValueError: 未知の kind、proposal_ref / notice_ref / source が空、
+            または ``reviewed_sha`` が 40 桁 hex の完全 SHA でない
         ReservedMatterError: 3専決事項の kind(定款第3条)
         DuplicateDecisionError: 同 proposal_ref の決定が既にある
 
     本関数は **通知の送信そのものは行わない**。呼び出し側が通知の投入(press.outbox)と
     本記録を同一トランザクションに置くことで、「通知されたが記録が無い」「記録は
     あるが通知されていない」のどちらも起こらないようにする(定款第3条3号)。
+
+    ``reviewed_sha`` / ``review_ref`` は**任意**である。必須にしないのは、みなし承認が
+    PR 以外(戦略昇格・IPS 改訂等)にも使われ、独立役員審査が前置されない手続では
+    書きようがないため —— 必須化すると正当な発効経路を塞ぐ(後続配線審査 後-1 と同じ理由)。
+    保護領域 PR で必須にする判断は CLI 側(``REVIEW_REQUIRED_KINDS``)に置く。
     """
     _require_text(proposal_ref, "proposal_ref")
     _require_text(notice_ref, "notice_ref")
     _require_text(source, "source")
+    reviewed_sha = normalize_reviewed_sha(reviewed_sha)
+    if review_ref is not None:
+        _require_text(review_ref, "review_ref")
     # 専決事項の判定を語彙検査より先に行う。RESERVED_KIND_BY_MATTER には現 kind 語彙に
     # 未登録の 'constitution'(0019 が先回りで列挙)が含まれるため、順序を逆にすると
     # 「未知の提案種別」という的外れなエラーになり、憲法的な禁止であることが伝わらない。
@@ -212,11 +244,15 @@ def record_deemed_approval(
             cur.execute(
                 """
                 INSERT INTO governance.decisions
-                    (proposal_ref, kind, decision, decided_by, note, channel_msg_id)
-                VALUES (%s, %s, 'deemed', %s, %s, %s)
+                    (proposal_ref, kind, decision, decided_by, note, channel_msg_id,
+                     reviewed_sha, review_ref)
+                VALUES (%s, %s, 'deemed', %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (proposal_ref, kind, decided_by, note, notice_ref),
+                (
+                    proposal_ref, kind, decided_by, note, notice_ref,
+                    reviewed_sha, review_ref,
+                ),
             )
             decision_id = cur.fetchone()[0]
     except psycopg.errors.UniqueViolation as exc:  # 事前検査との競合(別セッション)
@@ -229,6 +265,55 @@ def record_deemed_approval(
         kind=kind,
         decided_by=decided_by,
         notice_ref=notice_ref,
+        reviewed_sha=reviewed_sha,
+        review_ref=review_ref,
+    )
+
+
+def normalize_reviewed_sha(value: str | None) -> str | None:
+    """審査対象 SHA を検証して小文字へ正規化する(空・None は None)。
+
+    正規化を writer 側で行うのは、大文字と小文字の表記揺れが監査 A-18-8 の**不一致の
+    誤検出**になるためである(トレーラ側 :func:`ryza.audit.a18.reviewed_shas` も lower で
+    揃える)。短縮 SHA を弾くのは、曖昧な参照が「一致とも不一致とも言えない」第三の状態を
+    作り、fail-safe / fail-open のどちらに倒すかの判断を突合ロジックに押し込むため。
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if not _FULL_SHA_RE.match(text):
+        raise ValueError(
+            f"reviewed_sha は 40 桁 hex の完全 SHA である必要がある(短縮 SHA は曖昧): {value}"
+        )
+    return text.lower()
+
+
+def missing_review_ref_warning(
+    review_ref: str | None, *, repo_root: Path | None = None
+) -> str | None:
+    """``review_ref`` がリポジトリ内パス形式なのに実在しないなら警告文を返す。
+
+    **拒否ではなく警告にする理由**: 審査意見書がリポジトリ外(Discord スレッド・Issue)に
+    ある運用と、過去に完了した審査を後から遡って登録する運用(``docs/reviews`` に無い・
+    別ブランチにしか無いファイルを指す)を塞いでしまうため。実在検査の目的は「``--review 嘘``
+    をタイプミスや出まかせのまま通さない」ことであって、発効そのものの可否判定ではない。
+
+    URL(``http://`` / ``https://``)や ``discord://`` 等のスキーム付き参照は対象外
+    —— ネットワーク越しの実在確認は CLI の責務にしない(gh 以外の到達手段を増やさない)。
+    """
+    if not review_ref:
+        return None
+    ref = review_ref.strip()
+    if "://" in ref or ref.startswith("#"):
+        return None
+    root = repo_root or Path(__file__).resolve().parents[3]
+    if (root / ref).exists():
+        return None
+    return (
+        f"--review の参照 '{ref}' がリポジトリ内に見つからない"
+        "(パス形式に見えるが実在しない — 発効は妨げないが、審査意見書の所在を確認すること)"
     )
 
 
@@ -438,7 +523,7 @@ _CURRENT_DECISION_COLUMNS = """
     decision_id, proposal_ref, kind, recorded_decision,
     effective_decision, is_vetoed, decided_by, decided_at,
     veto_id, veto_kind, vetoed_by, veto_reason, revert_commit,
-    derived_effects_ref, vetoed_at
+    derived_effects_ref, vetoed_at, reviewed_sha, review_ref
 """
 
 
@@ -514,6 +599,8 @@ class PullRequestRef:
     state: str
     merged: bool
     files: tuple[str, ...]
+    #: ブランチ先端(``head.sha``)。発効時点の審査対象コミットとして ``reviewed_sha`` に入る
+    head_sha: str | None = None
 
 
 def _gh_api(path: str, *, paginate: bool = False, jq: str | None = None) -> Any:
@@ -549,12 +636,17 @@ def _gh_api(path: str, *, paginate: bool = False, jq: str | None = None) -> Any:
 
 
 def fetch_pull_request(pr_number: int, *, repo: str | None = None) -> PullRequestRef:
-    """PR のタイトル・URL・状態・変更ファイルを ``gh api`` で取得する。
+    """PR のタイトル・URL・状態・変更ファイル・head SHA を ``gh api`` で取得する。
 
     ``repo`` 省略時は ``:owner/:repo``(gh がカレントのリポジトリへ解決する)。
     **クローズ済み(未マージ)の PR は拒否する** —— 取り下げられた提案の発効を通知しても
     取消義務(定款第3条2号)だけが残る。オープンな PR を対象にできるのは意図どおりで、
     みなし承認は「PR 起票時に通知して発効する」運用だからである。
+
+    ``head.sha`` を取るのは、発効時点のブランチ先端が「独立審査が見た内容」であり、
+    ``governance.decisions.reviewed_sha``(0029)に入る値だからである。GitHub から取る
+    (手入力させない)ことで、**発効の時刻に固定された値**になる —— 後から積んだコミットは
+    この SHA の祖先にならず、監査 A-18-1 の承継範囲にも A-18-8 の突合にも現れない。
     """
     slug = repo or ":owner/:repo"
     data = _gh_api(f"repos/{slug}/pulls/{pr_number}")
@@ -570,6 +662,8 @@ def fetch_pull_request(pr_number: int, *, repo: str | None = None) -> PullReques
         files = _gh_api(f"repos/{slug}/pulls/{pr_number}/files", paginate=True, jq=".[].filename")
     except PullRequestLookupError:
         files = []  # 一覧は文面の補助でしかない。取れなくても発効そのものは妨げない
+    head = data.get("head")
+    head_sha = str(head.get("sha")) if isinstance(head, dict) and head.get("sha") else None
     return PullRequestRef(
         number=pr_number,
         url=str(data.get("html_url") or ""),
@@ -577,10 +671,11 @@ def fetch_pull_request(pr_number: int, *, repo: str | None = None) -> PullReques
         state=state,
         merged=merged,
         files=tuple(str(f) for f in files),
+        head_sha=head_sha,
     )
 
 
-def build_pr_notice(pr: PullRequestRef, review_ref: str) -> str:
+def build_pr_notice(pr: PullRequestRef, review_ref: str, reviewed_sha: str | None = None) -> str:
     """PR 情報と独立役員審査の参照から、``#承認`` へ出す通知本文を組み立てる。
 
     審査参照を**引数として要求する**のは、この簡易形が「審査前の発効」を作らないためである
@@ -589,8 +684,10 @@ def build_pr_notice(pr: PullRequestRef, review_ref: str) -> str:
     ``--notice`` で全文を差し替えられるが、そのときも審査参照の行は付く
     (:func:`_with_review_line`)。
 
-    **参照は形式要件であり実在は検査しない**(後続配線審査 後-2)。値は本文に残るだけで
-    構造化列にはならず、事後に「その審査が実在したか」を機械照合する経路は無い。
+    参照は ``governance.decisions.review_ref`` に構造化して記録され(0029)、リポジトリ内
+    パス形式なら実在も検査する(:func:`missing_review_ref_warning` — 不在は警告で、拒否では
+    ない)。``reviewed_sha`` を渡すと審査対象コミットも本文に出す —— ``#承認`` を読む代表が
+    「どの時点の内容が発効したのか」を通知だけで確認できるようにするためである。
 
     変更ファイルは保護領域か否かを判定せずそのまま列挙する。glob の解釈は監査
     (``audit/a18.protected_patterns``)の責務であり、ここで二重に定義するとずれる。
@@ -601,7 +698,9 @@ def build_pr_notice(pr: PullRequestRef, review_ref: str) -> str:
         if len(pr.files) > NOTICE_FILE_LIMIT:
             shown += f" ほか {len(pr.files) - NOTICE_FILE_LIMIT} 件"
         lines.append(f"変更ファイル({len(pr.files)} 件): {shown}")
-    lines.append(f"独立役員審査: {review_ref}")
+    if reviewed_sha:
+        lines.append(f"{REVIEWED_LINE_PREFIX}{reviewed_sha}")
+    lines.append(f"{REVIEW_LINE_PREFIX}{review_ref}")
     return "\n".join(lines)
 
 
@@ -628,8 +727,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--review", default=None,
         help=(
             "独立役員審査の参照(docs/reviews/... 等)。--deemed-for-pr と --kind pr では必須。"
-            "**実在検査はしない形式要件** — 値は通知本文に残るだけで構造化列にはならず、"
-            "事後の機械照合はできない(--review 嘘 も通る)"
+            "値は decisions.review_ref に構造化して記録する。リポジトリ内パス形式なら実在を"
+            "検査するが、不在でも発効は妨げない(遡及登録を塞がないため — 警告のみ)"
+        ),
+    )
+    parser.add_argument(
+        "--reviewed-sha", default=None, metavar="SHA40",
+        help=(
+            "審査対象コミットの完全 SHA(decisions.reviewed_sha)。--deemed-for-pr では"
+            "PR の head SHA が自動で入るため通常は不要。監査 A-18-8 が Approved トレーラの"
+            "reviewed=<sha40> と突合する"
         ),
     )
     parser.add_argument(
@@ -672,6 +779,9 @@ REVIEW_REQUIRED_KINDS: frozenset[str] = frozenset({"pr"})
 #: 通知本文に審査参照を残す行の接頭辞(:func:`build_pr_notice` と同じ表記)。
 REVIEW_LINE_PREFIX = "独立役員審査: "
 
+#: 通知本文に審査対象コミットを残す行の接頭辞。
+REVIEWED_LINE_PREFIX = "審査対象コミット: "
+
 
 def _with_review_line(notice: str, review_ref: str) -> str:
     """手書きの通知本文に審査参照の行を足す(既に含まれていればそのまま)。
@@ -682,8 +792,28 @@ def _with_review_line(notice: str, review_ref: str) -> str:
     return notice if review_ref in notice else f"{notice}\n{REVIEW_LINE_PREFIX}{review_ref}"
 
 
-def _resolve_deemed_args(args: argparse.Namespace) -> tuple[str, str, str]:
-    """CLI 引数から ``(proposal_ref, kind, notice)`` を決める。
+def _with_reviewed_line(notice: str, reviewed_sha: str) -> str:
+    """手書きの通知本文に審査対象コミットの行を足す(既に含まれていればそのまま)。
+
+    ``#承認`` を読む代表が「どの時点の内容が発効したのか」を通知だけで判断できるようにする。
+    記録側(``reviewed_sha``)にしか無いと、否認の判断のたびに DB を引く必要が出る。
+    """
+    return notice if reviewed_sha in notice else f"{notice}\n{REVIEWED_LINE_PREFIX}{reviewed_sha}"
+
+
+@dataclass(frozen=True)
+class DeemedTarget:
+    """CLI 引数から解決した「何を・どう発効させるか」。"""
+
+    proposal_ref: str
+    kind: str
+    notice: str
+    reviewed_sha: str | None = None
+    review_ref: str | None = None
+
+
+def _resolve_deemed_args(args: argparse.Namespace) -> DeemedTarget:
+    """CLI 引数から発効対象(:class:`DeemedTarget`)を決める。
 
     ``--deemed-for-pr`` があれば ``gh`` の取得結果で欠けている引数を埋める。明示指定は
     常に優先する(自動生成の文面が状況に合わないときに手で上書きできる余地を残す)。
@@ -692,11 +822,12 @@ def _resolve_deemed_args(args: argparse.Namespace) -> tuple[str, str, str]:
     代替できない(後続配線審査 後-1: 旧実装は ``--notice`` があれば審査参照ゼロで通り、
     「審査前の発効をワンコマンドで作れない」という主張が成立していなかった)。
 
-    **``--review`` は形式要件にすぎない**(後-2): 値の実在は検査せず、通知本文に文字列として
-    残るだけで ``governance.decisions`` の構造化列にはならないため、事後の機械照合はできない
-    (``--review 嘘`` も通る)。「審査を経たと**書かせる**」ことによる抑止であり、
-    「審査を経たことの**証明**」ではない。構造化列と実在検査は ops/reminders.yaml の
-    ``decision-reviewed-sha`` で扱う。
+    **審査参照と審査対象 SHA は構造化列になる**(0029): ``--review`` は ``review_ref``、
+    ``--deemed-for-pr`` の head SHA(または ``--reviewed-sha``)は ``reviewed_sha`` に入り、
+    監査 A-18-8 が ``Approved:`` トレーラの ``reviewed=`` と突合する。**それでも証明では
+    ない** —— どちらも起票者の申告であり、審査エージェント自身の署名は無い。同じ嘘を両方に
+    書けば一致する。突合が効くのは「トレーラだけ後から書き換えた」「別 PR の SHA を写した」
+    といった片側の食い違いに対してである。
     """
     if args.deemed_for_pr is None:
         missing = [
@@ -717,10 +848,19 @@ def _resolve_deemed_args(args: argparse.Namespace) -> tuple[str, str, str]:
                 f"--kind {args.kind} のみなし承認には --review(独立役員審査の参照)が必須。"
                 "保護領域 PR は審査を前置する手続であり、--notice では代替できない"
             )
+        reviewed_sha = normalize_reviewed_sha(args.reviewed_sha)
         notice = args.notice
+        if reviewed_sha:
+            notice = _with_reviewed_line(notice, reviewed_sha)
         if args.review:
             notice = _with_review_line(notice, args.review)
-        return args.proposal_ref, args.kind, notice
+        return DeemedTarget(
+            proposal_ref=args.proposal_ref,
+            kind=args.kind,
+            notice=notice,
+            reviewed_sha=reviewed_sha,
+            review_ref=args.review,
+        )
 
     if not args.review:
         raise ValueError(
@@ -731,12 +871,23 @@ def _resolve_deemed_args(args: argparse.Namespace) -> tuple[str, str, str]:
     pr = fetch_pull_request(args.deemed_for_pr, repo=args.gh_repo)
     if not pr.url:
         raise ValueError(f"PR #{args.deemed_for_pr} の URL を取得できなかった")
-    notice = (
-        _with_review_line(args.notice, args.review)
-        if args.notice
-        else build_pr_notice(pr, args.review)
+    # 明示指定 > gh の head SHA。手で書けるのは、審査が head より前のコミットを対象とした
+    # 場合(審査後に無関係な追従コミットを積んだ等)に**実際に見た SHA** を残せるようにするため。
+    reviewed_sha = normalize_reviewed_sha(args.reviewed_sha) or normalize_reviewed_sha(pr.head_sha)
+    if args.notice:
+        notice = args.notice
+        if reviewed_sha:
+            notice = _with_reviewed_line(notice, reviewed_sha)
+        notice = _with_review_line(notice, args.review)
+    else:
+        notice = build_pr_notice(pr, args.review, reviewed_sha)
+    return DeemedTarget(
+        proposal_ref=args.proposal_ref or pr.url,
+        kind=args.kind or "pr",
+        notice=notice,
+        reviewed_sha=reviewed_sha,
+        review_ref=args.review,
     )
-    return args.proposal_ref or pr.url, args.kind or "pr", notice
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -755,10 +906,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     try:
-        proposal_ref, kind, notice = _resolve_deemed_args(args)
+        target = _resolve_deemed_args(args)
     except (PullRequestLookupError, ValueError) as exc:
         print(f"みなし承認の対象を解決できませんでした: {exc}", file=sys.stderr)
         return 1
+
+    # 審査参照の実在検査は**警告**であって発効の可否ではない(遡及登録・リポジトリ外の
+    # 審査を塞がないため)。黙って通すと `--review 嘘` がタイプミスのまま記録に残る。
+    warning = missing_review_ref_warning(target.review_ref)
+    if warning:
+        print(f"警告: {warning}", file=sys.stderr)
 
     import json
 
@@ -768,7 +925,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         embed = notices.build_deemed_notice_embed(
-            proposal_ref, kind, notice, title=args.title, role=args.role
+            target.proposal_ref, target.kind, target.notice, title=args.title, role=args.role
         )
         print(json.dumps(embed, ensure_ascii=False, indent=2))
         return 0
@@ -777,13 +934,20 @@ def main(argv: list[str] | None = None) -> int:
     # meta.runs に残る(a18.run_and_report と同じ流儀)。
     run = start_run(
         "governance.deemed_notice",
-        {"proposal_ref": proposal_ref, "kind": kind, "source": args.source},
+        {
+            "proposal_ref": target.proposal_ref,
+            "kind": target.kind,
+            "source": args.source,
+            "reviewed_sha": target.reviewed_sha,
+            "review_ref": target.review_ref,
+        },
     )
     conn = connect()
     try:
         result = notices.announce_deemed_approval(
-            conn, proposal_ref, kind, notice, run.run_id,
+            conn, target.proposal_ref, target.kind, target.notice, run.run_id,
             source=args.source, note=args.note, title=args.title, role=args.role,
+            reviewed_sha=target.reviewed_sha, review_ref=target.review_ref,
         )
         conn.commit()
         run.finish("success")
@@ -801,7 +965,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         f"みなし承認を記録し通知を投入しました: decision_id={result.decision.id} "
-        f"notice_ref={result.notice_ref} decided_by={result.decision.decided_by}",
+        f"notice_ref={result.notice_ref} decided_by={result.decision.decided_by} "
+        f"reviewed_sha={result.decision.reviewed_sha or '(未申告)'}",
         file=sys.stderr,
     )
     return 0
@@ -811,10 +976,14 @@ __all__ = [
     "DEFAULT_DEEMED_SOURCE",
     "RESERVED_KINDS",
     "RESERVED_KIND_BY_MATTER",
+    "REVIEWED_LINE_PREFIX",
+    "REVIEW_LINE_PREFIX",
+    "REVIEW_REQUIRED_KINDS",
     "SYSTEM_ACTOR_PREFIX",
     "VETOABLE_DECISIONS",
     "VETO_KINDS",
     "DeemedApproval",
+    "DeemedTarget",
     "DuplicateDecisionError",
     "NotVetoableError",
     "ProposalRefMismatchError",
@@ -827,6 +996,8 @@ __all__ = [
     "current_decision_by_id",
     "fetch_pull_request",
     "main",
+    "missing_review_ref_warning",
+    "normalize_reviewed_sha",
     "record_deemed_approval",
     "record_revert_completion",
     "record_veto",
