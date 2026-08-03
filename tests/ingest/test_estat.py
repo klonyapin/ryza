@@ -49,12 +49,32 @@ def test_app_id_secret_manager_fallback(monkeypatch, fake_secret_manager):
 
 
 def test_app_id_missing_raises(monkeypatch, fake_secret_manager):
-    """env も Secret も無ければ EstatAuthError(daily では skipped 扱い)。"""
+    """env も Secret も無ければ EstatAuthError(daily では skipped 扱い)。
+
+    GCP_PROJECT 未設定(env 伝播漏れ)であることが理由としてメッセージに載る。
+    """
     fake_secret_manager({})
     monkeypatch.delenv("RYZA_ESTAT_APP_ID", raising=False)
     monkeypatch.delenv("ESTAT_APP_ID", raising=False)
     monkeypatch.delenv("GCP_PROJECT", raising=False)
-    with pytest.raises(estat.EstatAuthError):
+    with pytest.raises(estat.EstatAuthError, match="GCP_PROJECT 未設定"):
+        estat.app_id()
+
+
+def test_app_id_secret_access_failure_reason_in_message(
+    monkeypatch, fake_secret_manager
+):
+    """2026-08-03 VM 実走の再現(Issue #38): env なし + GCP_PROJECT あり + Secret 404。
+
+    実際の原因は Secret 'estat-app-id' が本体だけ作成され値(バージョン)未追加で、
+    versions/latest:access が 404 → None → EstatAuthError(skip)だった。skip 理由に
+    404 と Secret 名が載り、ops サマリだけで切り分けられることを固定する。
+    """
+    fake_secret_manager({})  # 'estat-app-id' 未登録 → 404(バージョン未追加と同じ応答)
+    monkeypatch.delenv("RYZA_ESTAT_APP_ID", raising=False)
+    monkeypatch.delenv("ESTAT_APP_ID", raising=False)
+    monkeypatch.setenv("GCP_PROJECT", "ryza-main")
+    with pytest.raises(estat.EstatAuthError, match="estat-app-id.*404"):
         estat.app_id()
 
 

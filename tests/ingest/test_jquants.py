@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -47,8 +47,60 @@ def test_api_key_missing_raises(monkeypatch, fake_secret_manager):
         jquants.api_key()
 
 
+def test_api_key_secret_failure_reason_in_message(monkeypatch, fake_secret_manager):
+    """Secret 取得失敗の理由がエラーメッセージ(→ daily skip 理由)に載る(Issue #38)。"""
+    fake_secret_manager({})  # 未登録/バージョン未追加 → 404
+    monkeypatch.delenv("RYZA_JQUANTS_API_KEY", raising=False)
+    monkeypatch.delenv("JQUANTS_API_KEY", raising=False)
+    monkeypatch.setenv("GCP_PROJECT", "proj")
+    with pytest.raises(jquants.JQuantsAuthError, match="jquants-api-key.*404"):
+        jquants.api_key()
+
+
 def test_auth_headers_uses_x_api_key():
     assert jquants._auth_headers("KEY123") == {"x-api-key": "KEY123"}
+
+
+# ── 実効取得日(Free プランの 12 週遅延、Issue #38)──────────────────────────
+def test_effective_quote_date_clamps_recent_date():
+    """当日(遅延窓内)の要求は「今日 − lag」へ丸める(400 回避)。"""
+    eff = jquants.effective_quote_date(
+        date(2026, 8, 3), today=date(2026, 8, 3), lag_days=91
+    )
+    assert eff == date(2026, 5, 4)  # 月曜: 平日繰り下げなし
+
+
+def test_effective_quote_date_rolls_weekend_to_friday():
+    """丸め結果が土日なら直前の金曜へ繰り下げる。"""
+    eff = jquants.effective_quote_date(
+        date(2026, 8, 1), today=date(2026, 8, 1), lag_days=91
+    )
+    assert eff == date(2026, 5, 1)  # 2026-05-02(土) → 05-01(金)
+
+
+def test_effective_quote_date_keeps_old_date():
+    """遅延窓より古い要求日付はそのまま。"""
+    eff = jquants.effective_quote_date(
+        date(2026, 4, 30), today=date(2026, 8, 3), lag_days=91
+    )
+    assert eff == date(2026, 4, 30)
+
+
+def test_effective_quote_date_lag_zero_keeps_today():
+    """有償プラン(lag_days=0)では平日の当日取得に戻る。"""
+    eff = jquants.effective_quote_date(
+        date(2026, 8, 3), today=date(2026, 8, 3), lag_days=0
+    )
+    assert eff == date(2026, 8, 3)
+
+
+def test_fetch_all_error_includes_status_and_body(fetcher):
+    """非 2xx はステータスとレスポンスボディ付きで失敗する(切り分け用、Issue #38)。"""
+    fetcher.add("equities/bars/daily", FetchResult(
+        status=400, body=b'{"message": "out of subscription range"}',
+    ))
+    with pytest.raises(RuntimeError, match="status=400.*out of subscription range"):
+        jquants.fetch_daily_quotes(fetcher, "KEY", "2026-08-03")
 
 
 def test_fetch_daily_quotes_sends_api_key_header(fetcher):

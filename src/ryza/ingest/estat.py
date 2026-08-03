@@ -38,7 +38,7 @@ from ryza.ingest import base
 from ryza.ingest.base import Fetcher
 from ryza.provenance import EvidenceStore, Run, record
 from ryza.provenance import run as run_ctx
-from ryza.secrets import load_secret
+from ryza.secrets import probe_secret
 
 _API_BASE = "https://api.e-stat.go.jp/rest/3.0/app/json"
 SOURCE_NAME = "e-Stat"
@@ -53,13 +53,18 @@ class EstatAuthError(RuntimeError):
 
 
 def app_id() -> str:
-    """appId を取得する（env 優先 → Secret Manager ``estat-app-id``、Issue #30）。"""
-    key = load_secret(env=("RYZA_ESTAT_APP_ID", "ESTAT_APP_ID"), secret="estat-app-id")
-    if not key:
-        raise EstatAuthError(
-            "e-Stat appId 未設定（Secret 'estat-app-id' / env RYZA_ESTAT_APP_ID）"
-        )
-    return key
+    """appId を取得する（env 優先 → Secret Manager ``estat-app-id``、Issue #30）。
+
+    未取得時のエラーに理由（env 未設定/GCP_PROJECT 不明/Secret 取得失敗の内容）を
+    含める — daily の skip 理由（ops サマリ）にそのまま載り、VM ログを見ずに切り分け
+    られる（Issue #38: Secret 本体だけ作成して値=バージョン未追加、のケースを可視化）。
+    """
+    res = probe_secret(
+        env=("RYZA_ESTAT_APP_ID", "ESTAT_APP_ID"), secret="estat-app-id"
+    )
+    if not res.value:
+        raise EstatAuthError(f"e-Stat appId 未設定: {res.reason}")
+    return res.value
 
 
 @dataclass(frozen=True)

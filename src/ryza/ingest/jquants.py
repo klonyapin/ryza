@@ -15,17 +15,23 @@ V2 ではレスポンスのカラム名が短縮された（例 ``Open``→``O``
 ``DisclosedDate``→``DiscDate``）。トップレベルは ``{"data": [...]}`` に統一され、
 ``pagination_key`` でページ送りする（全ページを連結して返す）。
 
+**Free プランの取得可能日付（Issue #38）**: Free プランは直近 12 週の日足が提供されず、
+窓内の日付を ``date`` に指定すると HTTP 400 が返る（2026-08-03 の VM daily 実走で確認。
+域内の過去日付では同一リクエスト形式で 200）。``effective_quote_date`` が要求日付を
+「今日 − ``_PLAN_LAG_DAYS``」以前の平日へ丸めてから取得する。有償プラン移行時は
+``--lag-days 0`` を指定する。
+
 HTTP は ``Fetcher`` 越し（テストはモック）。日足の各バーは証憑（API 生レスポンス）への
 リネージ辺を張る。
 
-実行: ``python -m ryza.ingest.jquants [--date YYYY-MM-DD]``
+実行: ``python -m ryza.ingest.jquants [--date YYYY-MM-DD] [--lag-days N]``
 """
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -35,11 +41,16 @@ from ryza.ingest import base
 from ryza.ingest.base import Fetcher
 from ryza.provenance import EvidenceStore, Run, record
 from ryza.provenance import run as run_ctx
-from ryza.secrets import load_secret
+from ryza.secrets import probe_secret
 
 _API_BASE = "https://api.jquants.com"
 SOURCE = "jquants"
 SOURCE_NAME = "J-Quants"
+
+# Free プランは直近 12 週（84 日）の日足が取得できず、窓内の日付指定は HTTP 400 になる
+# （モジュール docstring 参照）。データ反映タイミングの揺れ・境界日ズレを吸収するため
+# +7 日のマージンを置く（12 週遅延データの分析用途で 1 週の追加遅延は実害なし）。
+_PLAN_LAG_DAYS = 91
 
 
 class JQuantsAuthError(RuntimeError):
@@ -54,15 +65,14 @@ def api_key() -> str:
     Issue #30）。Secret ``jquants-refresh-token`` も登録されているが V2 は API キー認証
     のみのため使用しない（V1 の遺物）。
     """
-    key = load_secret(
+    res = probe_secret(
         env=("RYZA_JQUANTS_API_KEY", "JQUANTS_API_KEY"), secret="jquants-api-key"
     )
-    if not key:
-        raise JQuantsAuthError(
-            "J-Quants API キー未設定（Secret 'jquants-api-key' / "
-            "env RYZA_JQUANTS_API_KEY）"
-        )
-    return key
+    if not res.value:
+        # 理由（env 未設定/GCP_PROJECT 不明/Secret 取得失敗）を daily の skip 理由へ
+        # 可視化する（Issue #38）。
+        raise JQuantsAuthError(f"J-Quants API キー未設定: {res.reason}")
+    return res.value
 
 
 def _auth_headers(key: str) -> dict[str, str]:
@@ -87,7 +97,10 @@ def _fetch_all(
     while True:
         resp = fetcher.fetch(url, params=query, headers=_auth_headers(key))
         if not resp.ok:
-            raise RuntimeError(f"{path} 失敗: status={resp.status}")
+            # エラーボディ（J-Quants は message を返す）を含め、プラン範囲外・
+            # パラメータ不正等の切り分けをログだけで可能にする（Issue #38）。
+            body = resp.body[:200].decode("utf-8", errors="replace")
+            raise RuntimeError(f"{path} 失敗: status={resp.status} body={body}")
         payload = resp.json()
         out.extend(payload.get("data", []))
         next_key = payload.get("pagination_key")
@@ -95,6 +108,23 @@ def _fetch_all(
             break
         query["pagination_key"] = next_key
     return out
+
+
+def effective_quote_date(
+    requested: date, *, today: date | None = None, lag_days: int = _PLAN_LAG_DAYS
+) -> date:
+    """プラン遅延を考慮した実効取得日を返す（Issue #38）。
+
+    ``requested`` と「今日 − ``lag_days``」の古い方を取り、土日なら直前の金曜へ繰り
+    下げる（土日指定は常に空データのため）。祝日は繰り下げない（API は営業日以外を
+    空データで返すだけでエラーにはならず、取引カレンダー依存を持ち込まない）。
+    ``lag_days=0`` で遅延なしプラン（Standard 等）の当日取得に戻る。
+    """
+    today = today if today is not None else date.today()
+    eff = min(requested, today - timedelta(days=lag_days))
+    while eff.weekday() >= 5:  # 5=土, 6=日
+        eff -= timedelta(days=1)
+    return eff
 
 
 def _normalize_symbol(code: str) -> str:
@@ -305,19 +335,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--no-instruments", action="store_true", help="銘柄マスタ更新を省略"
     )
+    parser.add_argument(
+        "--lag-days", type=int, default=_PLAN_LAG_DAYS,
+        help=f"プラン遅延日数（既定 {_PLAN_LAG_DAYS}=Free。有償プランは 0）",
+    )
     args = parser.parse_args(argv)
+
+    # Free プランは直近 12 週の日付指定が HTTP 400 になるため、取得可能な日付へ丸める
+    # （モジュール docstring / Issue #38）。
+    quote_date = effective_quote_date(
+        date.fromisoformat(args.date), lag_days=args.lag_days
+    ).isoformat()
 
     store = base.default_store()
     fetcher = base.default_fetcher()
     # autocommit 共有接続: 冪等な追記書込は逐次確定でよい（再実行が続きを埋める）。
     conn = connect(autocommit=True)
     try:
-        with run_ctx("ingest.jquants.daily", {"date": args.date}, conn=conn) as r:
+        params = {"date": args.date, "effective_date": quote_date}
+        with run_ctx("ingest.jquants.daily", params, conn=conn) as r:
             result = run_daily(
                 conn, r, store, fetcher,
-                quote_date=args.date, with_instruments=not args.no_instruments,
+                quote_date=quote_date, with_instruments=not args.no_instruments,
             )
-        print(f"jquants daily {args.date}: {result}")
+        print(f"jquants daily {quote_date} (要求 {args.date}): {result}")
     finally:
         conn.close()
     return 0
