@@ -40,10 +40,12 @@ def test_daily_end_to_end(conn, run, llm_config, make_daily_llms, insert_enriche
     _seed(insert_enriched_doc)
     result, _ = _run(conn, run, llm_config, make_daily_llms)
 
-    # ステップ実行順(取込→前処理→分析→執行/締め→リスク→朝刊→サマリ)。
+    # ステップ実行順(取込→前処理→分析→FM→執行/締め→リスク→朝刊→サマリ)。
+    # fm 段は分析の後・執行の前(FM 提案 → ゲート → 執行 — T-017)。
     # risk 段は会計締め(execution 段)の直後(00 §9・設計リード裁定 2026-08-03)。
     assert [s.name for s in result.stages] == [
-        "ingest", "preprocess", "analysis", "execution", "risk", "morning", "ops_summary"
+        "ingest", "preprocess", "analysis", "fm", "execution", "risk",
+        "morning", "ops_summary",
     ]
     assert result.ok
     assert all(s.ok for s in result.stages)
@@ -196,6 +198,119 @@ def test_daily_kill_switch_skips_posting(
             "SELECT count(*) FROM press.outbox WHERE embed_json->>'title' = %s",
             (daily.MORNING_TITLE,),
         )
+        assert cur.fetchone()[0] == 0
+
+
+# ── FM 段(T-017)の配線: Jim の提案がゲートを通り同日に約定する ─────────────────
+def _seed_jim_universe(conn, run) -> int:
+    """Jim のユニバース銘柄(curated 分類)+末日にゴールデンクロスする日足を仕込む。"""
+    from datetime import date, time, timedelta
+    from decimal import Decimal
+    from zoneinfo import ZoneInfo
+
+    from ryza.risk.classify import Classification, upsert_classification
+
+    jst = ZoneInfo("Asia/Tokyo")
+    today: date = datetime.now(UTC).astimezone(jst).date()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ops.trading_state (state, updated_by) VALUES ('normal', 'test')
+            ON CONFLICT (singleton) DO UPDATE SET state = 'normal', updated_by = 'test'
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO risk.limits_state
+                (book_id, dd_soft, dd_hard, vol_exceeded, es_exceeded, as_of)
+            VALUES ('DEMO_FUND', false, false, false, false, now())
+            ON CONFLICT (book_id) DO UPDATE SET as_of = now()
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO market.instruments (symbol, asset_class, venue, currency, valid_from)
+            VALUES ('1301.T', 'equity', 'TSE', 'JPY', now() - interval '90 days')
+            RETURNING instrument_id
+            """
+        )
+        instrument_id = cur.fetchone()[0]
+        closes = [1000] * 60 + [1600]
+        for i, close in enumerate(closes):
+            day = today - timedelta(days=len(closes) - i)
+            ts = datetime.combine(day, time(0, 0), tzinfo=jst)
+            cur.execute(
+                """
+                INSERT INTO market.bars
+                    (instrument_id, ts, timeframe, close, volume, source, as_of, run_id)
+                VALUES (%s, %s, '1d', %s, %s, 'test', %s, %s)
+                """,
+                (instrument_id, ts, close, 500_000 if i == len(closes) - 1 else 100_000,
+                 ts, run.run_id),
+            )
+        # FM は ledger.nav_snapshots から NAV を読む(会計締めより前に走るため前日値)。
+        cur.execute(
+            """
+            INSERT INTO ledger.nav_snapshots (book_id, snap_date, nav, status, detail)
+            VALUES ('DEMO_FUND', %s, 10000000, 'confirmed', '{}'::jsonb)
+            ON CONFLICT (book_id, snap_date) DO UPDATE SET nav = EXCLUDED.nav
+            """,
+            (today - timedelta(days=1),),
+        )
+    upsert_classification(
+        conn,
+        instrument_id,
+        Classification(
+            universe_tags=("liquid_equity",), instrument_flags=(),
+            is_single_name=True, product="listed_equity_cash", unit_size=Decimal(100),
+        ),
+        run_id=run.run_id,
+        source="curated",
+        as_of=datetime.now(UTC) - timedelta(days=1),
+    )
+    return instrument_id
+
+
+def test_daily_fm_stage_proposes_and_executes(
+    conn, run, llm_config, make_daily_llms, insert_enriched_doc
+):
+    """fm 段が Jim の提案をゲートへ通し、同じ日次の execution 段が約定させる。"""
+    _seed(insert_enriched_doc)
+    instrument_id = _seed_jim_universe(conn, run)
+
+    result, _ = _run(conn, run, llm_config, make_daily_llms)
+
+    fm = result.stage("fm")
+    assert fm is not None and fm.ok, fm.error
+    assert fm.detail["jim"]["passed"] == 1 and fm.detail["jim"]["blocked"] == 0
+    # Ben は LLM 未注入(run_daily に fm_llm を渡していない)のためスキップ。
+    assert "skipped" in fm.detail["ben"]
+    # 同日の執行段が約定させ、注文には論拠(thesis_id)が紐づいている。
+    assert result.stage("execution").detail["filled"] == 1
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT o.status, o.fm, t.direction, t.rule_id
+            FROM trading.orders o JOIN trading.fm_theses t ON t.thesis_id = o.thesis_id
+            WHERE o.instrument_id = %s
+            """,
+            (instrument_id,),
+        )
+        assert cur.fetchone() == ("filled", "jim", "buy", "jim.sma_cross.v1")
+
+
+def test_daily_fm_stage_skipped_on_kill_switch(
+    conn, run, llm_config, make_daily_llms, insert_enriched_doc
+):
+    """Kill Switch 中は提案自体を作らない(通らないと分かっている案を作らない)。"""
+    _seed(insert_enriched_doc)
+    _seed_jim_universe(conn, run)
+    killswitch.engage(conn, "1", ["1"], reason="test")
+
+    result, _ = _run(conn, run, llm_config, make_daily_llms)
+    assert result.stage("fm").detail == {"skipped": "kill_switch"}
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM trading.fm_theses")
         assert cur.fetchone()[0] == 0
 
 

@@ -2,12 +2,20 @@
 
 設計 30-press-discord §2・00-system-design §2/§10。1 日 1 回、以下を順に走らせる:
 
-  取込 → 前処理(縮退) → 分析エージェント → 市場観更新 → 執行(デモ)→ 締め(照合→NAV)
-  → リスク(T-015: limits_state 更新+リスクレポート)→ 朝刊生成 → outbox → 実行サマリ
+  取込 → 前処理(縮退) → 分析エージェント → 市場観更新 → **FM(戦略)** → 執行(デモ)
+  → 締め(照合→NAV)→ リスク(T-015: limits_state 更新+リスクレポート)→ 朝刊生成
+  → outbox → 実行サマリ
+
+**FM 段(T-017)**: Jim(非 LLM・日次)を毎日、Ben(LLM・週次)を ``config/fm_ben.yaml``
+の実行曜日に走らせ、提案を ``gate_and_record`` へ通す。**分析の後・執行の前**に置く
+(FM 提案 → ゲート → 執行の順 — 設計リード裁定 2026-08-03)。Kill Switch 中は提案自体を
+作らない(ゲートも G-0 で block するが、通らないと分かっている案を作らない)。
+※ 銘柄の決定論分類(``market.instrument_classification``)を作るのは risk 段(T-015)
+なので、新規に取り込まれた銘柄が FM の候補になるのは翌日以降になる。
 
 **執行段(T-016)**: 00 §9 の「ゲート → 執行 → 会計記帳 → 照合 → NAV 確定」のうち
-ゲート以降を担う(ゲートは注文起票側 = FM エージェント(T-017)が ``gate_and_record``
-で通す設計のため、daily に独立の gate 段は無い)。注文が無い日は執行は no-op だが、
+ゲート以降を担う(ゲートは注文起票側 = FM 段が ``gate_and_record`` で通す)。
+注文が無い日は執行は no-op だが、
 締め(MTM・NAV 記帳 → risk.nav_daily)は毎日走らせて NAV 系列を絶やさない(risk 段の
 入力)。Kill Switch 中は新規執行のみスキップし、締め(内部会計)は走らせる。
 照合ブレイクは ops チャンネルへ embed で通知する。
@@ -62,6 +70,10 @@ from ryza.execution.close import run_demo_close
 from ryza.execution.config import ExecutionConfig
 from ryza.execution.demo import DemoBroker
 from ryza.execution.runner import run_pending
+from ryza.fm.ben import run_ben
+from ryza.fm.config import BenConfig
+from ryza.fm.jim import run_jim
+from ryza.ips import load_and_validate
 from ryza.preprocess.embed import HashingEmbedder
 from ryza.preprocess.runner import run_preprocess
 from ryza.press.config import PressConfig
@@ -263,6 +275,23 @@ def _ensure_market_view(conn: psycopg.Connection, run: Run, as_of: datetime) -> 
         )
 
 
+# FM 段の実行サマリに載せる件数キー(orders 明細は embed に載せない — 冗長なため)。
+_FM_SUMMARY_KEYS = (
+    "universe", "entries", "exits", "candidates", "closes",
+    "proposed", "passed", "blocked", "skipped",
+)
+
+
+def _fm_summary(result: dict[str, Any]) -> dict[str, Any]:
+    """FM 実行結果を件数だけに圧縮する(注文明細は trading.orders 側が正)。"""
+    summary = {k: result[k] for k in _FM_SUMMARY_KEYS if k in result}
+    if "skipped" in result and isinstance(result["skipped"], str):
+        summary["skipped"] = result["skipped"]
+    if "rejected" in result:
+        summary["rejected"] = len(result["rejected"])
+    return summary
+
+
 def _build_breaks_embed(breaks: list[dict[str, Any]], *, as_of: datetime) -> dict[str, Any]:
     """照合ブレイク通知(#運営)の embed を組む(執行照合・ポジション照合共通)。"""
     jst_str = as_of.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
@@ -323,7 +352,7 @@ def _build_ops_embed(
     title = "日次サイクル(dry-run)" if dry_run else "日次サイクル"
     return {
         "title": f"{title} {jst_str}",
-        "description": "日次サイクルの実行サマリ(取込→前処理→分析→執行/締め→朝刊)。",
+        "description": "日次サイクルの実行サマリ(取込→前処理→分析→FM→執行/締め→朝刊)。",
         "color": COLOR_NORMAL,
         # 運用報告の発信者 = 監査部門のキャラクター(台帳 org.yaml から役職キーで解決)。
         "author": org.author_for_role("audit"),
@@ -339,6 +368,7 @@ def run_daily(
     research_llm: StructuredLLM,
     press_llm: StructuredLLM,
     config: LLMConfig,
+    fm_llm: StructuredLLM | None = None,
     press_cfg: PressConfig | None = None,
     as_of: datetime | None = None,
     ingest: IngestFn | None = None,
@@ -352,6 +382,9 @@ def run_daily(
     各段は独立に失敗許容(savepoint)。朝刊は当日既投稿ならスキップ(冪等)。Kill Switch 中は
     朝刊投稿をスキップする。``conn`` のコミット制御は ``_run_stage`` に委ね、呼び出し側は
     最終的な ``Run.finish`` を担う。
+
+    ``fm_llm`` は Ben(週次・LLM)用の ``StructuredLLM``(``dept_tag='fm.ben'``)。
+    None なら Ben をスキップする(Jim は非 LLM のため常に走る)。
     """
     as_of = as_of or datetime.now(UTC)
     jst_date = as_of.astimezone(JST).date()
@@ -395,7 +428,39 @@ def run_daily(
 
     stages.append(_run_stage(conn, "analysis", _analysis))
 
-    # ── 4. 執行(デモ)→ 締め(照合 → NAV 確定)— T-016 ──────────────────────
+    # ── 4. FM(戦略): Jim 日次 + Ben 週次 → ゲート → 注文案 — T-017 ────────────
+    def _fm() -> dict[str, Any]:
+        if is_engaged(conn):
+            # Kill Switch 中は提案を作らない(ゲートも block するが、通らない案は作らない)。
+            return {"skipped": "kill_switch"}
+        fm_ips, fm_mandates = load_and_validate()
+        detail: dict[str, Any] = {
+            "jim": _fm_summary(
+                run_jim(
+                    conn, run, book_id=DEMO_BOOK, as_of=as_of,
+                    ips=fm_ips, mandates=fm_mandates,
+                )
+            )
+        }
+        ben_cfg = BenConfig.load()
+        weekday = as_of.astimezone(JST).isoweekday()
+        if fm_llm is None:
+            detail["ben"] = {"skipped": "LLM 未注入"}
+        elif weekday != ben_cfg.weekday:
+            detail["ben"] = {"skipped": f"週次(実行曜日={ben_cfg.weekday} 当日={weekday})"}
+        else:
+            detail["ben"] = _fm_summary(
+                run_ben(
+                    conn, run, fm_llm, model=config.model_for(ben_cfg.model_tier),
+                    book_id=DEMO_BOOK, as_of=as_of, cfg=ben_cfg,
+                    ips=fm_ips, mandates=fm_mandates,
+                )
+            )
+        return detail
+
+    stages.append(_run_stage(conn, "fm", _fm))
+
+    # ── 5. 執行(デモ)→ 締め(照合 → NAV 確定)— T-016 ──────────────────────
     def _execution() -> dict[str, Any]:
         detail: dict[str, Any] = {}
         breaks: list[dict[str, Any]] = []
@@ -428,7 +493,7 @@ def run_daily(
 
     stages.append(_run_stage(conn, "execution", _execution))
 
-    # ── 5. リスクエンジン(T-015)──────────────────────────────────────────────
+    # ── 6. リスクエンジン(T-015)──────────────────────────────────────────────
     # 00 §9 の順序どおり会計締め(execution 段の照合→NAV 確定)の直後に置く(設計
     # リード裁定 2026-08-03)。execution 段が書いた当日 NAV を読んで limits_state を
     # 更新する。決定論・LLM 不関与のため dry-run でもそのまま実行する。
@@ -436,7 +501,7 @@ def run_daily(
         _run_stage(conn, "risk", lambda: run_risk_daily(conn, run, as_of=as_of))
     )
 
-    # ── 6. 朝刊生成(冪等・Kill Switch ゲート)───────────────────────────────
+    # ── 7. 朝刊生成(冪等・Kill Switch ゲート)───────────────────────────────
     def _morning() -> dict[str, Any]:
         kill = is_engaged(conn)
         state["kill_switch"] = kill
@@ -458,7 +523,7 @@ def run_daily(
 
     stages.append(_run_stage(conn, "morning", _morning))
 
-    # ── 7. 実行サマリを #運営 へ ──────────────────────────────────────────────
+    # ── 8. 実行サマリを #運営 へ ──────────────────────────────────────────────
     def _ops_summary() -> dict[str, Any]:
         embed = _build_ops_embed(
             stages, kill_switch=state["kill_switch"], posted=state["posted"],
@@ -483,8 +548,12 @@ def run_daily(
 
 def _build_llms(
     config: LLMConfig, run: Run, *, dry_run: bool
-) -> tuple[StructuredLLM, StructuredLLM]:
-    """research / press 用の ``StructuredLLM`` を組む(dry-run はフィクスチャプロバイダ)。"""
+) -> tuple[StructuredLLM, StructuredLLM, StructuredLLM]:
+    """research / press / fm 用の ``StructuredLLM`` を組む(dry-run はフィクスチャ)。
+
+    部門タグ(``dept_tag``)を分けるのはユニットエコノミクス台帳の前提(§5・
+    CLAUDE.md「LLM 呼び出しには部門・タスク種別タグを付ける」)。
+    """
     if dry_run:
         provider: Any = DryRunProvider()
     else:
@@ -495,7 +564,8 @@ def _build_llms(
     price = config.price_map()
     research_llm = StructuredLLM(provider, run, dept_tag="research", price_per_1k=price)
     press_llm = StructuredLLM(provider, run, dept_tag="press", price_per_1k=price)
-    return research_llm, press_llm
+    fm_llm = StructuredLLM(provider, run, dept_tag="fm.ben", price_per_1k=price)
+    return research_llm, press_llm, fm_llm
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行パス
@@ -512,10 +582,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
     run = start_run("jobs.daily", {"dry_run": args.dry_run})
     conn = connect()
     try:
-        research_llm, press_llm = _build_llms(config, run, dry_run=args.dry_run)
+        research_llm, press_llm, fm_llm = _build_llms(config, run, dry_run=args.dry_run)
         result = run_daily(
             conn, run, research_llm=research_llm, press_llm=press_llm,
-            config=config, dry_run=args.dry_run,
+            fm_llm=fm_llm, config=config, dry_run=args.dry_run,
             ingest=make_default_ingest(dry_run=args.dry_run),
         )
         run.finish("success" if result.ok else "failed")
