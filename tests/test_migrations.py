@@ -306,9 +306,15 @@ def test_seed_books_and_accounts(conn):
 # 「速くなったか」をテストで主張するとフレークするだけで、根拠にもならない。実測は
 # migrations/0027_query_indexes.sql のコメントに EXPLAIN ANALYZE の前後比較として残す。
 #
-# 列順まで固定するのは、それ自体が審査の対象だったからである（2 列版
-# (book_id, account_id) はプランナに選ばれず、instrument_id を足して初めて効いた）。
-# 列を落とす変更が黙って通らないようにする。
+# 列順まで固定するのは、それ自体が審査の対象だったからである。ただし
+# **「2 列版 (book_id, account_id) は選ばれない」は規模条件付きの命題**であることに注意
+# （独立役員審査 中-1）: 明細 5 万行規模（規模A）では 2 列版も選ばれ
+# securities_book_value を 4.00 → 2.19 ms（1.8x）改善する。選ばれなくなるのは明細 60 万行
+# 規模（規模B）からで、そこでは 2 列版は逐次走査のままになる（39.7 / 37.1 ms = 改善ゼロ）。
+# つまり **instrument_id を落とす変更は、小さい DB では何も壊れていないように見えたまま、
+# 本番規模で無言に索引不使用へ退化する**。CI の DB は空に近く EXPLAIN では捕まらないので、
+# 定義そのものをここで固定して列落ちが黙って通らないようにする。計測の詳細は
+# migrations/0027_query_indexes.sql のコメントを参照。
 EXPECTED_INDEX_DEFS: dict[tuple[str, str], str] = {
     ("ledger", "journal_lines_book_account_instrument_idx"):
         "CREATE INDEX journal_lines_book_account_instrument_idx "

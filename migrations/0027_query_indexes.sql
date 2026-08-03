@@ -40,22 +40,30 @@
 --     … WHERE jl.book_id = %s AND jl.account_id = 'securities' AND jl.instrument_id = %s
 --
 -- 列順の根拠: 両クエリとも book_id と account_id を等値で与え、後者はさらに
--- instrument_id を等値で与える。第3列まで入れる理由は実測にある — 独立役員審査が
--- 提案した2列版 (book_id, account_id) は**プランナに選ばれなかった**。securities は
--- ファンド帳簿の明細の約半数を占めるため2列では選択度が足りず、逐次走査に負ける。
--- instrument_id を足すと securities_book_value が索引走査になり、held_instruments は
--- Index Only Scan（DISTINCT instrument_id が索引だけで解ける）になる。
+-- instrument_id を等値で与える。第3列まで入れる理由は実測にある。
+--
+-- **2列版 (book_id, account_id) が負ける理由は規模依存であり、無条件ではない**
+-- （独立役員審査 中-1 の是正。無条件命題として書くと、規模A しか見ていない将来の読者が
+-- 「2列で足りる」と誤読して列を落とす経路になる）:
+--   規模A … 2列版も**選ばれる**（Bitmap Index Scan）。securities_book_value は
+--           4.00 → 2.19 ms（1.8x）改善する（審査再現値）。ただし 3 列版のほうが速い
+--   規模B … 2列版は**選ばれなくなる**（39.7 / 37.1 ms = 逐次走査のまま・改善ゼロ。
+--           審査再現値 39.3 / 36.5 ms とほぼ一致）。securities はファンド帳簿の明細の
+--           約半数を占めるため、表が大きくなるほど 2 列の選択度では逐次走査に負ける
+-- 3 列版はどちらの規模でも選ばれ、securities_book_value は索引走査、held_instruments は
+-- Index Only Scan（DISTINCT instrument_id が索引だけで解ける）になる。**列を落とす変更は
+-- 規模B 以降で無言に索引不使用へ退化する**ため、tests/test_migrations.py が列順を固定する。
 --
 -- 実測（中央値、7 回。規模A / 規模B）:
 --   held_instruments       6.51 → 2.30 ms（2.8x） / 35.8 → 26.8 ms（1.3x）
 --   securities_book_value  8.50 → 4.08 ms（2.1x） / 36.6 →  2.9 ms（12.6x）
---   2列版 (book_id, account_id) は規模B で 39.7 / 37.1 ms = 索引不使用（改善ゼロ）
 CREATE INDEX IF NOT EXISTS journal_lines_book_account_instrument_idx
     ON ledger.journal_lines (book_id, account_id, instrument_id);
 
 COMMENT ON INDEX ledger.journal_lines_book_account_instrument_idx IS
     '日次締めの建玉照会（_util.held_instruments / securities_book_value）用。'
-    'instrument_id まで含めるのは 2 列ではプランナに選ばれないため（実測）。';
+    'instrument_id まで含めるのは、2 列版が規模B（明細 60 万行規模）でプランナに'
+    '選ばれなくなるため（規模A では 2 列でも選ばれる — 実測）。';
 
 -- ── 2. ledger.journal_entries (book_id, entry_date) ───────────────────────────
 -- 支える実クエリ:
@@ -67,9 +75,9 @@ COMMENT ON INDEX ledger.journal_lines_book_account_instrument_idx IS
 --
 -- **この索引は独立役員審査が挙げたもの（stale 検出の高速化）とは別の理由で採った。**
 -- 審査が想定した効果は実測で否定された — closing._STALE_SNAPSHOTS_SQL は前後で
--- 8,279 ms → 8,211 ms（誤差）でプランも変わらない。理由は下の「効かない用途」に書く。
--- 採用の根拠は replay_position 側の実測で、こちらは索引が実際に使われる
--- （Bitmap Index Scan journal_entries_book_date_idx）。
+-- 規模A 778.6 → 766.6 ms・規模B 8,371.1 → 8,184.6 ms（どちらも誤差）でプランも変わらない。
+-- 理由は下の「効かない用途」に書く。採用の根拠は replay_position 側の実測で、
+-- こちらは索引が実際に使われる（Bitmap Index Scan journal_entries_book_date_idx）。
 --
 -- 実測（規模B・中央値、7 回）:
 --   replay_position(as_of=2023-09-01 = 系列の早い日) 40.9 → 28.3 ms（1.44x）
@@ -84,7 +92,8 @@ COMMENT ON INDEX ledger.journal_lines_book_account_instrument_idx IS
 --   どんな索引走査よりも安いと判断するため、この索引も INCLUDE (entry_id) 版も 3 列版
 --   (book_id, entry_date, entry_id) も選ばれない。実際には古い snap_date ほど新しい仕訳を
 --   読み飛ばす距離が伸びるので、コストは スナップショット数 × 仕訳数 で伸びる
---   （規模A 788 ms / 規模B 8,279 ms = 行数 10 倍で 10.5 倍）。索引はこの構造を変えられない。
+--   （索引なしで 規模A 778.6 ms / 規模B 8,371.1 ms = 行数 10 倍で 10.7 倍）。
+--   索引はこの構造を変えられない。
 --   正しい是正は再々審査 新-5 が併記していた**枝刈り**（全スナップショットの
 --   stored_watermark 最大値より後ろの entry_id を持つ最古の entry_date を 1 回求め、その日
 --   以降のスナップショットだけを候補にする。事前クエリの実測 0.57 ms）であり、
@@ -124,8 +133,22 @@ COMMENT ON INDEX meta.runs_started_at_idx IS
 --
 -- 部分索引にする根拠: 実行中の行は常に数件しかなく、終了時に status が success/failed へ
 -- 変わると索引から自動的に外れる。索引本体は 16kB のまま増えない（追記される行の大半は
--- 索引に入らないので書込増分もほぼゼロ）。press.outbox の outbox_pending_idx（0007）と
--- 同じ設計。
+-- 索引に入らないので書込増分もほぼゼロ）。
+--
+-- **この索引の述語は語彙に依存しており、沈黙して劣化しうる**（独立役員審査 中-4）。
+-- `meta.runs.status` に CHECK 制約は無く（0001）、`running|success|failed` という語彙の
+-- 根拠は列コメントだけである。したがって:
+--   - `'starting'` / `'retrying'` のような値を後から足す
+--   - `fetch_running_runs` の述語を `status IN (...)` に広げる
+-- のいずれをやっても、**エラーも警告も出ないまま**この索引は使われなくなる。存在だけを
+-- 見るテストでは検出できない（EXPLAIN のプラン検証はフレークするのでテスト化していない）。
+-- **status の語彙を変えるときは、この索引と fetch_running_runs の述語を必ず一緒に見直す。**
+--
+-- press.outbox の outbox_pending_idx（0007）と同型に見えるが**同じではない**: あちらの
+-- 述語は `sent_at IS NULL` という構造的条件で、列が存在する限りドリフトしえない。ここは
+-- 自由文字列との比較である。恒久的な担保は status に CHECK を置いて語彙を凍結すること
+-- （`finished_at IS NULL` という構造的な同値条件も meta.runs にはある）。別 migration の
+-- 案件として ops/reminders.yaml の meta-runs-status-check に登録した。
 --
 -- 実測（中央値、7 回。規模A / 規模B）:
 --   fetch_running_runs  2.14 → 0.004 ms（535x） / 28.3 → 0.005 ms（5,660x）
@@ -133,9 +156,16 @@ CREATE INDEX IF NOT EXISTS runs_running_idx ON meta.runs (run_id DESC)
     WHERE status = 'running';
 
 COMMENT ON INDEX meta.runs_running_idx IS
-    '実行中ジョブ一覧（fetch_running_runs）用の部分索引。終了で自動的に索引から外れる。';
+    '実行中ジョブ一覧（fetch_running_runs）用の部分索引。終了で自動的に索引から外れる。'
+    '述語は status の自由文字列に依存する（CHECK 未設定）— 語彙を変えると無言で'
+    '使われなくなるため、status の語彙変更時は本索引と fetch_running_runs を同時に見直す。';
 
 -- ── 入れなかったもの（根拠のない索引を作らないため、実測結果を記録して残す）────────
+--
+-- 注意: **stale 検出（closing._STALE_SNAPSHOTS_SQL）が索引で直らないという否定的結果は
+-- ここには無い**。その索引 (book_id, entry_date) は別の用途（replay_position）で採用済み
+-- なので、記述は上の「索引2」の「効かない用途」節にある（独立役員審査 中-3: 参照が
+-- 解決できないと不変原則3 のリネージが空手形になる）。
 --
 -- (A) meta.runs (job_name, run_id DESC)
 --     job_name を等値で絞るのは dashboard.queries.fetch_latest_daily_run
