@@ -34,6 +34,10 @@ from ryza.ips import IPSConfig, Mandate, load_and_validate
 # 当日売買代金(G-7)の「当日」は JST 日付で区切る(基準通貨 JPY・IPS §1)。
 _JST = ZoneInfo("Asia/Tokyo")
 
+# pg_advisory_xact_lock のクラス ID(独立役員審査 2026-08-03 条件2)。
+# 帳簿単位でゲート判定〜記帳を直列化し、状態読み出しと記帳の間の TOCTOU を封鎖する。
+_GATE_LOCK_CLASS = 4014
+
 # 状態遷移表(不正遷移は例外)。blocked / filled / cancelled / rejected は端状態。
 _TRANSITIONS: dict[str, frozenset[str]] = {
     "proposed": frozenset({"passed", "blocked"}),
@@ -158,6 +162,33 @@ def _proposal_snapshot(proposal: OrderProposal) -> dict:
     return {k: (str(v) if isinstance(v, Decimal) else v) for k, v in raw.items()}
 
 
+def _state_snapshot(state: PortfolioState, trade_date: date) -> dict:
+    """gate_log.state_ref 用の判定時状態スナップショット(監査再現性 — 審査条件6)。"""
+
+    def _s(v):
+        return None if v is None else str(v)
+
+    return {
+        "trading_state": state.trading_state,
+        "nav": _s(state.nav),
+        "cash": _s(state.cash),
+        "daily_turnover": _s(state.daily_turnover),
+        "limits_state": None if state.limits is None else asdict(state.limits),
+        "prices": {str(k): str(v) for k, v in sorted(state.prices.items())},
+        "positions": [
+            {
+                "fm": p.fm,
+                "instrument_id": p.instrument_id,
+                "asset_class": p.asset_class,
+                "qty": str(p.qty),
+                "avg_cost": str(p.avg_cost),
+            }
+            for p in (state.positions or ())
+        ],
+        "trade_date": trade_date.isoformat(),
+    }
+
+
 def gate_and_record(
     conn: psycopg.Connection,
     proposal: OrderProposal,
@@ -186,6 +217,14 @@ def gate_and_record(
     if trade_date is None:
         trade_date = datetime.now(UTC).astimezone(_JST).date()
 
+    # 帳簿単位の直列化(トランザクション終了まで保持)。同一帳簿の並行ゲート判定が
+    # 同じ「約定前状態」を読んで二重に枠を消費すること(TOCTOU)を防ぐ。
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+            (_GATE_LOCK_CLASS, proposal.book_id),
+        )
+
     state = PortfolioState(
         trading_state=_load_trading_state(conn),
         nav=nav,
@@ -201,9 +240,9 @@ def gate_and_record(
         cur.execute(
             """
             INSERT INTO compliance.gate_log
-                (order_ref, book_id, fm, verdict, reasons, checked_rules,
+                (order_ref, book_id, fm, verdict, reasons, checked_rules, state_ref,
                  ips_version, mandates_hash, run_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -213,6 +252,7 @@ def gate_and_record(
                 result.verdict,
                 Json([asdict(r) for r in result.reasons]),
                 Json(list(result.checked_rules)),
+                Json(_state_snapshot(state, trade_date)),
                 ips.version,
                 mandates_hash(mandates),
                 run_id,
@@ -262,16 +302,31 @@ def record_execution(
     """約定を ``trading.executions`` に記録し、ポジションへ反映して execution_id を返す。
 
     注文は submitted 状態でなければならない(blocked/passed のままの約定はゲート迂回
-    または執行手順違反 — A-3 の検知対象になる前にここで拒否する)。
+    または執行手順違反 — A-3 の検知対象になる前にここで拒否する)。累積約定数量
+    (部分約定の合算+本約定)が注文数量を超える場合も例外(審査条件1)。
     """
     with conn.cursor() as cur:
-        cur.execute("SELECT status FROM trading.orders WHERE id = %s FOR UPDATE", (order_id,))
+        cur.execute(
+            "SELECT status, qty FROM trading.orders WHERE id = %s FOR UPDATE", (order_id,)
+        )
         row = cur.fetchone()
         if row is None:
             raise ValueError(f"注文 {order_id} が存在しない")
-        if row[0] != "submitted":
+        status, order_qty = row
+        if status != "submitted":
             raise OrderStatusError(
-                f"約定は submitted 状態の注文のみ受け付ける(注文 {order_id} は {row[0]})"
+                f"約定は submitted 状態の注文のみ受け付ける(注文 {order_id} は {status})"
+            )
+        # 累積約定 ≤ 注文数量(注文行は FOR UPDATE 済みなので並行 fill とも直列)。
+        cur.execute(
+            "SELECT COALESCE(sum(qty), 0) FROM trading.executions WHERE order_id = %s",
+            (order_id,),
+        )
+        already_filled = Decimal(cur.fetchone()[0])
+        if already_filled + qty > Decimal(order_qty):
+            raise ValueError(
+                f"累積約定数量 {already_filled}+{qty} が注文数量 {order_qty} を超過"
+                f"(注文 {order_id})"
             )
         cur.execute(
             """

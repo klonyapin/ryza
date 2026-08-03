@@ -111,7 +111,15 @@ def make_state(
     limits: LimitsState | None = _NO_FLAGS,
     trading_state: str | None = "normal",
     prices: dict[int, Decimal] | None = None,
+    auto_prices: bool = True,
 ) -> PortfolioState:
+    """状態ビルダ。auto_prices=True なら保有銘柄の時価を avg_cost で明示補完する
+    (エンジン側は時価欠落を fail-closed で block するため、テストで明示的に与える)。
+    """
+    merged = dict(prices or {})
+    if auto_prices:
+        for pos in positions or ():
+            merged.setdefault(pos.instrument_id, pos.avg_cost)
     return PortfolioState(
         trading_state=trading_state,
         nav=nav,
@@ -119,7 +127,7 @@ def make_state(
         positions=positions,
         daily_turnover=daily_turnover,
         limits=limits,
-        prices=prices or {},
+        prices=merged,
     )
 
 

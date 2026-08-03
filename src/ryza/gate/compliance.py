@@ -29,15 +29,22 @@
 - G-10 リスク状態: dd_hard は全注文 block。vol/es 超過は新規建て block。
   dd_soft は新規建てに warn(枠半減の実施は G-7)
 
-実装上の判断(T-014 報告に列挙。レビュー対象):
+実装上の判断(記録: docs/reviews/t014-design-decisions.md。独立役員審査 2026-08-03 反映):
 
 - ユニバース判定は注文案が持つ ``universe_tags``(銘柄マスタ由来の決定論分類)と
   マンデート universe の共通部分で行う。タグ空は fail-closed で block
-- 単元例外はファンド集中度(IPS)とポッド集中度(マンデート)の両方に適用する
-  (§7-1「全帳簿共通(E8 小規模帳簿を含む)」— E8 単一ポッド帳簿で例外が機能するため)
+- 単元例外は**ファンド集中度(IPS §7-1)のみ**に適用する。ポッド集中度(マンデート)
+  への適用はゲート実装によるマンデート緩和 = narrow_only 違反のため行わない(審査条件4)
 - dd_soft の「新規建て枠半減」は G-7 の当日売買代金枠を新規建て注文に対して半減と解釈
 - 「新規建て」= 当該 FM の建玉の絶対量が増える注文(|約定後| > |約定前|)
-- ``short: hedge_futures_only``(Jim)は先物商品のショートのみ許可と解釈
+- グロス計算(G-4/G-8)は**行単位 Σ|qty|×時価**(ポッド間でネットしない — 両建ての
+  過小評価を防ぐ。審査条件3)
+- 保有銘柄の時価が ``prices`` に無ければ fail-closed で block(avg_cost 代用はしない —
+  審査条件6)
+- ``short: hedge_futures_only``(Jim)は「同一資産クラスの現物ロングを相殺する方向・
+  相殺量の範囲内の先物ショート」のみ pass。裸ショートは block(審査条件5)
+- 分類不能(``is_single_name=None``)は依存規則(G-2 個別株禁止・G-9 個別銘柄ショート
+  上限)で pass に落とさず block(審査条件7)
 """
 
 from __future__ import annotations
@@ -97,7 +104,7 @@ class OrderProposal:
     asset_class: str = ""  # ips.asset_class_taxonomy の語彙(デリバは原資産分類)
     universe_tags: tuple[str, ...] = ()  # マンデート universe との照合タグ
     instrument_flags: tuple[str, ...] = ()  # leveraged_etf 等(prohibitions.instruments 照合)
-    is_single_name: bool = False  # 個別銘柄か(集中度・ショート上限・単元例外)
+    is_single_name: bool | None = None  # 個別銘柄か。None=分類不能 → 依存規則で block
     is_margin: bool = False  # 信用取引か(単元例外の適用不可・マンデート禁じ手)
     unit_size: Decimal | None = None  # 日本個別株の1単元株数(単元例外判定)
     signal_ids: tuple[int, ...] = ()  # 根拠シグナル(C-13: シグナル外売買の機械判定)
@@ -144,7 +151,8 @@ class PortfolioState:
     positions: tuple[PositionState, ...] | None  # 当該帳簿の全ポジション
     daily_turnover: Decimal | None  # 当日累計売買代金(JPY)
     limits: LimitsState | None  # リスク状態(行が無ければ None → fail-closed)
-    prices: Mapping[int, Decimal] = field(default_factory=dict)  # instrument_id → 時価
+    prices: Mapping[int, Decimal] = field(default_factory=dict)
+    # instrument_id → 時価。保有銘柄(発注銘柄を除く)の欠落は G-F で block(fail-closed)
 
 
 @dataclass(frozen=True)
@@ -201,32 +209,40 @@ class _Ctx:
         return abs(self.post_pod_qty) > abs(self.pre_pod_qty)
 
 
-def _instrument_price(ctx_prices: Mapping[int, Decimal], pos: PositionState) -> Decimal:
-    """ポジション評価に使う価格。時価が無ければ avg_cost で代用(T-015 で時価配線)。"""
-    return ctx_prices.get(pos.instrument_id, pos.avg_cost)
+def _position_price(ctx: _Ctx, pos: PositionState) -> Decimal:
+    """ポジション評価に使う時価。発注銘柄は判定価格、他は ``prices``(G-F で存在保証)。"""
+    if pos.instrument_id == ctx.proposal.instrument_id:
+        return ctx.price
+    return ctx.state.prices[pos.instrument_id]
 
 
 def _pod_gross_post(ctx: _Ctx) -> Decimal:
-    """当該 FM のポッド・グロス(約定後)。"""
+    """当該 FM のポッド・グロス(約定後)。行単位 Σ|qty|×時価(ネットしない)。"""
     total = Decimal(0)
     for pos in ctx.state.positions or ():
         if pos.fm != ctx.proposal.fm:
             continue
         if pos.instrument_id == ctx.proposal.instrument_id:
-            continue  # 発注銘柄は下で約定後値を足す
-        total += abs(pos.qty) * _instrument_price(ctx.state.prices, pos)
+            continue  # 自ポッドの発注銘柄は下で約定後値に置き換える
+        total += abs(pos.qty) * _position_price(ctx, pos)
     return total + abs(ctx.post_pod_qty) * ctx.price
 
 
 def _class_gross_post(ctx: _Ctx) -> dict[str, Decimal]:
-    """資産クラス別グロス(約定後)。発注銘柄は約定後数量で評価する。"""
+    """資産クラス別グロス(約定後)。**行単位 Σ|qty|×時価** — ポッド間でネットしない
+    (両建て(あるポッドのロング×別ポッドのショート)をグロスとして正しく数える)。
+    自ポッドの発注銘柄行のみ約定後数量に置き換える。
+    """
     gross: dict[str, Decimal] = {}
     for pos in ctx.state.positions or ():
-        if pos.instrument_id == ctx.proposal.instrument_id:
-            continue
-        value = abs(pos.qty) * _instrument_price(ctx.state.prices, pos)
+        if (
+            pos.instrument_id == ctx.proposal.instrument_id
+            and pos.fm == ctx.proposal.fm
+        ):
+            continue  # 約定後値で置き換える
+        value = abs(pos.qty) * _position_price(ctx, pos)
         gross[pos.asset_class] = gross.get(pos.asset_class, Decimal(0)) + value
-    inst_value = abs(ctx.post_fund_qty) * ctx.price
+    inst_value = abs(ctx.post_pod_qty) * ctx.price
     cls = ctx.proposal.asset_class
     gross[cls] = gross.get(cls, Decimal(0)) + inst_value
     return gross
@@ -307,8 +323,18 @@ def _g2_mandate_universe(ctx: _Ctx) -> list[Reason]:
             reasons.append(Reason("G-2", "block", f"{m.fm} の禁じ手: ショート"))
         elif prohibition == "margin" and ctx.proposal.is_margin:
             reasons.append(Reason("G-2", "block", f"{m.fm} の禁じ手: 信用取引"))
-        elif prohibition == "single_name_equity" and ctx.proposal.is_single_name:
-            reasons.append(Reason("G-2", "block", f"{m.fm} の禁じ手: 個別株"))
+        elif prohibition == "single_name_equity":
+            if ctx.proposal.is_single_name is None:
+                reasons.append(
+                    Reason(
+                        "G-2",
+                        "block",
+                        f"{m.fm} の禁じ手(個別株)を判定できない: "
+                        "個別銘柄か分類不能(fail-closed)",
+                    )
+                )
+            elif ctx.proposal.is_single_name:
+                reasons.append(Reason("G-2", "block", f"{m.fm} の禁じ手: 個別株"))
         elif (
             prohibition == "discretionary_trades_outside_signals"
             and not ctx.proposal.signal_ids
@@ -327,11 +353,11 @@ def _unit_lot_exception_applies(ctx: _Ctx) -> bool:
     """単元例外(IPS §7-1)が本注文に適用できるか。
 
     条件: 日本個別株の現物買い・約定後も1単元以内・1単元の取得価額が NAV の 35% 以下・
-    信用買いでない(margin_buy_allowed=false)。
+    信用買いでない(margin_buy_allowed=false)。分類不能(is_single_name=None)は不適用。
     """
     ule = ctx.ips.unit_lot_exception
     p = ctx.proposal
-    if not (p.asset_class == "equity_jp" and p.is_single_name and p.side == "buy"):
+    if not (p.asset_class == "equity_jp" and p.is_single_name is True and p.side == "buy"):
         return False
     if p.is_margin and not ule.margin_buy_allowed:
         return False
@@ -362,10 +388,13 @@ def _g3_concentration(ctx: _Ctx) -> list[Reason]:
                 f" = ¥{fund_limit:,.0f}(単元例外 不適用)",
             )
         )
+    # ポッド集中度に単元例外は適用しない — ゲート実装によるマンデート緩和は
+    # narrow_only 違反(独立役員審査 2026-08-03 条件4)。E8 単一ポッド帳簿の単元例外は
+    # ファンド側判定(上)で満たされる。マンデート側の緩和が必要なら改訂提案で行う。
     if ctx.mandate is not None:
         post_pod_value = abs(ctx.post_pod_qty) * ctx.price
         pod_limit = _dec(ctx.mandate.pod_concentration_limit) * _dec(ctx.mandate.capital_jpy)
-        if post_pod_value > pod_limit and not _unit_lot_exception_applies(ctx):
+        if post_pod_value > pod_limit:
             reasons.append(
                 Reason(
                     "G-3",
@@ -507,7 +536,15 @@ def _g9_short(ctx: _Ctx) -> list[Reason]:
     reasons = []
     if not ctx.ips.short_allowed:
         reasons.append(Reason("G-9", "block", "ショートは IPS で不許可"))
-    if ctx.proposal.is_single_name and ctx.post_fund_qty < 0:
+    if ctx.proposal.is_single_name is None:
+        reasons.append(
+            Reason(
+                "G-9",
+                "block",
+                "個別銘柄か分類不能(fail-closed)— 個別銘柄ショート上限を判定できない",
+            )
+        )
+    elif ctx.proposal.is_single_name and ctx.post_fund_qty < 0:
         short_value = abs(ctx.post_fund_qty) * ctx.price
         limit = _dec(ctx.ips.short_single_name_nav_max) * ctx.state.nav
         if short_value > limit:
@@ -524,15 +561,44 @@ def _g9_short(ctx: _Ctx) -> list[Reason]:
         if m.short is False:
             reasons.append(Reason("G-9", "block", f"{m.fm} のマンデートはショート禁止"))
         elif isinstance(m.short, str) and m.short == "hedge_futures_only":
-            if ctx.proposal.product not in _FUTURES_PRODUCTS:
-                reasons.append(
-                    Reason(
-                        "G-9",
-                        "block",
-                        f"{m.fm} のショートは先物ヘッジのみ可({ctx.proposal.product} は不可)",
-                    )
-                )
+            reasons.extend(_hedge_futures_only(ctx, m))
     return reasons
+
+
+def _hedge_futures_only(ctx: _Ctx, m: Mandate) -> list[Reason]:
+    """``short: hedge_futures_only`` のヘッジ性判定(独立役員審査 2026-08-03 条件5)。
+
+    先物ショートは「同一資産クラスの現物ロング・エクスポージャーを相殺する方向・
+    相殺量の範囲内」のみ pass。相殺対象を持たない/超えるショートは裸ショートとして block。
+    """
+    if ctx.proposal.product not in _FUTURES_PRODUCTS:
+        return [
+            Reason(
+                "G-9",
+                "block",
+                f"{m.fm} のショートは先物ヘッジのみ可({ctx.proposal.product} は不可)",
+            )
+        ]
+    if ctx.post_pod_qty >= 0:
+        return []
+    long_exposure = Decimal(0)
+    for pos in ctx.state.positions or ():
+        if pos.fm != ctx.proposal.fm or pos.instrument_id == ctx.proposal.instrument_id:
+            continue
+        if pos.asset_class == ctx.proposal.asset_class and pos.qty > 0:
+            long_exposure += pos.qty * _position_price(ctx, pos)
+    short_value = abs(ctx.post_pod_qty) * ctx.price
+    if short_value > long_exposure:
+        return [
+            Reason(
+                "G-9",
+                "block",
+                f"{m.fm} の先物ショート ¥{short_value:,.0f} が同一資産クラス"
+                f"({ctx.proposal.asset_class})の現物ロング ¥{long_exposure:,.0f} を超える"
+                "(裸ショートは不可 — ヘッジのみ)",
+            )
+        ]
+    return []
 
 
 def _g10_risk_state(ctx: _Ctx) -> list[Reason]:
@@ -583,6 +649,12 @@ def _missing_inputs(proposal: OrderProposal, state: PortfolioState, ips: IPSConf
     price = proposal.limit_price if proposal.order_type == "limit" else proposal.ref_price
     if price is None or price <= 0:
         missing.append("ref_price")
+    # 保有銘柄(発注銘柄を除く)の時価欠落は avg_cost 代用ではなく block(審査条件6)。
+    for pos in state.positions or ():
+        if pos.instrument_id == proposal.instrument_id:
+            continue
+        if pos.instrument_id not in state.prices:
+            missing.append(f"price:{pos.instrument_id}(保有銘柄の時価欠落)")
     if proposal.book_id not in ips.books:
         missing.append(f"book_id({proposal.book_id} は IPS 対象帳簿に無い)")
     if proposal.asset_class not in ips.asset_classes:

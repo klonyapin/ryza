@@ -81,6 +81,20 @@ def test_fail_closed_unknown_asset_class(ips, mandates):
     assert result.verdict == "block"
 
 
+def test_fail_closed_missing_position_price(ips, mandates):
+    """保有銘柄(発注銘柄以外)の時価欠落は avg_cost 代用ではなく block(審査条件6)。"""
+    positions = (PositionState("jim", 99, "equity_us", Decimal(100), Decimal(1000)),)
+    result = evaluate(
+        jp_stock_proposal(),
+        make_state(positions=positions, auto_prices=False),
+        ips,
+        mandates,
+    )
+    assert result.verdict == "block"
+    assert rules_of(result) == {"G-F"}
+    assert any("時価欠落" in r.message for r in result.reasons)
+
+
 # ── G-0 取引状態 ─────────────────────────────────────────────────────────────
 def test_g0_blocks_when_state_missing(ips, mandates):
     """行欠落(未初期化)も block — 状態が測定できないことを normal と主張しない。"""
@@ -159,6 +173,16 @@ def test_g2_blocks_single_name_for_stan(ips, mandates):
     )
     assert result.verdict == "block"
     assert "G-2" in rules_of(result)
+
+
+def test_g2_blocks_unclassified_single_name_for_stan(ips, mandates):
+    """分類不能(is_single_name=None)は個別株禁止の判定不能として block(審査条件7)。"""
+    result = evaluate(
+        jp_stock_proposal(fm="stan", is_single_name=None), make_state(), ips, mandates
+    )
+    assert result.verdict == "block"
+    assert "G-2" in rules_of(result)
+    assert any("分類不能" in r.message for r in result.reasons)
 
 
 def test_g2_requires_signal_for_jim(ips, mandates):
@@ -263,6 +287,22 @@ def test_unit_lot_margin_buy_not_eligible(ips, mandates):
     result = evaluate(_unit_proposal(100, 5000, is_margin=True), _unit_state(), ips, mandates)
     assert result.verdict == "block"
     assert "G-3" in rules_of(result)
+
+
+def test_unit_lot_exception_not_applied_to_pod_limit(ips, mandates):
+    """単元例外はファンド集中度のみ — ポッド集中度は緩めない(審査条件4・narrow_only)。"""
+    # NAV 300万: 1単元 90万は 35% 上限(105万)以下でファンド例外は成立するが、
+    # Ben のポッド上限(仮想資本 200万×40% = 80万)は例外なしで判定され block。
+    result = evaluate(
+        jp_stock_proposal(qty=Decimal(100), ref_price=Decimal(9000), unit_size=Decimal(100)),
+        make_state(nav=Decimal(3_000_000), cash=Decimal(2_000_000)),
+        ips,
+        mandates,
+    )
+    assert result.verdict == "block"
+    assert any("ポッド内集中度" in r.message for r in result.reasons)
+    # ファンド集中度そのものは単元例外で通っている(reason に発行体集中度が無い)。
+    assert not any(r.message.startswith("発行体集中度") for r in result.reasons)
 
 
 # ── G-4 資産クラス ───────────────────────────────────────────────────────────
@@ -466,7 +506,7 @@ def test_g9_short_blocked_for_ben(ips, mandates):
 
 
 def test_g9_jim_short_futures_only(ips, mandates):
-    """Jim のショートは先物ヘッジのみ可。ETF ショートは block、指数先物は pass。"""
+    """Jim のショートは先物のみ可 — 先物以外の商品でのショートは block。"""
     etf_short = jp_stock_proposal(
         fm="jim", side="short", product="etf", asset_class="equity_jp",
         universe_tags=("etf", "liquid_equity"), is_single_name=False, signal_ids=(1,),
@@ -475,10 +515,37 @@ def test_g9_jim_short_futures_only(ips, mandates):
     assert blocked.verdict == "block"
     assert "G-9" in rules_of(blocked)
 
-    futures_short = replace(
-        etf_short, product="listed_futures_index", universe_tags=("index_futures",)
+
+def _jim_futures_short(qty):
+    return jp_stock_proposal(
+        fm="jim", side="short", product="listed_futures_index", asset_class="equity_jp",
+        universe_tags=("index_futures",), is_single_name=False, signal_ids=(1,),
+        qty=Decimal(qty), ref_price=Decimal(1000), instrument_id=6,
     )
-    assert evaluate(futures_short, make_state(), ips, mandates).verdict == "pass"
+
+
+def test_g9_jim_naked_futures_short_blocks(ips, mandates):
+    """ヘッジ対象の現物ロングを持たない先物ショートは裸ショートとして block(審査条件5)。"""
+    result = evaluate(_jim_futures_short(100), make_state(), ips, mandates)
+    assert result.verdict == "block"
+    assert "G-9" in rules_of(result)
+    assert any("裸ショート" in r.message for r in result.reasons)
+
+
+def test_g9_jim_hedge_within_long_exposure_passes(ips, mandates):
+    """同一資産クラスの現物ロングの範囲内の先物ショートはヘッジとして pass。"""
+    # Jim が equity_jp の ETF を 20万円分ロング → 先物ショート 10万円はヘッジ。
+    positions = (PositionState("jim", 5, "equity_jp", Decimal(200), Decimal(1000)),)
+    within = evaluate(
+        _jim_futures_short(100), make_state(positions=positions), ips, mandates
+    )
+    assert within.verdict == "pass"
+    # 相殺量(20万円)を超えるショート 30万円は block。
+    over = evaluate(
+        _jim_futures_short(300), make_state(positions=positions), ips, mandates
+    )
+    assert over.verdict == "block"
+    assert "G-9" in rules_of(over)
 
 
 def test_g9_single_name_short_cap(ips, mandates):

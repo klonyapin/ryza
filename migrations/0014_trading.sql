@@ -36,6 +36,8 @@ CREATE TABLE compliance.gate_log (
     verdict       text NOT NULL CHECK (verdict IN ('pass', 'warn', 'block')),
     reasons       jsonb NOT NULL DEFAULT '[]'::jsonb,  -- 違反・警告の配列。空=pass
     checked_rules jsonb NOT NULL,             -- 評価した規則 ID の列挙(監査で再現可能に)
+    state_ref     jsonb NOT NULL,             -- 判定時の状態スナップショット(NAV・現金・
+                                              -- 当日売買代金・リスク状態・使用価格 — 監査再現性)
     ips_version   text NOT NULL,              -- 判定に使った IPS の版(config/ips.yaml)
     mandates_hash text NOT NULL,              -- 判定に使ったマンデート集合の sha256
     run_id        bigint NOT NULL REFERENCES meta.runs (run_id),
@@ -168,6 +170,9 @@ COMMENT ON COLUMN compliance.gate_log.reasons IS
     '違反・警告の配列 [{rule, severity, message}]。空=pass。';
 COMMENT ON COLUMN compliance.gate_log.checked_rules IS
     '評価した規則 ID の列挙(監査で「何を見たか」を再現可能に)。';
+COMMENT ON COLUMN compliance.gate_log.state_ref IS
+    '判定時の状態スナップショット(nav/cash/daily_turnover/trading_state/limits_state/'
+    'prices/trade_date)。監査が判定を再現するための入力の正。';
 COMMENT ON COLUMN compliance.gate_log.ips_version IS '判定に使った IPS 版(config/ips.yaml)。';
 COMMENT ON COLUMN compliance.gate_log.mandates_hash IS '判定に使ったマンデート集合の sha256。';
 

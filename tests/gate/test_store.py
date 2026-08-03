@@ -103,22 +103,34 @@ def test_gate_and_record_pass(conn, run_id, limits_row):
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT verdict, reasons, checked_rules, order_ref, ips_version, mandates_hash
+            SELECT verdict, reasons, checked_rules, order_ref, state_ref,
+                   ips_version, mandates_hash
             FROM compliance.gate_log WHERE id = %s
             """,
             (gate_log_id,),
         )
-        verdict, reasons, checked_rules, order_ref, ips_version, mandates_hash = cur.fetchone()
+        (verdict, reasons, checked_rules, order_ref, state_ref,
+         ips_version, mandates_hash) = cur.fetchone()
     assert verdict == "pass"
     assert reasons == []
     assert checked_rules[0] == "G-F" and "G-10" in checked_rules
     assert order_ref["fm"] == "ben" and order_ref["qty"] == "100"
+    # 判定時状態スナップショット(監査再現性 — 審査条件6)。
+    assert state_ref["trading_state"] == "normal"
+    assert state_ref["nav"] == str(_NAV) and state_ref["cash"] == str(_CASH)
+    assert state_ref["daily_turnover"] == "0"
+    assert state_ref["limits_state"] == {
+        "dd_soft": False, "dd_hard": False, "vol_exceeded": False, "es_exceeded": False,
+    }
+    assert "trade_date" in state_ref and "prices" in state_ref
     assert ips_version  # 判定に使った IPS 版が残る
     assert len(mandates_hash) == 64
 
 
 def test_gate_and_record_block_fail_closed_without_limits(conn, run_id):
     """risk.limits_state の行が無ければ fail-closed で block(G-F)。"""
+    with conn.cursor() as cur:  # 他テストの残留に依存しないよう明示的に行を消す(rollback で復元)
+        cur.execute("DELETE FROM risk.limits_state WHERE book_id = 'DEMO_FUND'")
     order_id, gate_log_id, result = _gate(conn, run_id)
     assert result.verdict == "block"
     assert any("limits_state" in r.message for r in result.reasons)
@@ -323,6 +335,21 @@ def test_apply_execution_moving_average_and_close(conn, run_id, limits_row):
                      executed_at=datetime.now(UTC), run_id=run_id)
     qty, avg, _ = _position(conn)
     assert (qty, avg) == (Decimal(0), Decimal(0))
+
+
+def test_record_execution_caps_cumulative_qty(conn, run_id, limits_row):
+    """累積約定数量(部分約定の合算)≤ 注文数量を強制(審査条件1)。"""
+    limits_row()
+    order_id = _submitted_order(conn, run_id, jp_stock_proposal())  # qty 100
+    record_execution(conn, order_id=order_id, qty=Decimal(60), price=Decimal(1000),
+                     executed_at=datetime.now(UTC), run_id=run_id)
+    with pytest.raises(ValueError, match="超過"):
+        record_execution(conn, order_id=order_id, qty=Decimal(50), price=Decimal(1000),
+                         executed_at=datetime.now(UTC), run_id=run_id)
+    # 残量ちょうどまでは受け付ける。
+    record_execution(conn, order_id=order_id, qty=Decimal(40), price=Decimal(1000),
+                     executed_at=datetime.now(UTC), run_id=run_id)
+    assert _position(conn)[0] == Decimal(100)
 
 
 def test_apply_execution_idempotent(conn, run_id, limits_row):
