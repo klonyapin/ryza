@@ -80,7 +80,7 @@ def test_deemed_source_is_reflected_in_actor(conn):
 
 
 def test_deemed_row_appears_in_current_decisions(conn):
-    """現決定 view から読める(A-13 の突合・deemed_ratio 集計の読み口)。"""
+    """現決定 view から読める(A-18 の突合・deemed_ratio 集計の読み口)。"""
     _deemed(conn, "mandate-rev-2026-09")
     row = current_decision(conn, "mandate-rev-2026-09")
     assert row["effective_decision"] == "deemed"
@@ -118,7 +118,7 @@ def test_unknown_kind_rejected(conn):
 
 @pytest.mark.parametrize("missing", ["proposal_ref", "notice_ref"])
 def test_blank_required_fields_rejected(conn, missing):
-    """通知参照は必須 — 定款第3条は通知を発効要件とする(通知なき発効は A-13 違反)。"""
+    """通知参照は必須 — 定款第3条は通知を発効要件とする(通知なき発効は A-18 違反)。"""
     args = {"proposal_ref": "blank-test", "notice_ref": NOTICE}
     args[missing] = "  "
     with pytest.raises(ValueError, match=missing):

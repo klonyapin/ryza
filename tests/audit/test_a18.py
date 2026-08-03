@@ -1,12 +1,12 @@
-"""A-13 規則⇔実装トレーサビリティ監査のテスト。
+"""A-18 規則⇔実装トレーサビリティ監査のテスト。
 
-一時 git リポジトリを作り、保護領域突合(A-13-1)を承認あり/なし/PR マージ/発効日前の
-4 象限で検証する。バージョン整合(A-13-2)・宣言棚卸し(A-13-3)はフィクスチャファイルで、
-outbox 投入はテスト専用 DB で検証する。全変更 PR 化(A-13-4)は PR マージのみ/直 push/
+一時 git リポジトリを作り、保護領域突合(A-18-1)を承認あり/なし/PR マージ/発効日前の
+4 象限で検証する。バージョン整合(A-18-2)・宣言棚卸し(A-18-3)はフィクスチャファイルで、
+outbox 投入はテスト専用 DB で検証する。全変更 PR 化(A-18-4)は PR マージのみ/直 push/
 非 PR マージ/基準以前の4象限+例外なし(Approved トレーラ付き直 push も違反)を検証する。
 
 一時リポジトリでは実リポジトリの基準コミット(``PR_RULE_BASELINE_COMMIT``)が存在しない
-ため、``run_a13`` には ``pr_since_commit`` を明示的に渡す。
+ため、``run_a18`` には ``pr_since_commit`` を明示的に渡す。
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from ryza.audit import a13
+from ryza.audit import a18
 
 GOV_YAML = """\
 version: "0.3"
@@ -74,18 +74,18 @@ def repo(tmp_path: Path) -> tuple[Path, str]:
     return r, ratification
 
 
-def _run_a131(repo_path: Path, since: str | None):
-    gov = a13.load_governance(repo_path)
-    return a13.check_protected_commits(repo_path, gov, since_commit=since)
+def _run_a181(repo_path: Path, since: str | None):
+    gov = a18.load_governance(repo_path)
+    return a18.check_protected_commits(repo_path, gov, since_commit=since)
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# A-13-1 保護領域突合
+# A-18-1 保護領域突合
 # ────────────────────────────────────────────────────────────────────────────
 def test_unapproved_direct_commit_is_violation(repo):
     r, since = repo
     sha = _commit(r, "docs/protected.md", "v2\n", "docs: 無承認の保護領域変更")
-    violations, checked = _run_a131(r, since)
+    violations, checked = _run_a181(r, since)
     assert checked == 1
     assert [v["commit"] for v in violations] == [sha[:12]]
     assert violations[0]["files"] == ["docs/protected.md"]
@@ -98,14 +98,14 @@ def test_approved_trailer_commit_is_ok(repo):
         r, "docs/protected.md", "v2\n",
         "docs: 承認済み変更\n\nApproved: https://github.com/x/y/issues/1",
     )
-    violations, _ = _run_a131(r, since)
+    violations, _ = _run_a181(r, since)
     assert violations == []
 
 
 def test_trailer_without_reference_is_violation(repo):
     r, since = repo
     _commit(r, "docs/protected.md", "v2\n", "docs: 空トレーラ\n\nApproved:")
-    violations, _ = _run_a131(r, since)
+    violations, _ = _run_a181(r, since)
     assert len(violations) == 1
 
 
@@ -115,7 +115,7 @@ def test_pr_merge_commit_path_is_ok(repo):
     _commit(r, "src/prot/ks.py", "x = 1\n", "feat: 保護コード変更(ブランチ)")
     _git(r, "checkout", "-q", "main")
     _git(r, "merge", "--no-ff", "-q", "feature", "-m", "Merge pull request #5 from k/feature")
-    violations, _ = _run_a131(r, since)
+    violations, _ = _run_a181(r, since)
     assert violations == []
 
 
@@ -126,17 +126,17 @@ def test_non_pr_merge_path_is_violation(repo):
     sha = _commit(r, "src/prot/ks.py", "x = 1\n", "feat: 保護コード変更(ブランチ)")
     _git(r, "checkout", "-q", "main")
     _git(r, "merge", "--no-ff", "-q", "feature", "-m", "ローカルマージ(PR でない)")
-    violations, _ = _run_a131(r, since)
+    violations, _ = _run_a181(r, since)
     assert [v["commit"] for v in violations] == [sha[:12]]
 
 
 def test_pre_ratification_commits_are_excluded(repo):
     """発効日前(批准コミットの祖先)の無承認変更は対象外。since=None だと対象になる。"""
     r, since = repo
-    violations, checked = _run_a131(r, since)
+    violations, checked = _run_a181(r, since)
     assert violations == [] and checked == 0
     # since=None なら全履歴が対象になり、発効前の無承認変更が検出される。
-    violations_all, _ = _run_a131(r, None)
+    violations_all, _ = _run_a181(r, None)
     assert len(violations_all) == 1
     assert violations_all[0]["subject"].startswith("pre:")
 
@@ -148,14 +148,14 @@ def test_unprotected_change_is_ignored(repo):
         r, "migrations/sub/0001_x.sql", "-- sub\n",
         "sql: サブディレクトリは migrations/*.sql の対象外",
     )
-    violations, checked = _run_a131(r, since)
+    violations, checked = _run_a181(r, since)
     assert violations == [] and checked == 2
 
 
 def test_unknown_since_commit_raises(repo):
     r, _ = repo
     with pytest.raises(ValueError):
-        _run_a131(r, "deadbeef" * 5)
+        _run_a181(r, "deadbeef" * 5)
 
 
 def _make_evil_merge(r: Path, merge_message: str) -> None:
@@ -181,7 +181,7 @@ def test_evil_merge_without_trailer_is_violation(repo):
     """マージ自身のコンフリクト解消差分は PR 件名だけでは承認と見なさない(バイパス封鎖)。"""
     r, since = repo
     _make_evil_merge(r, "Merge pull request #9 from k/feature")
-    violations, _ = _run_a131(r, since)
+    violations, _ = _run_a181(r, since)
     assert len(violations) == 1
     assert "evil merge" in violations[0]["reason"]
     assert violations[0]["files"] == ["docs/protected.md"]
@@ -192,7 +192,7 @@ def test_evil_merge_with_trailer_is_ok(repo):
     _make_evil_merge(
         r, "Merge pull request #9 from k/feature\n\nApproved: https://x/3"
     )
-    violations, _ = _run_a131(r, since)
+    violations, _ = _run_a181(r, since)
     assert violations == []
 
 
@@ -200,15 +200,15 @@ def test_evil_merge_with_trailer_is_ok(repo):
 # glob 変換
 # ────────────────────────────────────────────────────────────────────────────
 def test_glob_to_regex_semantics():
-    assert a13.glob_to_regex("migrations/*.sql").match("migrations/0001_a.sql")
-    assert not a13.glob_to_regex("migrations/*.sql").match("migrations/sub/a.sql")
-    assert a13.glob_to_regex("src/ryza/ledger/**").match("src/ryza/ledger/a/b.py")
-    assert a13.glob_to_regex("CLAUDE.md").match("CLAUDE.md")
-    assert not a13.glob_to_regex("CLAUDE.md").match("docs/CLAUDE.md")
+    assert a18.glob_to_regex("migrations/*.sql").match("migrations/0001_a.sql")
+    assert not a18.glob_to_regex("migrations/*.sql").match("migrations/sub/a.sql")
+    assert a18.glob_to_regex("src/ryza/ledger/**").match("src/ryza/ledger/a/b.py")
+    assert a18.glob_to_regex("CLAUDE.md").match("CLAUDE.md")
+    assert not a18.glob_to_regex("CLAUDE.md").match("docs/CLAUDE.md")
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# A-13-4 全変更 PR 化(直 push 検査)
+# A-18-4 全変更 PR 化(直 push 検査)
 # ────────────────────────────────────────────────────────────────────────────
 def _merge_pr(r: Path, branch: str, path: str, content: str, pr_no: int) -> None:
     """ブランチにコミットを作り PR マージ(Merge pull request マージコミット)で main へ取り込む。"""
@@ -218,81 +218,81 @@ def _merge_pr(r: Path, branch: str, path: str, content: str, pr_no: int) -> None
     _git(r, "merge", "--no-ff", "-q", branch, "-m", f"Merge pull request #{pr_no} from k/{branch}")
 
 
-def test_a134_pr_merges_only_is_clean(repo):
+def test_a18_4_pr_merges_only_is_clean(repo):
     """PR マージのみの履歴は違反 0。検査数はマージコミット(first-parent)のみ数える。"""
     r, since = repo
     _merge_pr(r, "f1", "README.md", "a\n", 1)
     _merge_pr(r, "f2", "src/app.py", "x = 1\n", 2)
-    violations, checked = a13.check_direct_pushes(r, since_commit=since)
+    violations, checked = a18.check_direct_pushes(r, since_commit=since)
     assert violations == []
     assert checked == 2  # マージコミット2つ(ブランチ内コミットは first-parent でない)
 
 
-def test_a134_direct_push_is_violation(repo):
+def test_a18_4_direct_push_is_violation(repo):
     """保護領域外のファイルでも main への直 push は違反(全変更が対象)。"""
     r, since = repo
     sha = _commit(r, "README.md", "x\n", "docs: 直 push(保護領域外)")
-    violations, checked = a13.check_direct_pushes(r, since_commit=since)
+    violations, checked = a18.check_direct_pushes(r, since_commit=since)
     assert checked == 1
     assert [v["commit"] for v in violations] == [sha[:12]]
     assert violations[0]["files"] == ["README.md"]
     assert "直 push" in violations[0]["reason"]
 
 
-def test_a134_approved_trailer_is_still_violation(repo):
+def test_a18_4_approved_trailer_is_still_violation(repo):
     """例外なし: Approved トレーラ付きの直 push も違反(全 PR 化ルールに例外を設けない)。"""
     r, since = repo
     _commit(
         r, "README.md", "x\n",
         "docs: 承認トレーラ付き直 push\n\nApproved: https://github.com/x/y/issues/1",
     )
-    violations, _ = a13.check_direct_pushes(r, since_commit=since)
+    violations, _ = a18.check_direct_pushes(r, since_commit=since)
     assert len(violations) == 1
 
 
-def test_a134_non_pr_merge_is_violation(repo):
-    """親数>1 でも件名が PR マージ形式でないマージは違反(A-13-1 と同じ件名検査を併用)。"""
+def test_a18_4_non_pr_merge_is_violation(repo):
+    """親数>1 でも件名が PR マージ形式でないマージは違反(A-18-1 と同じ件名検査を併用)。"""
     r, since = repo
     _git(r, "checkout", "-q", "-b", "f1")
     _commit(r, "README.md", "a\n", "feat: ブランチ作業")
     _git(r, "checkout", "-q", "main")
     _git(r, "merge", "--no-ff", "-q", "f1", "-m", "ローカルマージ(PR でない)")
-    violations, checked = a13.check_direct_pushes(r, since_commit=since)
+    violations, checked = a18.check_direct_pushes(r, since_commit=since)
     assert checked == 1
     assert len(violations) == 1
     assert "非 PR マージ" in violations[0]["reason"]
     assert violations[0]["files"] == ["README.md"]  # マージが main に持ち込んだ first-parent 差分
 
 
-def test_a134_pre_baseline_commits_are_excluded(repo):
+def test_a18_4_pre_baseline_commits_are_excluded(repo):
     """基準コミット以前の直 push は対象外(遡及しない)。since=None だと対象になる。"""
     r, since = repo
-    violations, checked = a13.check_direct_pushes(r, since_commit=since)
+    violations, checked = a18.check_direct_pushes(r, since_commit=since)
     assert violations == [] and checked == 0
     # since=None なら全履歴が対象になり、基準以前の直 push(発効前コミット等)が検出される。
-    violations_all, _ = a13.check_direct_pushes(r, since_commit=None)
+    violations_all, _ = a18.check_direct_pushes(r, since_commit=None)
     assert len(violations_all) == 2  # フィクスチャの pre コミット+批准コミット
 
 
-def test_a134_mixed_history_detects_only_direct_pushes(repo):
+def test_a18_4_mixed_history_detects_only_direct_pushes(repo):
     """PR マージと直 push の混在履歴で直 push だけを検出する。"""
     r, since = repo
     _merge_pr(r, "f1", "README.md", "a\n", 1)
     direct = _commit(r, "docs/note.md", "n\n", "docs: 直 push")
     _merge_pr(r, "f2", "src/app.py", "x = 1\n", 2)
-    violations, checked = a13.check_direct_pushes(r, since_commit=since)
+    violations, checked = a18.check_direct_pushes(r, since_commit=since)
     assert checked == 3
     assert [v["commit"] for v in violations] == [direct[:12]]
 
 
-def test_a134_unknown_since_commit_raises(repo):
+def test_a18_4_unknown_since_commit_raises(repo):
     r, _ = repo
     with pytest.raises(ValueError):
-        a13.check_direct_pushes(r, since_commit="deadbeef" * 5)
+        a18.check_direct_pushes(r, since_commit="deadbeef" * 5)
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# A-13-2 文書⇔config 整合
+# A-18-2 文書⇔config 整合
 # ────────────────────────────────────────────────────────────────────────────
 def _write(root: Path, rel: str, text: str) -> None:
     p = root / rel
@@ -304,63 +304,63 @@ def test_version_match_ok(tmp_path: Path):
     _write(tmp_path, "docs/design/80-ips.md", "# Ryza 投資方針書(IPS)v1.3\n本文\n")
     _write(tmp_path, "config/ips.yaml", 'version: "1.3"\n')
     pairs = (("docs/design/80-ips.md", "config/ips.yaml"),)
-    assert a13.check_versions(tmp_path, pairs) == []
+    assert a18.check_versions(tmp_path, pairs) == []
 
 
 def test_version_mismatch_detected(tmp_path: Path):
     _write(tmp_path, "docs/design/06-constitution.md", "# Ryza 定款(Constitution)v0.3\n")
     _write(tmp_path, "config/governance.yaml", 'version: "0.2"\n')
     pairs = (("docs/design/06-constitution.md", "config/governance.yaml"),)
-    out = a13.check_versions(tmp_path, pairs)
+    out = a18.check_versions(tmp_path, pairs)
     assert len(out) == 1
     assert out[0]["doc_version"] == "0.3" and out[0]["config_version"] == "0.2"
 
 
 def test_version_missing_file_is_mismatch(tmp_path: Path):
     pairs = (("docs/design/80-ips.md", "config/ips.yaml"),)
-    out = a13.check_versions(tmp_path, pairs)
+    out = a18.check_versions(tmp_path, pairs)
     assert len(out) == 1 and out[0]["reason"] == "バージョン表記が取得できない"
 
 
 def test_real_repo_versions_match():
     """実リポジトリの 80-ips.md⇔ips.yaml / 06-constitution.md⇔governance.yaml が一致している。"""
     root = Path(__file__).resolve().parents[2]
-    assert a13.check_versions(root) == []
+    assert a18.check_versions(root) == []
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# A-13-3 宣言棚卸し・注記
+# A-18-3 宣言棚卸し・注記
 # ────────────────────────────────────────────────────────────────────────────
 def test_declarations_inventory(repo):
     r, _ = repo
-    gov = a13.load_governance(r)
-    decls = a13.list_declarations(gov)
+    gov = a18.load_governance(r)
+    decls = a18.list_declarations(gov)
     assert [d["rule"] for d in decls] == ["宣言その1(異議経路の保護)", "宣言その2(反対意見書)"]
 
 
-def test_run_a13_end_to_end_on_tmp_repo(repo):
+def test_run_a18_end_to_end_on_tmp_repo(repo):
     r, since = repo
     _commit(r, "docs/protected.md", "v2\n", "docs: 無承認変更")
-    result = a13.run_a13(r, since_commit=since, pr_since_commit=since)
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
     assert len(result["violations"]) == 1
     assert result["mismatches"] != []  # 80-ips.md 等が無い一時リポジトリでは不整合になる
     assert len(result["declarations"]) == 2
-    # 上の無承認変更は直 push でもあるので A-13-4 でも検出される。
+    # 上の無承認変更は直 push でもあるので A-18-4 でも検出される。
     assert len(result["direct_pushes"]) == 1
     assert result["checked_first_parent"] == 1
     # 監査部門コードのパス未登録の注記(governance.yaml のコメントで予告された検査)。
     assert any("src/ryza/audit" in n for n in result["notes"])
-    assert a13.has_findings(result)
+    assert a18.has_findings(result)
 
 
 def test_standard_disclosures_always_in_notes(repo):
     """既知の限界(PR 件名未照合・トレーラ実在未照合・evil merge 検査方式)は毎回開示される。"""
     r, since = repo
-    result = a13.run_a13(r, since_commit=since, pr_since_commit=since)
-    for disclosure in a13.STANDARD_DISCLOSURES:
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    for disclosure in a18.STANDARD_DISCLOSURES:
         assert disclosure in result["notes"]
     # 開示は embed の注記フィールドにも常に載る。
-    embed = a13.build_alert_embed(result)
+    embed = a18.build_alert_embed(result)
     assert any(f["name"] == "注記" for f in embed["fields"])
 
 
@@ -372,11 +372,11 @@ def test_stale_checkout_warning(repo):
     newer = _commit(r, "README.md", "newer\n", "docs: newer")
     _git(r, "checkout", "-q", "main")
     _git(r, "update-ref", "refs/remotes/origin/main", newer)
-    result = a13.run_a13(r, since_commit=since, pr_since_commit=since)
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
     assert any("stale checkout" in n for n in result["notes"])
     # origin/main が HEAD の祖先なら警告しない。
     _git(r, "update-ref", "refs/remotes/origin/main", since)
-    result2 = a13.run_a13(r, since_commit=since, pr_since_commit=since)
+    result2 = a18.run_a18(r, since_commit=since, pr_since_commit=since)
     assert not any("stale checkout" in n for n in result2["notes"])
 
 
@@ -386,12 +386,12 @@ def test_stale_checkout_warning(repo):
 def _result(violations: list, mismatches: list, direct_pushes: list | None = None) -> dict:
     return {
         "as_of": "2026-08-03T00:00:00+00:00",
-        "since_commit": a13.RATIFICATION_COMMIT,
+        "since_commit": a18.RATIFICATION_COMMIT,
         "checked_commits": 3,
         "violations": violations,
         "mismatches": mismatches,
         "declarations": [{"rule": "宣言その1", "verification": "棚卸し"}],
-        "pr_since_commit": a13.PR_RULE_BASELINE_COMMIT,
+        "pr_since_commit": a18.PR_RULE_BASELINE_COMMIT,
         "checked_first_parent": 3,
         "direct_pushes": direct_pushes or [],
         "notes": [],
@@ -400,39 +400,39 @@ def _result(violations: list, mismatches: list, direct_pushes: list | None = Non
 
 def test_embed_alert_on_violation():
     v = {"commit": "abc123def456", "subject": "s", "files": ["CLAUDE.md"], "reason": "r"}
-    embed = a13.build_alert_embed(_result([v], []))
+    embed = a18.build_alert_embed(_result([v], []))
     assert "要対応" in embed["title"]
     assert any("abc123def456" in f["value"] for f in embed["fields"])
 
 
 def test_embed_clean_when_no_findings():
-    embed = a13.build_alert_embed(_result([], []))
+    embed = a18.build_alert_embed(_result([], []))
     assert "所見なし" in embed["title"]
-    assert any(f["name"] == "A-13-4 全変更 PR 化" for f in embed["fields"])
+    assert any(f["name"] == "A-18-4 全変更 PR 化" for f in embed["fields"])
 
 
 def test_embed_author_is_audit_character():
     """監査報告の発信者は監査部門のキャラクター(config/org.yaml — 代表指示 2026-08-03)。"""
     from ryza import org
 
-    embed = a13.build_alert_embed(_result([], []))
+    embed = a18.build_alert_embed(_result([], []))
     assert embed["author"] == org.author_for_role("audit")
 
 
 def test_embed_alert_on_direct_push_only():
-    """直 push のみでも要対応(has_findings)になり、A-13-4 節に載る。"""
+    """直 push のみでも要対応(has_findings)になり、A-18-4 節に載る。"""
     d = {"commit": "beef00beef00", "subject": "s", "files": ["README.md"], "reason": "r"}
     result = _result([], [], [d])
-    assert a13.has_findings(result)
-    embed = a13.build_alert_embed(result)
+    assert a18.has_findings(result)
+    embed = a18.build_alert_embed(result)
     assert "要対応" in embed["title"]
-    field = next(f for f in embed["fields"] if "A-13-4" in f["name"] and "⚠️" in f["name"])
+    field = next(f for f in embed["fields"] if "A-18-4" in f["name"] and "⚠️" in f["name"])
     assert "beef00beef00" in field["value"]
 
 
 def test_enqueue_alert_writes_ops_outbox(conn, run_id):
     v = {"commit": "abc123def456", "subject": "s", "files": ["CLAUDE.md"], "reason": "r"}
-    oid = a13.enqueue_alert(conn, _result([v], []), run_id)
+    oid = a18.enqueue_alert(conn, _result([v], []), run_id)
     with conn.cursor() as cur:
         cur.execute(
             "SELECT channel, urgent, embed_json->>'title' FROM press.outbox WHERE id = %s",
@@ -441,12 +441,12 @@ def test_enqueue_alert_writes_ops_outbox(conn, run_id):
         channel, urgent, title = cur.fetchone()
     assert channel == "ops"
     assert urgent is True  # 保護領域違反は urgent
-    assert "A-13" in title
+    assert "A-18" in title
 
 
 def test_enqueue_alert_direct_push_is_urgent(conn, run_id):
     d = {"commit": "beef00beef00", "subject": "s", "files": ["README.md"], "reason": "r"}
-    oid = a13.enqueue_alert(conn, _result([], [], [d]), run_id)
+    oid = a18.enqueue_alert(conn, _result([], [], [d]), run_id)
     with conn.cursor() as cur:
         cur.execute("SELECT urgent FROM press.outbox WHERE id = %s", (oid,))
         (urgent,) = cur.fetchone()
