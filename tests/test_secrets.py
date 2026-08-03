@@ -119,3 +119,34 @@ def test_metadata_unreachable_returns_none(monkeypatch):
     monkeypatch.setattr(secrets, "_urlopen", _down)
     monkeypatch.setenv("GCP_PROJECT", "proj")
     assert secrets.load_secret(env=_ENV, secret="k") is None
+
+
+# ── probe_secret: 取得できない理由の可視化(Issue #38)─────────────────────────
+def test_probe_secret_env_hit_has_no_reason(monkeypatch):
+    monkeypatch.setenv(_ENV[0], "v")
+    res = secrets.probe_secret(env=_ENV)
+    assert res == secrets.SecretLookup("v")
+
+
+def test_probe_secret_reason_no_project(monkeypatch):
+    """GCP_PROJECT 未設定(env 伝播漏れ)が理由として判別できる。"""
+    res = secrets.probe_secret(env=_ENV, secret="k")
+    assert res.value is None
+    assert "GCP_PROJECT 未設定" in res.reason
+    assert "'k'" in res.reason
+
+
+def test_probe_secret_reason_404_hints_missing_version(monkeypatch):
+    """404 は「Secret 未登録またはバージョン未追加」ヒント付き(2026-08-03 の実例)。"""
+    monkeypatch.setattr(secrets, "_urlopen", fake_urlopen({}))
+    monkeypatch.setenv("GCP_PROJECT", "proj")
+    res = secrets.probe_secret(env=_ENV, secret="estat-app-id")
+    assert res.value is None
+    assert "404" in res.reason
+    assert "バージョン未追加" in res.reason
+
+
+def test_probe_secret_reason_no_secret_name(monkeypatch):
+    res = secrets.probe_secret(env=_ENV)
+    assert res.value is None
+    assert "未設定" in res.reason
