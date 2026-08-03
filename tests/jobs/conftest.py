@@ -1,7 +1,8 @@
 """jobs テスト共通フィクスチャ(T-013)。
 
-research/press と同流儀: ライブ PostgreSQL に対し実行し、接続不可なら skip、commit せず
-rollback で隔離する。**LLM は実プロバイダを呼ばない** — ``DryRunProvider`` を注入する。
+research/press と同流儀: テスト専用 DB(tests/conftest.py が用意)に対し実行し、
+接続不可なら skip、commit せず rollback で隔離する。**LLM は実プロバイダを呼ばない** —
+``DryRunProvider`` を注入する。
 """
 
 from __future__ import annotations
@@ -9,26 +10,13 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 
-import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from ryza.db import migrate
-from ryza.db.conn import connect, database_url
+from ryza.db.conn import connect
 from ryza.provenance import start_run
 from ryza.research.llm import StructuredLLM
 from ryza.research.providers import DryRunProvider, LLMConfig
-
-
-@pytest.fixture(scope="session")
-def migrated_db():
-    try:
-        with psycopg.connect(database_url(), connect_timeout=3):
-            pass
-    except Exception as exc:  # noqa: BLE001 - 接続不能は skip 理由として提示
-        pytest.skip(f"PostgreSQL に接続できないため skip: {exc}")
-    migrate.run()
-    yield
 
 
 @pytest.fixture

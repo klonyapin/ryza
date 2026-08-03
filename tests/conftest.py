@@ -1,24 +1,90 @@
 """tests 全体の共有フィクスチャ。
 
-**残留データ隔離**(Issue #23): テストは compose.yaml のライブ PostgreSQL を
-日次取込ジョブ等と共有するため、commit 済みの実データ(market.indicators /
-market.bars / docs.documents など)が残っていると、テーブル全体を数える
-count assert が残留分を拾って壊れる。rollback 隔離はテスト自身の書込にしか
-効かない。
+**テスト専用 DB による恒久隔離**(Issue #23): DB 依存テストは以前、日次取込
+ジョブ等と同じ共有 PostgreSQL(compose.yaml の ``ryza``)に対して実行していた。
+rollback 隔離はテスト自身の書込にしか効かないため、別セッションが commit した
+実データ(docs.documents / market.indicators など)が残っていると、テーブル
+全体を数える count assert が壊れる(実例: 2026-08-03 の residual-seed Run)。
 
-対策として ``clear_residual`` フィクスチャを提供する: テストが開いた
-トランザクションの**内側で**対象テーブルを DELETE し、テスト終了時の
-rollback で削除ごと巻き戻す。commit しないため共有 DB の実データは無傷の
-まま、テストからは空のテーブルに見える。
+対策として ``pytest_configure`` で ``RYZA_DATABASE_URL`` を**テスト専用 DB**
+(既定: 元の dbname + ``_test`` → ``ryza_test``)へ差し替える。テスト DB は
+``migrated_db`` フィクスチャが初回に CREATE DATABASE し、全マイグレーションを
+適用する。取込ジョブはテスト DB に書かないため、残留データは原理的に発生
+しない。テスト DB を明示したい場合は ``RYZA_TEST_DATABASE_URL`` で上書きできる。
 
-TRUNCATE ではなく DELETE を使う理由: TRUNCATE は ACCESS EXCLUSIVE ロックを
-取り、並行して動く取込ジョブをブロックする。DELETE は ROW EXCLUSIVE で済む
-(削除行の行ロックは rollback まで保持されるが、テストは短命なので許容)。
+``clear_residual``(トランザクション内 DELETE、rollback で巻き戻し)は
+防御の第二層として残す: テストのバグで commit してしまった場合や、複数
+ワークツリーのテストセッションが同じテスト DB を並行使用した場合の保険。
 """
 
 from __future__ import annotations
 
+import os
+
+import psycopg
 import pytest
+from psycopg import conninfo, errors
+
+from ryza.db import migrate
+from ryza.db.conn import database_url
+
+# 差し替え前の(共有)DB URL。テスト DB の CREATE DATABASE 用の管理接続に使う。
+_ADMIN_URL: str = ""
+
+
+def _test_database_url(base_url: str) -> str:
+    """テスト専用 DB の URL。RYZA_TEST_DATABASE_URL があれば最優先。
+
+    既定は ``base_url`` の dbname に ``_test`` を付けたもの(``ryza`` → ``ryza_test``)。
+    既に ``_test`` で終わる場合はそのまま使う。
+    """
+    override = os.environ.get("RYZA_TEST_DATABASE_URL")
+    if override:
+        return override
+    params = conninfo.conninfo_to_dict(base_url)
+    dbname = params.get("dbname") or "ryza"
+    if not dbname.endswith("_test"):
+        dbname = f"{dbname}_test"
+    return conninfo.make_conninfo(base_url, dbname=dbname)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """収集より前に RYZA_DATABASE_URL をテスト専用 DB へ差し替える。
+
+    以後の ``ryza.db.conn.connect()`` / ``database_url()`` は全てテスト DB を
+    指すため、テストコード側の変更は不要。
+    """
+    global _ADMIN_URL
+    _ADMIN_URL = database_url()
+    os.environ["RYZA_DATABASE_URL"] = _test_database_url(_ADMIN_URL)
+
+
+@pytest.fixture(scope="session")
+def migrated_db():
+    """テスト専用 DB を(なければ)作成し、全マイグレーションを適用して yield。
+
+    PostgreSQL 自体に接続できない場合は skip(Docker 未導入環境向け)。
+    CREATE DATABASE はトランザクション外でしか実行できないため autocommit の
+    管理接続(元 URL)を使う。並行するテストセッションと作成が競合しても
+    DuplicateDatabase を握りつぶして続行する。
+    """
+    test_dbname = conninfo.conninfo_to_dict(database_url()).get("dbname")
+    try:
+        with psycopg.connect(_ADMIN_URL, autocommit=True, connect_timeout=3) as admin:
+            with admin.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM pg_database WHERE datname = %s", (test_dbname,)
+                )
+                if cur.fetchone() is None:
+                    try:
+                        cur.execute(f'CREATE DATABASE "{test_dbname}"')
+                    except errors.DuplicateDatabase:
+                        pass
+    except Exception as exc:  # noqa: BLE001 - 接続不能は skip 理由として提示
+        pytest.skip(f"PostgreSQL に接続できないため skip: {exc}")
+    migrate.run()
+    yield
+
 
 # 取込・前処理テストが件数 assert の対象にするテーブル。FK の子 → 親の順。
 RESIDUAL_TABLES = (
@@ -50,7 +116,7 @@ def clear_residual():
     """接続を受け取り、そのトランザクション内で残留データを不可視にする関数。
 
     呼び出し側の ``conn`` フィクスチャが接続直後に呼ぶ。**commit してはならない**
-    (rollback で削除が巻き戻ることが共有 DB を守る前提)。
+    (rollback で削除が巻き戻ることがテスト DB を並行セッションと共有する前提)。
     """
 
     def _clear(conn) -> None:

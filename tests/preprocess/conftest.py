@@ -1,6 +1,6 @@
 """preprocess テスト共通フィクスチャ。
 
-ライブ PostgreSQL（compose.yaml の DB）に対して実行する。接続不可なら skip。
+テスト専用 DB(tests/conftest.py の ``migrated_db`` が用意)に対して実行する。接続不可なら skip。
 テストは commit せず rollback して隔離する（preprocess の各 API は渡された ``conn`` を
 commit しない）。**実埋め込みモデルはロードしない** — ``HashingEmbedder``（依存ゼロの
 決定論ダミー）を注入する（要件: フィクスチャはダミーベクトル）。
@@ -10,27 +10,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from ryza.db import migrate
-from ryza.db.conn import connect, database_url
+from ryza.db.conn import connect
 from ryza.preprocess.embed import HashingEmbedder
 from ryza.preprocess.importance import ImportanceConfig
 from ryza.provenance import start_run
-
-
-@pytest.fixture(scope="session")
-def migrated_db():
-    """DB に接続できれば全マイグレーションを適用して yield。不可なら skip。"""
-    try:
-        with psycopg.connect(database_url(), connect_timeout=3):
-            pass
-    except Exception as exc:  # noqa: BLE001 - 接続不能は skip 理由として提示
-        pytest.skip(f"PostgreSQL に接続できないため skip: {exc}")
-    migrate.run()
-    yield
 
 
 @pytest.fixture

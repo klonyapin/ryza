@@ -1,30 +1,16 @@
 """bot テストの共通フィクスチャ。
 
-ライブ PostgreSQL(compose.yaml の DB)に対して実行する。接続できない場合は skip。
-各テストは関数スコープの接続を使い、commit せず rollback して隔離する。
+テスト専用 DB(tests/conftest.py の ``migrated_db`` が用意)に対して実行する。
+接続できない場合は skip。各テストは関数スコープの接続を使い、commit せず rollback して隔離する。
 discord API はモック(実際にはそもそも import しない — 純ロジックのみを検証する)。
 """
 
 from __future__ import annotations
 
-import psycopg
 import pytest
 
-from ryza.db import migrate
-from ryza.db.conn import connect, database_url
+from ryza.db.conn import connect
 from ryza.provenance import start_run
-
-
-@pytest.fixture(scope="session")
-def migrated_db():
-    """DB に接続できれば全マイグレーションを適用して yield。不可なら skip。"""
-    try:
-        with psycopg.connect(database_url(), connect_timeout=3):
-            pass
-    except Exception as exc:  # noqa: BLE001 - 接続不能は skip 理由として提示
-        pytest.skip(f"PostgreSQL に接続できないため skip: {exc}")
-    migrate.run()
-    yield
 
 
 @pytest.fixture
