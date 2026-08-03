@@ -333,8 +333,8 @@ reminders:
       type: issue_create
       title: "デプロイ統制の強化3件(ロール検証のゲート化・pg_hba 検査の CIDR 列限定・リグレッションテスト)"
       labels: [impl]
-      body: "独立役員 再審査 2026-08-03(docs/reviews/dashboard-deploy-independent-review.md 再審査記録「次回 PR 対応」)。条件付き承認のマージ阻止要因ではないが、着手期限を切って残す。(1) ロール検証クエリのゲート化: ops/deploy-dashboard.sh のロール定義 SQL 末尾にある dashboard_write_grants などの検証クエリは現在ログ出力のみで、値が想定外でもデプロイが続行する。DO ブロックで例外を上げるか結果を読んで中断する。(2) pg_hba 検査の CIDR 列限定: 現在は行全体の文字列マッチのため、コメントやデータベース名に localhost を含む行を誤って安全と判定しうる。アドレス列を取り出して判定する。(3) デプロイ統制のリグレッションテスト: git ゲート(dirty・HEAD != origin/main・origin URL 不一致)と公開バインディング検査が『実際に中断する』ことを検証するテストが無い。統制コードは壊れても静かに通るため、**Phase 5 の Cloud Build トリガー化(dashboard-cloudbuild-trigger)に着手する前に必須**とする。"
-    status: pending
+      body: "(完了済み)独立役員 再審査 2026-08-03(docs/reviews/dashboard-deploy-independent-review.md 再審査記録「次回 PR 対応」)の3件。(1) ロール検証クエリのゲート化 → ops/deploy-dashboard.sh のロール定義 SQL 末尾に DO $ryza_gate$ ブロックを追加し、7項目(ロール存在・ロール属性・読取専用ロールの非 SELECT 権限・秘密テーブル権限・役員室の ops 権限表数・想定外 ops テーブル・履歴表の追記オンリー)が想定外なら RAISE EXCEPTION で中断。(2) pg_hba 検査の CIDR 列限定 → ops/lib/pg_hba_check.sh に切り出し、コメント除去のうえ host 系行のアドレス列(+netmask 列)だけで判定。include 指令は検査不能として中断。(3) リグレッションテスト → tests/ops/test_deploy_guards.py(42件・git ゲート/公開バインディング検査/pg_hba 検査。gcloud は PATH スタブ、git は一時ローカルリポジトリ)と tests/ops/test_deploy_role_gate.py(13件・生成 SQL の DO ブロックを実 PostgreSQL 上の一時ロールに対して実行)。さらに独立役員 第3回審査(変異試験でゲート無効化が検出されないことを指摘)の条件付き承認を受け、同 PR 内で C-1〜C-7 を是正: ロールゲートの psql 配線(ON_ERROR_STOP・握り潰し禁止・リモート errexit)をテストで固定、pg_hba 検査を終了コード3分岐+関数ロード確認に、ロールゲートに information_schema.column_privileges を併用(列レベル GRANT の検出)、0020 未適用 DB を正常と誤認しないよう対象表の実在を要求、origin 許可リストを env 上書き不可のハードコードに、samehost をループバック扱いから除外、追記判定を検査と同一の正規化に。統制を無効化する変異13件が全てテストで FAIL することを確認済み。以上をもって dashboard-cloudbuild-trigger の前提条件は充足。"
+    status: done # 2026-08-03 ops/lib/{deploy-guards,pg_hba_check}.sh + tests/ops/test_deploy_{guards,role_gate}.py で完了(第3回審査 C-1〜C-7 是正済み)
 
   - id: governance-decision-vetoes-schema
     what: "みなし承認の事後否認を記録する追記オンリーテーブル governance.decision_vetoes(定款 v0.4 第3条が定める否認権の証跡。独立役員審査 0019 C-1)"
