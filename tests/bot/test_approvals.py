@@ -86,3 +86,14 @@ def test_build_approval_embed_shape():
     assert "prop-x" in embed["footer"]["text"]
     with pytest.raises(ValueError):
         approvals.build_approval_embed("prop-x", "t", "b", kind="bogus")
+
+
+def test_parse_proposal_roundtrip():
+    """build_approval_embed で埋めた ref/kind を配送側が復元できる(ボタン添付の判定)。"""
+    embed = approvals.build_approval_embed(
+        "frozen-ex-1", "例外的取引", "本文", kind="frozen_exception_trade"
+    )
+    assert approvals.parse_proposal(embed) == ("frozen-ex-1", "frozen_exception_trade")
+    # 承認 embed でない(footer に proposal: が無い)ものは None。
+    assert approvals.parse_proposal({"title": "日報", "footer": {"text": "x"}}) is None
+    assert approvals.parse_proposal({}) is None
