@@ -1,9 +1,13 @@
 -- 0016_nav_daily.sql
--- risk.nav_daily: 帳簿単位の日次 NAV 系列(T-016 締め処理が記帳、T-015 リスクエンジンが読む)。
+-- risk.nav_daily: 帳簿単位の日次 NAV 系列(T-016 締め処理が記帳)。
 --
 -- 書き手: 締め処理(src/ryza/execution/close.py)が日次で upsert する(同日再締めは
 --         上書き — ledger.nav_snapshots と同じ流儀)。正本は ledger(仕訳)であり、
 --         本テーブルはリスク計算(DD・実現ボラ・ES)用の導出系列。
+-- 読み手(T-015 統合時の裁定): T-015 の risk/daily.py は ledger.nav_snapshots を
+--         NAV の正として読む。本テーブルは執行照合の結果を重ねた risk 用ビュー
+--         (confirmed の条件が nav_snapshots より厳しい)で、両者の nav 値は
+--         run_daily_close の同一計算から書かれるため一致する。
 -- status: 執行照合(trading.executions × ledger 仕訳)とポジション照合(ledger ×
 --         trading.positions)の両方が一致した日のみ confirmed(00 §9「照合 → NAV 確定」)。
 --         ledger.nav_snapshots.status はポジション照合のみで確定する ledger 側の判定で、

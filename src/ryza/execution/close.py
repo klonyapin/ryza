@@ -10,9 +10,14 @@
    ``ledger.nav_snapshots`` 更新・ポジション照合。broker_snapshot は
    ``trading.positions`` から合成する(= デモブローカーの「残高証明」。ledger の
    約定再生と執行系ポジションの独立クロスチェックになる)
-3. ``risk.nav_daily`` へ book_id×date×nav を upsert(T-015 リスクエンジンの NAV
-   系列の出所)。status は執行照合(1)とポジション照合(2)の両方が一致したときのみ
-   confirmed
+3. ``risk.nav_daily`` へ book_id×date×nav を upsert。status は執行照合(1)と
+   ポジション照合(2)の両方が一致したときのみ confirmed
+
+**NAV 二表の役割分担(T-015 統合時の設計リード裁定 2026-08-03)**:
+``ledger.nav_snapshots`` が NAV の正(ledger が所有・T-015 の ``risk/daily.py`` は
+これを読む)。``risk.nav_daily`` は同じ NAV に**執行照合の結果を重ねた risk 用
+ビュー**(status=confirmed の条件が nav_snapshots より厳しい)であり、正を二重化
+するものではない。値は常に run_daily_close の同一計算から書かれるため一致する。
 
 ledger への書込は既存 API(``run_daily_close`` → ``post_mark_to_market``)経由のみ。
 照合のための ledger テーブル読み取りは SQL 直読(読み取り専用 — 突合の公開 API が

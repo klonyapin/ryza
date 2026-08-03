@@ -3,14 +3,19 @@
 設計 30-press-discord §2・00-system-design §2/§10。1 日 1 回、以下を順に走らせる:
 
   取込 → 前処理(縮退) → 分析エージェント → 市場観更新 → 執行(デモ)→ 締め(照合→NAV)
-  → 朝刊生成 → outbox → 実行サマリ
+  → リスク(T-015: limits_state 更新+リスクレポート)→ 朝刊生成 → outbox → 実行サマリ
 
 **執行段(T-016)**: 00 §9 の「ゲート → 執行 → 会計記帳 → 照合 → NAV 確定」のうち
 ゲート以降を担う(ゲートは注文起票側 = FM エージェント(T-017)が ``gate_and_record``
 で通す設計のため、daily に独立の gate 段は無い)。注文が無い日は執行は no-op だが、
-締め(MTM・NAV 記帳 → risk.nav_daily)は毎日走らせて NAV 系列を絶やさない(T-015 の
-リスク計算の入力)。Kill Switch 中は新規執行のみスキップし、締め(内部会計)は走らせる。
+締め(MTM・NAV 記帳 → risk.nav_daily)は毎日走らせて NAV 系列を絶やさない(risk 段の
+入力)。Kill Switch 中は新規執行のみスキップし、締め(内部会計)は走らせる。
 照合ブレイクは ops チャンネルへ embed で通知する。
+
+**risk 段(T-015)**: 00 §9 の順序どおり会計締めの直後に置く(設計リード裁定
+2026-08-03)— execution 段の締めが書いた当日の ``ledger.nav_snapshots``(NAV の正。
+``risk.nav_daily`` は執行照合を重ねた risk 用ビュー)を読んで limits_state を更新し、
+リスクレポートを ops へ投入する。
 
 **各段は独立に失敗許容**: 各段を savepoint(``conn.transaction()``)で囲み、失敗しても
 後続段は走る(前段失敗時は前日データで動く)。実行サマリを ``#運営``(ops)へ投入する。
@@ -66,6 +71,7 @@ from ryza.research import market_view
 from ryza.research.agents import editor, macro, micro, sentiment
 from ryza.research.llm import StructuredLLM
 from ryza.research.providers import AnthropicProvider, DryRunProvider, LLMConfig
+from ryza.risk.daily import run_risk_daily
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -419,7 +425,15 @@ def run_daily(
 
     stages.append(_run_stage(conn, "execution", _execution))
 
-    # ── 5. 朝刊生成(冪等・Kill Switch ゲート)───────────────────────────────
+    # ── 5. リスクエンジン(T-015)──────────────────────────────────────────────
+    # 00 §9 の順序どおり会計締め(execution 段の照合→NAV 確定)の直後に置く(設計
+    # リード裁定 2026-08-03)。execution 段が書いた当日 NAV を読んで limits_state を
+    # 更新する。決定論・LLM 不関与のため dry-run でもそのまま実行する。
+    stages.append(
+        _run_stage(conn, "risk", lambda: run_risk_daily(conn, run, as_of=as_of))
+    )
+
+    # ── 6. 朝刊生成(冪等・Kill Switch ゲート)───────────────────────────────
     def _morning() -> dict[str, Any]:
         kill = is_engaged(conn)
         state["kill_switch"] = kill
@@ -441,7 +455,7 @@ def run_daily(
 
     stages.append(_run_stage(conn, "morning", _morning))
 
-    # ── 6. 実行サマリを #運営 へ ──────────────────────────────────────────────
+    # ── 7. 実行サマリを #運営 へ ──────────────────────────────────────────────
     def _ops_summary() -> dict[str, Any]:
         embed = _build_ops_embed(
             stages, kill_switch=state["kill_switch"], posted=state["posted"],

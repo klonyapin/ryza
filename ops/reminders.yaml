@@ -140,6 +140,44 @@ reminders:
       body: "現行の src/ryza/audit/a13.py は PR 件名(Merge pull request #N)の自己申告のみで承認と判定しており件名偽装でバイパス可能(独立役員審査 2026-08-03 で実証)。GitHub API で PR #N の実在・マージコミット SHA の一致・マージ実行者を照合する。定款第5条の実弾移行前提条件(ブランチ保護+トレーラ検査 CI)の実装判断と合わせて行う。"
     status: pending
 
+  - id: risk-limits-state-freshness-gate
+    what: "ゲート G-10 の limits_state 鮮度検査(as_of が2営業日超なら fail-closed)or risk 段失敗時の urgent 化 — T-017(執行層)前に必須(独立役員審査 2026-08-03 T-015 条件)"
+    conditions:
+      - type: task_file_glob
+        glob: "docs/tasks/T-017*"
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "G-10: risk.limits_state の鮮度検査(stale fail-closed)を実装する"
+      labels: [impl]
+      body: "現行ゲート(src/ryza/gate/)は risk.limits_state の行存在のみを見ており、リスクエンジン(src/ryza/risk/daily.py)が数日止まると古いフラグで判定し続ける。T-017(執行層)着手前に、①G-10 で as_of が2営業日超なら fail-closed で block、または②jobs/daily の risk 段失敗を urgent 通知に昇格、の少なくとも一方を実装する(保護領域 — 審査手続)。"
+    status: pending
+
+  - id: risk-db-role-separation
+    what: "DB ロール分離(risk.limits_state の dd_hard 解除キー GUC を任意接続が立てられる問題の恒久対策 — 実弾移行前提)"
+    conditions:
+      - type: date_after
+        date: "2026-09-01"
+    action:
+      type: issue_create
+      title: "DB ロール分離: dd_hard 解除権限を専用ロールに限定する"
+      labels: [impl]
+      body: "0015 の dd_hard ラッチは単一アプリロール前提のため、悪意ある接続は GUC ryza.dd_hard_release を自ら立てて解除できる(migrations/0015_risk.sql 冒頭に宣言済み)。実弾移行前に、エンジン用ロール(UPDATE 可・解除不可)と委員会操作用ロール(SECURITY DEFINER 関数経由でのみ解除)を分離し、アプリ接続から解除経路を物理的に外す。A-13 の宣言棚卸し対象。"
+    status: pending
+
+  - id: restricted-list-supervised-stock-wiring
+    what: "監理・整理銘柄(supervised_or_delisting_stock)と restricted_list の配線 — 分類は行スナップショットで日次状態を持てない(T-015 引き継ぎ)"
+    conditions:
+      - type: date_after
+        date: "2026-08-24"
+    action:
+      type: issue_create
+      title: "監理・整理銘柄フラグ+restricted_list をゲート G-1 に配線する"
+      labels: [impl]
+      body: "IPS §5 の supervised_or_delisting_stock は日次で変わる状態であり、market.instrument_classification(0015)の静的分類では担保できない。J-Quants 等の日次取得から instrument_flags を更新する配線と、config の restricted_list(ips.yaml で TODO のまま)の置き場所決定+G-1 での照合を実装する。ips.yaml の変更を伴う場合はユーザー起票が必要(保護領域)。"
+    status: pending
+
   - id: execution-recon-persistence
     what: "執行照合の明細突合+ブレイク永続化(A-2 の完全な基盤化)。T-016 独立役員審査の条件①"
     conditions:
