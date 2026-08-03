@@ -1,13 +1,17 @@
 """dashboard/app — Ryza 運用ダッシュボード(Streamlit・Issue #10)。
 
-**ローカル専用・読み取り専用。** 公開ホスティングはしない(Cloud Run 公開版は
-ユーザー指摘で撤去済み・2026-08-02)。書込・操作系 UI は置かない — Kill Switch 等の
-操作は Discord Bot の管轄で、ここは閲覧のみ。
+**ローカル専用。役員室タブを除き読み取り専用。** 公開ホスティングはしない(Cloud Run
+公開版はユーザー指摘で撤去済み・2026-08-02)。Kill Switch 等の操作系 UI は置かない
+(Discord Bot の管轄)。唯一の例外が「役員室」(Issue #9・05-governance §5)で、
+議事録・決議マーク・stances の**追記**だけを行う(発注・設定変更の経路は持たない)。
 
 起動: ``.venv/bin/streamlit run dashboard/app.py``(README 参照)。
 接続先: env ``RYZA_DATABASE_URL``(既定 postgresql://ryza:ryza@localhost:5432/ryza)。
+役員室の LLM 呼び出しは Anthropic API キーが必要(env RYZA_ANTHROPIC_API_KEY /
+ANTHROPIC_API_KEY、または Secret Manager — providers.load_api_key の既定に任せる)。
 
-DB アクセスは ``queries.py``(テスト対象)に分離し、本ファイルは表示だけを担う。
+DB アクセスは ``queries.py``(読取)と ``ryza.governance.boardroom``(役員室の書込・
+テスト対象)に分離し、本ファイルは表示だけを担う。
 """
 
 from __future__ import annotations
@@ -25,6 +29,12 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 import queries  # noqa: E402
+
+from ryza.db.conn import connect  # noqa: E402
+from ryza.governance import boardroom, personas  # noqa: E402
+from ryza.provenance.runs import run as run_ctx  # noqa: E402
+from ryza.research.llm import StructuredLLM  # noqa: E402
+from ryza.research.providers import AnthropicProvider, LLMConfig  # noqa: E402
 
 st.set_page_config(page_title="Ryza 運用ダッシュボード", layout="wide")
 
@@ -250,15 +260,177 @@ def page_dev_status() -> None:
             st.dataframe(commits, use_container_width=True, hide_index=True)
 
 
+# ── 役員室(Issue #9・05-governance §5)────────────────────────────────────────
+@st.cache_resource
+def _boardroom_conn():
+    """役員室専用の**書込可**接続(autocommit)。
+
+    設計判断: ``queries.connect_readonly()`` は流用しない。既存ページの READ ONLY
+    原則はセッションを read-only に固定する防御の第二層であり(queries.py)、それを
+    緩めると全ページが書込可能になってしまう。書込はこの別接続だけに閉じることで、
+    読取ページに誤って書込コードが紛れても従来どおり DB 側で拒否される。
+    autocommit なのは実ジョブの Run と同じ流儀(即時永続化)。書込先(minutes /
+    minute_resolutions / stances)は追記オンリーのため、途中失敗しても改竄は起きない。
+    """
+    return connect(autocommit=True)
+
+
+@st.cache_resource
+def _llm_config() -> LLMConfig:
+    """モデル階層 → モデル ID・単価(config/llm.yaml)。"""
+    return LLMConfig.load()
+
+
+def _provider_for(tier: str) -> AnthropicProvider:
+    """階層別の AnthropicProvider(max_tokens が階層で違うためセッション内でキャッシュ)。
+
+    API キーは渡さない — providers.load_api_key の既定(env → Secret Manager)に任せる。
+    """
+    providers = st.session_state.setdefault("br_providers", {})
+    if tier not in providers:
+        cfg = _llm_config()
+        providers[tier] = AnthropicProvider(
+            api_version=cfg.api_version, max_tokens=cfg.max_tokens_for(tier)
+        )
+    return providers[tier]
+
+
+def _boardroom_llm(run, tier: str) -> StructuredLLM:
+    """コスト記録付きクライアント(部門タグ governance — 予算科目「役員」の集計元)。"""
+    return StructuredLLM(
+        _provider_for(tier), run, dept_tag="governance",
+        price_per_1k=_llm_config().price_map(),
+    )
+
+
+def page_boardroom() -> None:
+    st.header("役員室")
+    st.caption(
+        "経営レベルの対話・審議の場(05-governance §5)。対話は判断材料であり、"
+        "何も自動執行しない(不変原則1)。発効する決定は「決議」マークのみ。"
+    )
+    try:
+        wconn = _boardroom_conn()
+    except Exception as exc:  # noqa: BLE001 - DB 停止時も UI は説明を出して生かす
+        st.error(f"DB に接続できない: {exc}")
+        return
+
+    role = st.selectbox(
+        "役職", list(boardroom.BOARDROOM_ROLES),
+        format_func=lambda r: boardroom.BOARDROOM_ROLES[r],
+    )
+    if st.session_state.get("br_role") != role:
+        # 役職を切り替えたら会話をリセット(役職間で記憶・文脈を共有しない — 05 §6-2)。
+        st.session_state["br_role"] = role
+        st.session_state["br_turns"] = []
+        st.session_state["br_minute_id"] = None
+    # CIO/独立役員の設計階層は fable(05 §3)だが、コスト配慮で既定は mid。
+    use_fable = st.toggle("fable で応答(既定は mid — コスト配慮。設計上の階層は fable)")
+    tier = "fable" if use_fable else "mid"
+
+    turns: list[boardroom.ChatTurn] = st.session_state["br_turns"]
+    for turn in turns:
+        avatar = "user" if turn.speaker == "representative" else "assistant"
+        with st.chat_message(avatar):
+            st.markdown(turn.text)
+
+    role_label = boardroom.BOARDROOM_ROLES[role]
+    text = st.chat_input(f"{role_label} への発言(あなたは代表として話す)")
+    if text:
+        turns.append(boardroom.ChatTurn("representative", text))
+        with st.chat_message("user"):
+            st.markdown(text)
+        try:
+            with st.spinner(f"{role_label} が応答中({tier})…"):
+                # LLM 1 呼び出しごとに Run を開閉する(コスト記録の受け皿)。セッション
+                # 単位の Run にしない理由: Streamlit にはセッション終了フックがなく、
+                # ブラウザを閉じると 'running' 行が漏れ残るため。
+                with run_ctx(
+                    "dashboard.boardroom.chat", {"role": role, "tier": tier}, conn=wconn
+                ) as r:
+                    reply = boardroom.chat_reply(
+                        _boardroom_llm(r, tier),
+                        # 着任プロンプトは毎回組み立てる(直近の stances を反映 — 05 §2)。
+                        onboarding_prompt=personas.assume_role(wconn, role),
+                        turns=turns,
+                        model=_llm_config().model_for(tier),
+                        model_tier=tier,
+                    )
+        except Exception as exc:  # noqa: BLE001 - API 失敗時は発言を取り消して継続
+            turns.pop()
+            st.error(f"応答の生成に失敗: {exc}")
+            return
+        turns.append(boardroom.ChatTurn(role, reply))
+        with st.chat_message("assistant"):
+            st.markdown(reply)
+
+    st.divider()
+    if st.button("議事録として保存(主張・懸念も蓄積)", disabled=not turns):
+        try:
+            with st.spinner("議事録を保存し、主張・懸念を要約中…"):
+                with run_ctx("dashboard.boardroom.save", {"role": role}, conn=wconn) as r:
+                    saved = boardroom.save_office_chat_minute(
+                        wconn, role=role, turns=turns, run_id=r.run_id
+                    )
+                    # 要約は mid 固定(応答トグルとは独立 — 要約に fable は不要)。
+                    digest = boardroom.digest_stances(
+                        _boardroom_llm(r, "mid"),
+                        role=role,
+                        transcript_md=saved.body_md,
+                        model=_llm_config().model_for("mid"),
+                        model_tier="mid",
+                    )
+                    stance_ids = boardroom.record_chat_stances(
+                        wconn, role=role, stances=digest,
+                        minute_id=saved.minute_id, run_id=r.run_id,
+                    )
+            st.session_state["br_minute_id"] = saved.minute_id
+            st.success(
+                f"議事録 #{saved.minute_id} を保存(stances へ {len(stance_ids)} 件追記)"
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"保存に失敗: {exc}")
+
+    minute_id = st.session_state.get("br_minute_id")
+    if minute_id:
+        st.subheader(f"決議マーク(議事録 #{minute_id})")
+        # 決議ボタンは代表のみ押せる建前(05 §5)。本ダッシュボードはローカル専用で
+        # 公開ホスティングを持たない(冒頭 docstring)ため、操作者=代表とみなす。
+        # resolved_by='representative' は 0013 の CHECK でも DB 側から強制される。
+        with st.form("resolution_form", clear_on_submit=True):
+            title = st.text_input("決議タイトル")
+            body = st.text_area("決議本文(反対意見・却下理由も残す — 05 §6-3)")
+            proposal_ref = st.text_input(
+                "proposal_ref(承認事項なら governance.decisions と突合。任意)"
+            )
+            if st.form_submit_button("決議としてマーク(代表として)"):
+                if not title.strip() or not body.strip():
+                    st.warning("タイトルと本文は必須")
+                else:
+                    rid = boardroom.mark_resolution(
+                        wconn, minute_id=minute_id, title=title.strip(),
+                        resolution_md=body, proposal_ref=proposal_ref.strip() or None,
+                    )
+                    st.success(f"決議 #{rid} をマークした")
+        for res in boardroom.fetch_resolutions(wconn, minute_id):
+            ref = f" / proposal_ref: {res['proposal_ref']}" if res["proposal_ref"] else ""
+            st.caption(f"決議 {res['seq']}: {res['title']}(#{res['resolution_id']}{ref})")
+
+
 # ── エントリポイント ──────────────────────────────────────────────────────────
 def main() -> None:
     st.sidebar.title("Ryza 運用ダッシュボード")
-    st.sidebar.caption("ローカル専用・読み取り専用。操作(Kill Switch 等)は Discord から。")
+    st.sidebar.caption(
+        "ローカル専用。役員室以外は読み取り専用。操作(Kill Switch 等)は Discord から。"
+    )
     page = st.sidebar.radio(
-        "ページ", ["概況", "取込", "報道", "コスト", "市場観", "開発ステータス"]
+        "ページ", ["概況", "取込", "報道", "コスト", "市場観", "役員室", "開発ステータス"]
     )
     if page == "開発ステータス":
         page_dev_status()
+        return
+    if page == "役員室":
+        page_boardroom()  # 書込可の専用接続を自前で持つ(READ ONLY 接続は使わない)
         return
     try:
         conn = _conn()
