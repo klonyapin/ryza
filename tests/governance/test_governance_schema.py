@@ -1,4 +1,4 @@
-"""0013_governance_assets.sql / 0019_decisions_deemed.sql とローダの DB 依存部分の受け入れテスト。
+"""governance スキーマ(0013/0019/0021/0022)とローダの DB 依存部分の受け入れテスト。
 
 テスト専用 DB(tests/conftest.py の ``migrated_db``)に対して実行する。
 接続不可なら skip(Docker 未導入環境向け)。テストは commit せず rollback で隔離。
@@ -55,8 +55,12 @@ def test_governance_tables_exist(conn):
             """
         )
         tables = {r[0] for r in cur.fetchall()}
-    # decisions は 0007、minutes/minute_resolutions/stances は 0013。
-    assert {"decisions", "minutes", "minute_resolutions", "stances"}.issubset(tables)
+    # decisions は 0007、minutes/minute_resolutions/stances は 0013、
+    # decision_vetoes と current_decisions(view)は 0021。
+    assert {
+        "decisions", "minutes", "minute_resolutions", "stances",
+        "decision_vetoes", "current_decisions",
+    }.issubset(tables)
 
 
 # ── 議事録と決議マーク ──────────────────────────────────────────────────────
@@ -392,6 +396,166 @@ def test_explicit_approval_by_representative_still_allowed(conn):
             _new_decision(cur, "explicit-by-rep", "approve", decided_by="representative")
             > 0
         )
+    conn.rollback()
+
+
+# ── 事後否認と現決定 view(0021・定款 v0.4 第3条「いつでも否認できる」)────────
+def _new_veto(
+    cur,
+    decision_id: int,
+    *,
+    reason: str = "リスク上限の緩和方向のため否認",
+    vetoed_by: str = "999",
+    revert_commit: str | None = None,
+    derived_effects_ref: str | None = None,
+) -> int:
+    cur.execute(
+        """
+        INSERT INTO governance.decision_vetoes
+            (decision_id, vetoed_by, reason, revert_commit, derived_effects_ref)
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING veto_id
+        """,
+        (decision_id, vetoed_by, reason, revert_commit, derived_effects_ref),
+    )
+    return cur.fetchone()[0]
+
+
+def _current(cur, proposal_ref: str) -> dict:
+    cur.execute(
+        """
+        SELECT effective_decision, recorded_decision, is_vetoed, veto_reason,
+               revert_commit, derived_effects_ref, veto_id
+        FROM governance.current_decisions WHERE proposal_ref = %s
+        """,
+        (proposal_ref,),
+    )
+    row = cur.fetchone()
+    assert row is not None, f"現決定に {proposal_ref} が無い"
+    return dict(
+        zip(
+            ("effective_decision", "recorded_decision", "is_vetoed", "veto_reason",
+             "revert_commit", "derived_effects_ref", "veto_id"),
+            row,
+            strict=True,
+        )
+    )
+
+
+def test_veto_insert_and_view_reflects_it(conn):
+    """否認を追記すると現決定 view が 'vetoed' を返す(元の決定は残る)。"""
+    with conn.cursor() as cur:
+        did = _new_decision(cur, "mandate-rev-veto", "deemed")
+        assert _current(cur, "mandate-rev-veto")["effective_decision"] == "deemed"
+        assert _new_veto(cur, did) > 0
+        cur_row = _current(cur, "mandate-rev-veto")
+    assert cur_row["effective_decision"] == "vetoed"
+    assert cur_row["recorded_decision"] == "deemed"  # 何が承認されたかは失われない
+    assert cur_row["is_vetoed"] is True
+    assert "否認" in cur_row["veto_reason"]
+    conn.rollback()
+
+
+def test_explicit_approval_can_also_be_vetoed(conn):
+    """否認は deemed 行に限らない(スキーマは全 decision に一般化 — 0021 の設計判断)。
+
+    定款第3条の否認権はみなし承認の文脈で定められているが、明示承認の撤回を
+    スキーマが拒むと証跡が DB の外へ逃げる。否認は効力を弱める方向にしか
+    働かないため、一般化しても 3専決の統制は緩まない。
+    """
+    with conn.cursor() as cur:
+        did = _new_decision(cur, "live-money-veto", "approve", kind="budget")
+        assert _new_veto(cur, did, reason="増資額の再検討のため") > 0
+        assert _current(cur, "live-money-veto")["effective_decision"] == "vetoed"
+    conn.rollback()
+
+
+def test_latest_veto_wins_in_view(conn):
+    """1決定に複数行を許し、view は最新行を返す(否認 → 取消完了 を追記で表現)。"""
+    with conn.cursor() as cur:
+        did = _new_decision(cur, "ips-rev-veto-then-revert", "deemed")
+        _new_veto(cur, did, reason="否認(取消未完了)")
+        _new_veto(
+            cur, did, reason="否認に伴う取消完了",
+            revert_commit="deadbeef", derived_effects_ref="discord://運営/12345",
+        )
+        row = _current(cur, "ips-rev-veto-then-revert")
+    assert row["revert_commit"] == "deadbeef"
+    assert row["derived_effects_ref"] == "discord://運営/12345"
+    conn.rollback()
+
+
+def test_unvetoed_decision_passes_through_view(conn):
+    """否認が無ければ現決定 = 記録された決定(view が既存読み口の上位互換)。"""
+    with conn.cursor() as cur:
+        _new_decision(cur, "pr-plain", "approve")
+        row = _current(cur, "pr-plain")
+    assert row["effective_decision"] == "approve"
+    assert row["is_vetoed"] is False
+    assert row["veto_id"] is None
+    conn.rollback()
+
+
+def test_veto_requires_existing_decision(conn):
+    """存在しない decision_id への否認は FK が拒否する(宙に浮いた否認を作らせない)。"""
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            _new_veto(cur, -1)
+    conn.rollback()
+
+
+@pytest.mark.parametrize("field,value", [("reason", "   "), ("vetoed_by", "")])
+def test_veto_requires_reason_and_actor(conn, field, value):
+    """理由・否認者の空文字は CHECK で拒否(定款第3条の取消義務の起点となる情報)。"""
+    with conn.cursor() as cur:
+        did = _new_decision(cur, f"blank-{field}", "deemed")
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _new_veto(cur, did, **{field: value})
+    conn.rollback()
+
+
+def test_vetoes_are_append_only(conn):
+    """否認証跡は UPDATE / DELETE 不可(0013 の minutes/stances と同型)。"""
+    with conn.cursor() as cur:
+        did = _new_decision(cur, "veto-append-only-1", "deemed")
+        vid = _new_veto(cur, did)
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.RaiseException):
+            cur.execute(
+                "UPDATE governance.decision_vetoes SET reason = '改竄' WHERE veto_id = %s",
+                (vid,),
+            )
+    conn.rollback()
+    with conn.cursor() as cur:
+        did = _new_decision(cur, "veto-append-only-2", "deemed")
+        vid = _new_veto(cur, did)
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.RaiseException):
+            cur.execute(
+                "DELETE FROM governance.decision_vetoes WHERE veto_id = %s", (vid,)
+            )
+    conn.rollback()
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "governance.decision_vetoes",
+        "governance.decisions",
+        "governance.minutes",
+        "governance.minute_resolutions",
+        "governance.stances",
+    ],
+)
+def test_governance_tables_reject_truncate(conn, table):
+    """TRUNCATE は行トリガを迂回する(0015 で実証)ため文トリガで封鎖する。
+
+    否認証跡だけを守っても、議事録・承認記録が TRUNCATE できるなら
+    「否認ゼロ」という監査上もっとも都合のよい状態を一撃で作れてしまう。
+    """
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.RaiseException, match="TRUNCATE は禁止"):
+            cur.execute(f"TRUNCATE {table} CASCADE")  # noqa: S608 - 固定リスト
     conn.rollback()
 
 
