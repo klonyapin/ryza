@@ -473,6 +473,88 @@ def test_quarantined_thesis_is_not_reinjected(conn, run, as_of, insert_document)
     assert f"<<<past_thesis id={clean}>>>" in system
 
 
+def test_quarantined_holding_is_flagged_for_review(
+    conn, run, as_of, ben_universe, insert_document
+):
+    """建玉根拠を検疫された保有は「根拠不明」と明示して見直しを促す(審査 C-11)。
+
+    検疫が「invalidation の無い持ち切り」を作らないことの回帰。旧実装では
+    entry_thesis が None になり、根拠が最初から無い保有と区別できなかった。
+    """
+    iid = ben_universe()
+    doc_id = insert_document()
+    thesis_id = _record_ben_thesis(
+        conn, run, as_of, doc_id, thesis_md="建玉の根拠。", instrument_id=iid
+    )
+    _hold(conn, run, iid)
+    quarantine_thesis(
+        conn, thesis_id, reason="外部文書経由の注入", quarantined_by="dev-lead",
+        run_id=run.run_id,
+    )
+    llm, provider = _llm([{"candidates": [], "reviews": []}])
+    result = ben.run_ben(
+        conn, run, llm, model=MODEL, book_id=BOOK, as_of=as_of, cfg=_cfg()
+    )
+
+    user = provider.calls[0]["user"]
+    assert '"entry_thesis_quarantined": true' in user
+    assert ben.QUARANTINED_ENTRY in user
+    # 汚染テキストは渡らない(検疫の目的)。
+    assert f"<<<past_thesis id={thesis_id}>>>" not in user
+    # system 指示は「クローズ候補として評価するか再引受せよ」を求める。
+    system = provider.calls[0]["system"]
+    assert "再引受" in system and "invalidation の無い保有を放置しない" in system
+    # 実行サマリに表出する(運用が気づける)。
+    assert result["quarantined_holdings"] == 1
+
+
+def test_quarantined_holding_can_still_be_closed(
+    conn, run, as_of, ben_universe, insert_document
+):
+    """根拠を失った保有の exit 提案は通る(縮退時に降りられることの e2e — 審査 C-11)。"""
+    iid = ben_universe()
+    doc_id = insert_document()
+    thesis_id = _record_ben_thesis(
+        conn, run, as_of, doc_id, thesis_md="建玉の根拠。", instrument_id=iid
+    )
+    _hold(conn, run, iid)
+    quarantine_thesis(conn, thesis_id, reason="注入", quarantined_by="dev-lead")
+    llm, _ = _llm(
+        [
+            {
+                "candidates": [],
+                "reviews": [
+                    {
+                        "instrument_id": iid,
+                        "invalidated": True,
+                        "rationale_md": "建玉根拠が検疫され反証条件を確認できないため降りる。",
+                        "evidence_refs": [{"kind": "document", "doc_id": doc_id}],
+                    }
+                ],
+            }
+        ]
+    )
+    result = ben.run_ben(
+        conn, run, llm, model=MODEL, book_id=BOOK, as_of=as_of, cfg=_cfg()
+    )
+    assert result["closes"] == 1
+    assert result["orders"][0]["side"] == "sell"
+
+
+def test_unheld_thesisless_holding_is_not_flagged_as_quarantined(
+    conn, run, as_of, ben_universe
+):
+    """thesis がそもそも無い保有は検疫フラグを立てない(両者を混同しない)。"""
+    iid = ben_universe()
+    _hold(conn, run, iid)
+    llm, provider = _llm([{"candidates": [], "reviews": []}])
+    result = ben.run_ben(
+        conn, run, llm, model=MODEL, book_id=BOOK, as_of=as_of, cfg=_cfg()
+    )
+    assert '"entry_thesis_quarantined": false' in provider.calls[0]["user"]
+    assert result["quarantined_holdings"] == 0
+
+
 def test_holdings_entry_thesis_is_fenced(conn, run, as_of, ben_universe, insert_document):
     """保有の建玉根拠(過去の LLM 出力)もフェンスで囲んで渡す。"""
     iid = ben_universe()

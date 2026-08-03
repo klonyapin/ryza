@@ -21,8 +21,19 @@
 --      `src/ryza/fm/theses.py` の recent_theses / open_theses_by_instrument が除外する
 --   2. **検疫表自身も追記オンリー**(UPDATE/DELETE/TRUNCATE 禁止)。検疫の解除行を
 --      設けないのは意図的である — 「汚染済み」の判定を後から消せる経路を作ると、
---      DB 権限を得た攻撃者が汚染 thesis を再びプロンプトへ戻せる(fail-closed)。
+--      封じ込めたはずの thesis を再びプロンプトへ戻せる(fail-closed)。
 --      誤検疫の救済は、同じ内容を**新しい thesis として改めて記録する**ことで行う
+--
+--      **正直な限界(独立役員審査 T-017 C-10)**: この fail-closed は「解除」経路だけを
+--      塞ぐものであり、DB の INSERT 権限を持つ攻撃者は防げない。同じ攻撃者は
+--      (a) 新しい汚染 thesis を trading.fm_theses へ INSERT する、(b) 全 thesis_id を
+--      本表へ INSERT して判断履歴と建玉根拠を恒久的にプロンプトから消す、のいずれも
+--      実行できる。現状 fm_theses と本表の INSERT 権限を分けるロールは存在しない。
+--      **恒久対策はロール分離**(reminders: fm-db-role-separation — fm 系ジョブ専用ロールに
+--      最小権限を与え、検疫 INSERT を運用者ロールに限定する)であり、本 migration の
+--      追記オンリーはその代替ではない。それまでの検知策として、日次サマリに検疫件数
+--      (当日増分・累計)を必ず出し、mass-quarantine(1日 N 件以上 or 全提案の X% 以上)を
+--      警告する(src/ryza/jobs/daily.py・審査 C-10 の裁定)。
 --   3. **登録は当面手動**(SQL または `ryza.fm.theses.quarantine_thesis`)。自動検出
 --      (命令形の検出など)は誤検知で判断履歴を静かに欠落させるため、人手の判断を
 --      経路に残す。将来自動化するときは検出器の出力を reason に残す
@@ -35,7 +46,11 @@ CREATE TABLE trading.fm_theses_quarantine (
     thesis_id     bigint NOT NULL REFERENCES trading.fm_theses (thesis_id),
     reason        text NOT NULL CHECK (length(btrim(reason)) > 0),
     quarantined_by text NOT NULL CHECK (length(btrim(quarantined_by)) > 0),
-    run_id        bigint REFERENCES meta.runs (run_id),  -- 手動 SQL 登録では NULL
+    -- run_id は NULL 許容(0013 の「全表 run_id 必須」から外れる — 審査 C-15)。
+    -- 検疫は**人の作為**であってジョブの生成物ではないため、Run が存在しない経路
+    -- (運用者の手動 SQL)が正規の登録手段になる。0021 の veto と同じ整理であり、
+    -- 「誰が」の証跡は quarantined_by(空文字禁止)が担う。
+    run_id        bigint REFERENCES meta.runs (run_id),
     created_at    timestamptz NOT NULL DEFAULT now()
 );
 
@@ -63,4 +78,5 @@ COMMENT ON COLUMN trading.fm_theses_quarantine.reason IS
 COMMENT ON COLUMN trading.fm_theses_quarantine.quarantined_by IS
     '検疫の実施主体(人名・役職キー・ジョブ名)。空不可。';
 COMMENT ON COLUMN trading.fm_theses_quarantine.run_id IS
-    '検疫を記録した Run(手動 SQL では NULL)。';
+    '検疫を記録した Run(手動 SQL では NULL)。検疫は人の作為でありジョブ生成物では'
+    'ないため NULL 許容(0021 の veto と同じ整理)。実施主体は quarantined_by が持つ。';

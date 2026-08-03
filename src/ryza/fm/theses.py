@@ -335,6 +335,57 @@ def is_quarantined(conn: psycopg.Connection, thesis_id: int) -> bool:
         return cur.fetchone() is not None
 
 
+def quarantined_open_instruments(
+    conn: psycopg.Connection, fm: str, instrument_ids: list[int]
+) -> set[int]:
+    """建玉根拠が**検疫されたために読み出せない**銘柄(独立役員審査 C-11)。
+
+    ``open_theses_by_instrument`` が返さない銘柄には2種類ある — 「そもそも thesis が
+    無い」と「あるが検疫済み」。後者は**降りる条件を失った保有**であり、放置すると
+    invalidation の無い持ち切りになる(40 §制約1 違反)。呼び出し側が両者を区別して
+    扱えるよう、後者だけを返す。
+    """
+    if not instrument_ids:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT t.instrument_id
+            FROM trading.fm_theses t
+            JOIN trading.fm_theses_quarantine q ON q.thesis_id = t.thesis_id
+            WHERE t.fm = %s AND t.instrument_id = ANY(%s) AND t.direction = 'buy'
+            """,
+            (fm, list(instrument_ids)),
+        )
+        return {r[0] for r in cur.fetchall()}
+
+
+def quarantine_stats(conn: psycopg.Connection, *, as_of: datetime) -> dict[str, int]:
+    """検疫の発生状況(当日増分・累計・全提案数)— 日次サマリと監査の入力。
+
+    解除できない封じ込め(0023 判断2)である以上、**silent な mass-quarantine を
+    検知できること**が採用条件である(独立役員審査 C-10 の裁定)。当日は JST の暦日で
+    数える(日次サイクルの区切りと揃える)。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                count(*) FILTER (
+                    WHERE (created_at AT TIME ZONE 'Asia/Tokyo')::date
+                          = (%s AT TIME ZONE 'Asia/Tokyo')::date
+                ),
+                count(*)
+            FROM trading.fm_theses_quarantine
+            """,
+            (as_of,),
+        )
+        today, total = cur.fetchone()
+        cur.execute("SELECT count(*) FROM trading.fm_theses")
+        theses_total = cur.fetchone()[0]
+    return {"today": today, "total": total, "theses_total": theses_total}
+
+
 # ── 読出し(次回プロンプトへの注入)────────────────────────────────────────────
 def recent_theses(
     conn: psycopg.Connection, fm: str, *, limit: int = 20
@@ -426,7 +477,9 @@ __all__ = [
     "ThesisRecord",
     "is_quarantined",
     "open_theses_by_instrument",
+    "quarantine_stats",
     "quarantine_thesis",
+    "quarantined_open_instruments",
     "record_thesis",
     "recent_theses",
     "validate_evidence_refs",

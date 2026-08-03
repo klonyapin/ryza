@@ -75,6 +75,7 @@ from ryza.execution.runner import run_pending
 from ryza.fm.ben import run_ben
 from ryza.fm.config import BenConfig
 from ryza.fm.jim import run_jim
+from ryza.fm.theses import quarantine_stats
 from ryza.ips import load_and_validate
 from ryza.preprocess.embed import HashingEmbedder
 from ryza.preprocess.runner import run_preprocess
@@ -280,6 +281,7 @@ def _ensure_market_view(conn: psycopg.Connection, run: Run, as_of: datetime) -> 
 # FM 段の実行サマリに載せる件数キー(orders 明細は embed に載せない — 冗長なため)。
 _FM_SUMMARY_KEYS = (
     "universe", "entries", "exits", "candidates", "closes",
+    "quarantined_holdings",  # 根拠を失った保有(審査 C-11)
     "proposed", "passed", "blocked", "skipped",
 )
 
@@ -325,8 +327,63 @@ def _build_breaks_embed(breaks: list[dict[str, Any]], *, as_of: datetime) -> dic
     }
 
 
+# ── FM 提案の検疫の可視化(独立役員審査 T-017 C-10 の裁定)────────────────────
+# 検疫(trading.fm_theses_quarantine)は解除できない封じ込めであり、判断履歴と建玉根拠を
+# 恒久的にプロンプトから外す。**silent に大量検疫されないこと**が採用条件のため、
+# 日次サマリに必ず件数(当日増分/累計)を出し、閾値超えは別 embed で警告する。
+_QUARANTINE_MASS_COUNT = 5       # 1 日の増分がこれ以上なら mass-quarantine
+_QUARANTINE_MASS_RATIO = 0.10    # 全提案に占める累計比率がこれ以上なら mass-quarantine
+
+
+def _is_mass_quarantine(stats: dict[str, int]) -> bool:
+    """当日増分または累計比率が閾値を超えたか(増分ゼロなら常に False)。"""
+    if stats["today"] <= 0:
+        return False
+    if stats["today"] >= _QUARANTINE_MASS_COUNT:
+        return True
+    total_theses = stats["theses_total"]
+    return bool(
+        total_theses and stats["total"] / total_theses >= _QUARANTINE_MASS_RATIO
+    )
+
+
+def _quarantine_field(stats: dict[str, int]) -> dict[str, Any]:
+    """実行サマリの「検疫」フィールド(増分ゼロでも必ず出す)。"""
+    mark = "⚠️" if stats["today"] > 0 else "✅"
+    value = (
+        f"{mark} 当日増分 {stats['today']} 件 / 累計 {stats['total']} 件"
+        f"(全提案 {stats['theses_total']} 件)"
+    )
+    if _is_mass_quarantine(stats):
+        value = f"🚨 mass-quarantine — {value}"
+    return {"name": "検疫(FM 提案)", "value": value[:1024], "inline": False}
+
+
+def _build_quarantine_alert(stats: dict[str, int], *, as_of: datetime) -> dict[str, Any]:
+    """mass-quarantine の警告 embed(#運営)。照合ブレイクと同じ扱いで別途投入する。"""
+    jst_str = as_of.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
+    return {
+        "title": f"🚨 FM 提案の大量検疫 {jst_str}",
+        "description": (
+            f"当日 {stats['today']} 件を検疫(累計 {stats['total']} / "
+            f"全提案 {stats['theses_total']})。検疫は**解除できない**ため、"
+            "判断履歴と建玉根拠がプロンプトから恒久的に外れる。登録経路(手動 SQL・"
+            "quarantine_thesis)の実施者と理由を確認すること。"
+        ),
+        "color": COLOR_FLASH,
+        "author": org.author_for_role("audit"),
+        "footer": {"text": DISCLAIMER},
+    }
+
+
 def _build_ops_embed(
-    stages: list[StageResult], *, kill_switch: bool, posted: bool, as_of: datetime, dry_run: bool
+    stages: list[StageResult],
+    *,
+    kill_switch: bool,
+    posted: bool,
+    as_of: datetime,
+    dry_run: bool,
+    quarantine: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """実行サマリ(#運営)の embed を組む。"""
     jst_str = as_of.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
@@ -351,6 +408,8 @@ def _build_ops_embed(
     fields.append(
         {"name": "Kill Switch", "value": ("⛔ 有効" if kill_switch else "✅ 通常"), "inline": True}
     )
+    if quarantine is not None:
+        fields.append(_quarantine_field(quarantine))
     title = "日次サイクル(dry-run)" if dry_run else "日次サイクル"
     return {
         "title": f"{title} {jst_str}",
@@ -533,13 +592,20 @@ def run_daily(
 
     # ── 8. 実行サマリを #運営 へ ──────────────────────────────────────────────
     def _ops_summary() -> dict[str, Any]:
+        # 検疫の件数は毎日必ず出す(解除できない封じ込めの検知可能化 — 審査 C-10)。
+        stats = quarantine_stats(conn, as_of=as_of)
         embed = _build_ops_embed(
             stages, kill_switch=state["kill_switch"], posted=state["posted"],
-            as_of=as_of, dry_run=dry_run,
+            as_of=as_of, dry_run=dry_run, quarantine=stats,
         )
         oid = enqueue(conn, channel_ops, embed, run.run_id)
         state["ops_outbox_id"] = oid
-        return {"ops_outbox_id": oid}
+        detail = {"ops_outbox_id": oid, "quarantine_today": stats["today"]}
+        if _is_mass_quarantine(stats):
+            detail["quarantine_alert_outbox_id"] = enqueue(
+                conn, channel_ops, _build_quarantine_alert(stats, as_of=as_of), run.run_id
+            )
+        return detail
 
     stages.append(_run_stage(conn, "ops_summary", _ops_summary))
 

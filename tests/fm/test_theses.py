@@ -12,7 +12,9 @@ from ryza.fm.theses import (
     ThesisError,
     is_quarantined,
     open_theses_by_instrument,
+    quarantine_stats,
     quarantine_thesis,
+    quarantined_open_instruments,
     recent_theses,
     record_thesis,
     validate_evidence_refs,
@@ -290,6 +292,33 @@ def test_quarantine_table_is_append_only(conn, run, insert_document):
         cur.execute(
             "DELETE FROM trading.fm_theses_quarantine WHERE thesis_id = %s", (thesis_id,)
         )
+
+
+def test_quarantine_stats_counts_today_and_total(conn, run, insert_document):
+    """検疫の発生件数を当日増分・累計・全提案数で返す(mass-quarantine 検知の入力)。"""
+    doc_id = insert_document()
+    refs = [{"kind": "document", "doc_id": doc_id}]
+    ids = [_record(conn, run, evidence_refs=refs, instrument_id=i) for i in (21, 22)]
+    before = quarantine_stats(conn, as_of=datetime.now(UTC))
+    assert before["theses_total"] >= 2
+
+    for thesis_id in ids:
+        quarantine_thesis(conn, thesis_id, reason="注入", quarantined_by="dev-lead")
+    after = quarantine_stats(conn, as_of=datetime.now(UTC))
+    assert after["today"] == before["today"] + 2
+    assert after["total"] == before["total"] + 2
+
+
+def test_quarantined_open_instruments_distinguishes_missing_from_quarantined(
+    conn, run, insert_document
+):
+    """「thesis が無い」と「検疫済み」を区別する(C-11 の判定材料)。"""
+    doc_id = insert_document()
+    refs = [{"kind": "document", "doc_id": doc_id}]
+    thesis_id = _record(conn, run, evidence_refs=refs, instrument_id=31)
+    quarantine_thesis(conn, thesis_id, reason="注入", quarantined_by="dev-lead")
+    # 32 番は thesis を作っていない(= 根拠が最初から無い保有)。
+    assert quarantined_open_instruments(conn, "ben", [31, 32]) == {31}
 
 
 def test_quarantine_truncate_is_blocked(conn):

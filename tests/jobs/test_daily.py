@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 from ryza.bot import killswitch
 from ryza.fm.config import BenConfig
+from ryza.fm.theses import quarantine_thesis, record_thesis
 from ryza.ingest.jquants import JQuantsAuthError
 from ryza.jobs import daily
 from ryza.jobs.daily import make_default_ingest, run_daily, run_ingest_sources
@@ -353,6 +354,71 @@ def test_ben_failure_does_not_roll_back_jim(
             (instrument_id,),
         )
         assert cur.fetchone()[0] == 1
+
+
+# ── 検疫の可視化(独立役員審査 T-017 C-10)────────────────────────────────────
+def _quarantine_theses(conn, run, doc_id, count: int) -> list[int]:
+    """ben の提案を count 件記録し、全て検疫する。"""
+    ids = []
+    for i in range(count):
+        thesis_id = record_thesis(
+            conn, fm="ben", book_id="DEMO_FUND", instrument_id=900 + i,
+            direction="buy", thesis_md="論拠。",
+            evidence_refs=[{"kind": "document", "doc_id": doc_id}],
+            invalidation_md="崩れたら降りる。", producer="test.ben",
+            as_of=datetime.now(UTC), run_id=run.run_id, model="test-mid",
+        )
+        quarantine_thesis(conn, thesis_id, reason="注入", quarantined_by="test")
+        ids.append(thesis_id)
+    return ids
+
+
+def test_ops_summary_always_reports_quarantine_counts(
+    conn, run, llm_config, make_daily_llms, insert_enriched_doc
+):
+    """検疫件数(当日増分/累計)は増分ゼロでも実行サマリに必ず出す。"""
+    _seed(insert_enriched_doc)
+    result, _ = _run(conn, run, llm_config, make_daily_llms)
+    assert result.stage("ops_summary").detail["quarantine_today"] == 0
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT embed_json FROM press.outbox WHERE id = %s",
+            (result.ops_outbox_id,),
+        )
+        embed = cur.fetchone()[0]
+    names = [f["name"] for f in embed["fields"]]
+    assert "検疫(FM 提案)" in names
+
+
+def test_mass_quarantine_raises_alert(
+    conn, run, llm_config, make_daily_llms, insert_enriched_doc
+):
+    """1日の検疫が閾値以上なら #運営 へ別 embed で警告する(silent な抹消を作らない)。"""
+    doc_id = insert_enriched_doc()
+    _quarantine_theses(conn, run, doc_id, daily._QUARANTINE_MASS_COUNT)
+    result, _ = _run(conn, run, llm_config, make_daily_llms)
+
+    detail = result.stage("ops_summary").detail
+    assert detail["quarantine_today"] == daily._QUARANTINE_MASS_COUNT
+    assert "quarantine_alert_outbox_id" in detail
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT embed_json FROM press.outbox WHERE id = %s",
+            (detail["quarantine_alert_outbox_id"],),
+        )
+        embed = cur.fetchone()[0]
+    assert "大量検疫" in embed["title"]
+    assert "解除できない" in embed["description"]
+
+
+def test_mass_quarantine_thresholds():
+    """増分ゼロは警告しない。件数閾値・比率閾値のどちらでも発火する(決定論)。"""
+    assert not daily._is_mass_quarantine({"today": 0, "total": 50, "theses_total": 60})
+    assert daily._is_mass_quarantine(
+        {"today": daily._QUARANTINE_MASS_COUNT, "total": 5, "theses_total": 1000}
+    )
+    assert daily._is_mass_quarantine({"today": 1, "total": 10, "theses_total": 100})
+    assert not daily._is_mass_quarantine({"today": 1, "total": 1, "theses_total": 100})
 
 
 # ── 失敗許容: 一段が落ちても後段は走る ──────────────────────────────────────────
