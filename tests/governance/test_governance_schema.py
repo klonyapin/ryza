@@ -1,4 +1,4 @@
-"""0013_governance_assets.sql とローダの DB 依存部分の受け入れテスト。
+"""0013_governance_assets.sql / 0019_decisions_deemed.sql とローダの DB 依存部分の受け入れテスト。
 
 テスト専用 DB(tests/conftest.py の ``migrated_db``)に対して実行する。
 接続不可なら skip(Docker 未導入環境向け)。テストは commit せず rollback で隔離。
@@ -237,6 +237,59 @@ def test_retraction_requires_target_and_same_role(conn, run_id):
             conn, role="independent_officer", kind="retraction",
             summary="越権撤回", run_id=run2, retracts=sid,
         )
+    conn.rollback()
+
+
+# ── decisions の決定語彙(0019・定款 v0.4 第3条)──────────────────────────
+def _new_decision(cur, proposal_ref: str, decision: str, kind: str = "pr") -> int:
+    cur.execute(
+        """
+        INSERT INTO governance.decisions
+            (proposal_ref, kind, decision, decided_by, note)
+        VALUES (%s, %s, %s, 'representative', 'test')
+        RETURNING id
+        """,
+        (proposal_ref, kind, decision),
+    )
+    return cur.fetchone()[0]
+
+
+def test_deemed_decision_accepted(conn):
+    """みなし承認は decision='deemed' で記録できる(定款 v0.4 第3条)。"""
+    with conn.cursor() as cur:
+        assert _new_decision(cur, "ips-rev-2026-08-deemed", "deemed") > 0
+    conn.rollback()
+
+
+def test_explicit_and_deemed_are_distinct(conn):
+    """明示承認と区別して残る — 監査の deemed_ratio 計算の前提(定款第3条)。"""
+    with conn.cursor() as cur:
+        _new_decision(cur, "live-money-2026-08", "approve", kind="budget")
+        _new_decision(cur, "mandate-rev-2026-08", "deemed")
+        cur.execute(
+            """
+            SELECT decision FROM governance.decisions
+            WHERE proposal_ref IN ('live-money-2026-08', 'mandate-rev-2026-08')
+            ORDER BY proposal_ref
+            """
+        )
+        assert [r[0] for r in cur.fetchall()] == ["approve", "deemed"]
+    conn.rollback()
+
+
+def test_legacy_decisions_still_accepted(conn):
+    """0007 の既存語彙は壊れない(0019 は語彙の拡大のみ)。"""
+    with conn.cursor() as cur:
+        for i, decision in enumerate(("approve", "reject", "question")):
+            assert _new_decision(cur, f"legacy-{i}", decision) > 0
+    conn.rollback()
+
+
+def test_unknown_decision_rejected(conn):
+    """語彙外の決定は CHECK で拒否される(承認記録の語彙を固定する)。"""
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _new_decision(cur, "rubber-stamp-2026-08", "deemed_approved")
     conn.rollback()
 
 
