@@ -1,9 +1,13 @@
 -- 0024: 開発室(代表 ⇄ 設計リードの非同期連絡窓口)— 代表指示 2026-08-03
 --
 -- **採番の注意**: 0021〜0023 は並行開発中の別ブランチが使う予定で予約されている。
--- 本ファイルは 0024 を仮置きしたもので、マージ順によっては番号の付け替えが要る
+-- 本ファイルは 0024 を仮置きしたもので、マージ順の確定時に設計リードが裁定する
 -- (``meta.schema_migrations`` は version 文字列で冪等判定するため、**適用済みの
 -- 環境で番号だけを変えると二重適用になる**。付け替えるなら未適用のうちに行うこと)。
+--
+-- 独立役員審査(docs/reviews/0024-dev-chat-independent-review.md)は条件付き承認。
+-- 重大-1(列レベル権限+inserted_by)・中-3(relayed_at の値域)・中-5(relayed_at の
+-- 意味の統一)・軽-8(トリガの効力の過大主張の訂正)を本ファイルで是正した。
 --
 -- 目的: 代表がブラウザ(ダッシュボード)から設計リード(Claude Code セッション)へ
 -- 開発の連絡を送れるようにする。従来の経路は代表が Discord に書き、設計リードが
@@ -24,28 +28,43 @@
 -- 追記オンリー(0020 の流儀)+ relayed_at だけを例外にする
 -- ────────────────────────────────────────────────────────────────────────────
 -- 代表の指示と設計リードの回答は開発の意思決定の証跡であり、後から書き換えられては
--- ならない(不変原則3)。訂正は追記で行う。一方 relayed_at は「Discord へ中継済みか」
+-- ならない(不変原則3)。訂正は追記で行う。一方 relayed_at は「Discord へ載せたか」
 -- という**中継の冪等制御に必要な唯一の可変状態**で、これだけを UPDATE 可能にする。
--- 0020 が確立した「権限ではなくテーブル自身の性質として強制する」方針に従い、
--- 列の許可はトリガで判定する(REVOKE はテーブル所有ロール ryza には効かないため、
--- 権限だけでは Bot・手動 psql からの改竄を防げない)。
+--
+-- **トリガと権限の役割分担(独立役員審査 軽-8 の訂正)**: 0020 は「権限ではなく
+-- テーブル自身の性質として強制する」と書いたが、これは所有ロールに対しては**言い過ぎ**
+-- である。テーブル所有者は ``ALTER TABLE ... DISABLE TRIGGER USER`` の 1 行でガードを
+-- 無音化できる(その手口はテストフィクスチャ自身が残留行の掃除に使っている)。
+-- したがって本表の防御は次の分担で理解すること:
+--   * **列レベル GRANT**(ops/deploy-dashboard.sh)… 非所有ロール(ダッシュボード)に
+--     対する実効的な境界。捏造の主たる入口をここで塞ぐ
+--   * **トリガ**… 所有ロールで動くコード(Bot・ジョブ・手動 psql)の**事故**と、
+--     非所有ロールからの迂回を防ぐ。悪意ある所有者は止められない
+--   * **inserted_by**(重大-1)… 上記をすり抜けた捏造を**事後に検出可能**にする
+--     監査列。sender と inserted_by の矛盾は A-13 の照合対象になる
 
 CREATE TABLE ops.dev_chat (
     id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    -- 発言者は2者のみ。Discord のオーナー検証や IAP と違い、ここは「誰の発言として
-    -- 表示・中継するか」の宣言であり、認証ではない(認証は IAP / DB ロールが持つ)。
+    -- 発言者は2者のみ。これは「誰の発言として表示・中継するか」の宣言であって認証では
+    -- ない(認証は IAP と DB ロールが持つ)。宣言と実際の書込主体の一致は inserted_by で
+    -- 検証する。
     sender     text NOT NULL CHECK (sender IN ('representative', 'design_lead')),
     body       text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
-    -- 代表の発言を Discord のブリッジチャンネルへ中継した時刻。NULL = 未中継。
-    -- 設計リードの発言は中継対象外(セッション側が直接書くため)で常に NULL。
-    relayed_at timestamptz
+    -- 中継(Discord のブリッジチャンネルへ載せた)時刻。NULL = 未中継。
+    -- **発言者を問わず**中継対象(独立役員審査 中-5: 設計リードの返信が Discord に
+    -- 出ないと、外出中は Discord をミラーとする運用と矛盾する)。
+    relayed_at timestamptz,
+    -- **実際に INSERT を実行した DB ロール**(独立役員審査 重大-1)。既定値を上書き
+    -- できないよう、書込ロールには本列への INSERT 権限を与えない(列レベル GRANT)。
+    -- sender='design_lead' なのに inserted_by='ryza_boardroom' という矛盾は、
+    -- ダッシュボード経由で設計リードの発言を騙った痕跡であり、監査で検出できる。
+    inserted_by text NOT NULL DEFAULT current_user
 );
 
--- 中継ループ(5秒間隔)が引くのは「未中継の代表発言」だけ。行数が増えても走査量が
--- 一定になるよう部分索引を張る。
-CREATE INDEX dev_chat_unrelayed_idx ON ops.dev_chat (id)
-    WHERE relayed_at IS NULL AND sender = 'representative';
+-- 中継ループ(5秒間隔)が引くのは「未中継の発言」だけ。行数が増えても走査量が
+-- 一定になるよう部分索引を張る。sender は条件に含めない(中-5 で両者が中継対象)。
+CREATE INDEX dev_chat_unrelayed_idx ON ops.dev_chat (id) WHERE relayed_at IS NULL;
 
 -- スレッド表示(時系列・直近 N 件)の索引。
 CREATE INDEX dev_chat_created_idx ON ops.dev_chat (created_at);
@@ -54,11 +73,15 @@ CREATE INDEX dev_chat_created_idx ON ops.dev_chat (created_at);
 -- 追記オンリーの強制(0020 C-3 と同型。ただし relayed_at のみ UPDATE を許す)
 -- ────────────────────────────────────────────────────────────────────────────
 -- ops.forbid_mutation(0020)をそのまま使えないのは、それが UPDATE を一律で拒むため。
--- relayed_at の一方向遷移(NULL → 時刻)だけを通す専用ガードを置く。
+-- relayed_at の一方向遷移(NULL → 妥当な時刻)だけを通す専用ガードを置く。
 --   * DELETE は常に拒否
---   * relayed_at 以外の列が変わる UPDATE は拒否(本文・発言者・時刻の事後改竄を塞ぐ)
+--   * relayed_at 以外の列が変わる UPDATE は拒否(本文・発言者・時刻・書込主体の
+--     事後改竄を塞ぐ)
 --   * relayed_at を NULL へ戻す/中継済みを別時刻へ書き換える UPDATE も拒否
 --     (再中継で Discord に同じ連絡が二度流れる経路を DB 層で消す)
+--   * relayed_at の値域は [created_at, now()](独立役員審査 中-3)。投稿より前の
+--     中継時刻や未来時刻は物理的にありえず、滞留の検知(UI の「2 分超未中継」警告)を
+--     欺ける値でもある
 CREATE FUNCTION ops.dev_chat_guard() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -66,12 +89,13 @@ BEGIN
         RAISE EXCEPTION
             'ops.dev_chat の DELETE は禁止(追記オンリー)。開発室の連絡は意思決定の証跡であり、訂正も追記で行う';
     END IF;
-    IF NEW.id         IS DISTINCT FROM OLD.id
-    OR NEW.sender     IS DISTINCT FROM OLD.sender
-    OR NEW.body       IS DISTINCT FROM OLD.body
-    OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    IF NEW.id          IS DISTINCT FROM OLD.id
+    OR NEW.sender      IS DISTINCT FROM OLD.sender
+    OR NEW.body        IS DISTINCT FROM OLD.body
+    OR NEW.created_at  IS DISTINCT FROM OLD.created_at
+    OR NEW.inserted_by IS DISTINCT FROM OLD.inserted_by THEN
         RAISE EXCEPTION
-            'ops.dev_chat で UPDATE できるのは relayed_at のみ(追記オンリー)。本文・発言者・投稿時刻は書き換えられない';
+            'ops.dev_chat で UPDATE できるのは relayed_at のみ(追記オンリー)。本文・発言者・投稿時刻・書込主体は書き換えられない';
     END IF;
     IF OLD.relayed_at IS NOT NULL THEN
         RAISE EXCEPTION
@@ -80,6 +104,11 @@ BEGIN
     IF NEW.relayed_at IS NULL THEN
         RAISE EXCEPTION
             'ops.dev_chat.relayed_at を NULL へ戻すことはできない(中継の冪等が壊れる)';
+    END IF;
+    IF NEW.relayed_at < OLD.created_at OR NEW.relayed_at > now() THEN
+        RAISE EXCEPTION
+            'ops.dev_chat.relayed_at は投稿時刻(%)以降・現在時刻以下でなければならない(受領: %)',
+            OLD.created_at, NEW.relayed_at;
     END IF;
     RETURN NEW;
 END;
@@ -102,12 +131,17 @@ REVOKE TRUNCATE ON ops.dev_chat FROM PUBLIC;
 -- ────────────────────────────────────────────────────────────────────────────
 -- 権限(列レベル)
 -- ────────────────────────────────────────────────────────────────────────────
--- ダッシュボード(役員室ロール ryza_boardroom)への SELECT/INSERT は
--- ops/deploy-dashboard.sh のロール SQL で与える(保護領域 deploy_path。0020 と同じ分担 —
--- ロールはデプロイスクリプトが所有し、マイグレーションはロールの存在を前提にしない)。
+-- ダッシュボード(役員室ロール ryza_boardroom)へは **GRANT SELECT, INSERT (sender, body)**
+-- を ops/deploy-dashboard.sh のロール SQL で与える(保護領域 deploy_path。0020 と同じ
+-- 分担 — ロールはデプロイスクリプトが所有し、マイグレーションはロールの存在を前提に
+-- しない)。表レベルの INSERT にしないのは、created_at の遡及・relayed_at の事前設定
+-- (= Discord に出ないのに中継済み)・inserted_by の詐称を**権限で**拒むため
+-- (独立役員審査 重大-1。ガードは BEFORE UPDATE OR DELETE で INSERT には発火しない)。
+-- **残余リスク**: sender は付与列に含まれるため、ダッシュボードのロールでも
+-- sender='design_lead' の行は作れる。これは代表が UI から設計リードを騙る操作であり、
+-- 権限では止まらない — inserted_by との矛盾として検出する設計にしてある。
 --
--- Bot は現在テーブル所有ロール ryza で動くため、中継の UPDATE に追加の GRANT は要らない
--- (所有者は REVOKE ... FROM PUBLIC の影響を受けない。改竄の防止はトリガが担う)。
+-- Bot は現在テーブル所有ロール ryza で動くため、中継の UPDATE に追加の GRANT は要らない。
 -- 将来 Bot を専用ロールへ分離したとき(ops/reminders.yaml: db-role-separation-webhook-url)
 -- 必要になるのは **relayed_at だけの列レベル UPDATE** である。分離後に付け忘れて
 -- 中継が黙って止まらないよう、ロールが既にあれば今ここで与えておく。
@@ -124,9 +158,12 @@ COMMENT ON TABLE ops.dev_chat IS
     '追記オンリーで、可変なのは relayed_at のみ(0024)。';
 COMMENT ON COLUMN ops.dev_chat.sender IS
     'representative=代表(ダッシュボードの投稿フォーム)/ design_lead=設計リード'
-    '(python -m ryza.governance.devchat --reply)。';
+    '(python -m ryza.governance.devchat --reply)。宣言であり認証ではない — 実書込主体は inserted_by。';
 COMMENT ON COLUMN ops.dev_chat.relayed_at IS
-    '代表発言を Discord のブリッジチャンネルへ中継(press.outbox へ enqueue)した時刻。'
-    'NULL は未中継。設計リードの発言は中継しないため常に NULL。';
+    '発言を Discord のブリッジチャンネルへ中継(press.outbox へ enqueue)した時刻。NULL は未中継。'
+    '代表・設計リードの双方が中継対象(0024・独立役員審査 中-5)。';
+COMMENT ON COLUMN ops.dev_chat.inserted_by IS
+    'INSERT を実行した DB ロール(current_user 既定・書込ロールには列権限を与えない)。'
+    'sender との矛盾は発言者詐称の痕跡であり監査対象(独立役員審査 重大-1)。';
 COMMENT ON FUNCTION ops.dev_chat_guard IS
-    'ops.dev_chat の追記オンリー強制。DELETE を拒み、UPDATE は relayed_at の NULL → 時刻の一方向遷移のみ許す(0024)。';
+    'ops.dev_chat の追記オンリー強制。DELETE を拒み、UPDATE は relayed_at の NULL → [created_at, now()] の一方向遷移のみ許す(0024)。';

@@ -1662,19 +1662,33 @@ _DEV_CHAT_REFRESH_SECONDS = 10
 #: 設計リードの役職キー(``config/org.yaml`` の persona=personas/dev-lead)。
 _DEV_LEAD_ROLE = "dev_lead"
 
+#: この秒数を超えて未中継の発言は「滞留」として警告する(独立役員審査 中-7)。
+#: 正常時の中継は Bot の 5 秒ループで数秒以内に終わるため、2 分は十分に余裕がある。
+#: 中継が全滅しても UI が「中継待ち」と表示し続けて障害が沈黙する経路を塞ぐ。
+_DEV_CHAT_STALE_SECONDS = 120
+
+
+def _dev_relay_caption(msg: devchat.DevChatMessage) -> str:
+    """発言の時刻と中継状態(独立役員審査 中-7 の滞留表示を含む)。
+
+    中継状態を必ず添える。中継前は相手の目にまだ触れていないため、「送ったのに反応が
+    無い」を「まだ届いていない」と区別できないと、同じ連絡を二度書くことになる。
+    """
+    when = f"{msg.created_at:%m-%d %H:%M}"
+    if msg.relayed:
+        return f"{when} / Discord へ中継済み"
+    age = (datetime.now(UTC) - msg.created_at).total_seconds()
+    if age > _DEV_CHAT_STALE_SECONDS:
+        return f"{when} / :red[**中継されていない**({viz.fmt_hours(age / 3600)}経過)]"
+    return f"{when} / 中継待ち(数秒)"
+
 
 def _render_dev_turn(msg: devchat.DevChatMessage) -> None:
-    """1 発言を吹き出し表示する(代表は user 側、設計リードはキャラクター付き)。
-
-    代表の発言には**中継状態**を必ず添える。中継前は設計リードの目にまだ触れて
-    いないため、「送ったのに反応が無い」を「まだ届いていない」と区別できないと、
-    代表は同じ連絡を二度書くことになる。
-    """
+    """1 発言を吹き出し表示する(代表は user 側、設計リードはキャラクター付き)。"""
     if msg.sender == devchat.REPRESENTATIVE:
         with st.chat_message("user"):
             st.markdown(msg.body)
-            state = "設計リードへ中継済み" if msg.relayed else "中継待ち(数秒)"
-            st.caption(f"{msg.created_at:%m-%d %H:%M} / {state}")
+            st.caption(_dev_relay_caption(msg))
         return
     member = _role_member(_DEV_LEAD_ROLE)
     with st.chat_message("assistant", avatar=_role_avatar(_DEV_LEAD_ROLE)):
@@ -1684,7 +1698,24 @@ def _render_dev_turn(msg: devchat.DevChatMessage) -> None:
             unsafe_allow_html=True,
         )
         st.markdown(msg.body)
-        st.caption(f"{msg.created_at:%m-%d %H:%M}")
+        st.caption(_dev_relay_caption(msg))
+
+
+def _dev_chat_stale_warning(conn) -> None:
+    """中継が滞留していることを画面で名指しする(独立役員審査 中-7)。
+
+    Bot が落ちる・DB 権限が欠ける等で中継が全滅しても、個々の吹き出しが「中継待ち」と
+    出るだけでは異常に見えない。**滞留件数と最古の経過時間**を警告として最上部に出す。
+    """
+    stale = devchat.stale_unrelayed(conn, older_than_seconds=_DEV_CHAT_STALE_SECONDS)
+    if not stale:
+        return
+    oldest = (datetime.now(UTC) - stale[0].created_at).total_seconds() / 3600
+    st.warning(
+        f"**{len(stale)} 件が Discord へ中継されていない**(最古 {viz.fmt_hours(oldest)} 前)。"
+        "Bot の配送ループ(bot.devchat.relay)が止まっているか、中継が失敗し続けている。"
+        "「ジョブ」ページで直近の bot.devchat.relay の status を確認すること。"
+    )
 
 
 @st.fragment(run_every=_DEV_CHAT_REFRESH_SECONDS)
@@ -1693,9 +1724,20 @@ def _dev_chat_thread(conn) -> None:
 
     設計リードの返信は数十秒〜数分後に別プロセス(CLI)から入るため、代表が画面を
     手動で更新しなければ届いたことに気付けない。``run_every`` はこの fragment だけを
-    再実行するので、LLM を呼ぶ他ページと違い再取得のコストは SELECT 1 本に収まる。
+    再実行するので、LLM を呼ぶ他ページと違い再取得のコストは SELECT 2 本に収まる。
+
+    **例外は必ず捕まえる**(独立役員審査 軽-9)。``@st.cache_resource`` が保持する接続は
+    DB の再起動やアイドル切断で死ぬことがあり、fragment の中で例外が出ると自動更新が
+    その場で止まって「返信が来ない」ように見える。接続キャッシュを捨てて次の周期で
+    開き直させる。
     """
-    messages = devchat.fetch_thread(conn, limit=_DEV_CHAT_LIMIT)
+    try:
+        _dev_chat_stale_warning(conn)
+        messages = devchat.fetch_thread(conn, limit=_DEV_CHAT_LIMIT)
+    except Exception as exc:  # noqa: BLE001 - 自動更新を止めない(次周期で再接続)
+        _boardroom_conn.clear()
+        st.error(f"スレッドを取得できなかった(次の自動更新で再接続する): {exc}")
+        return
     if not messages:
         st.info("まだ連絡はない。下の入力欄から設計リードへ送る。")
     for msg in messages:
@@ -1723,7 +1765,8 @@ def page_dev_chat() -> None:
     st.caption(
         f"投稿は ops.dev_chat(追記オンリー・0024)に残り、Bot が Discord の #dev へ"
         f"「{devchat.RELAY_PREFIX}…」の形で中継する。設計リードの返信は "
-        "`python -m ryza.governance.devchat --reply` で同じスレッドへ入る。"
+        "`python -m ryza.governance.devchat --reply` で同じスレッドへ入り、"
+        "**双方向とも Discord に出る**(外出中は Discord をミラーとして読める)。"
         "**ここでの連絡は指示であって承認ではない** — 保護領域の変更には"
         "従来どおり承認記録が要る(定款第5条)。"
     )

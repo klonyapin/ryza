@@ -118,6 +118,28 @@ def test_ledger_integrity_triggers_exist(conn):
         assert name in triggers, f"トリガ {name} が存在しない"
 
 
+def test_dev_chat_guard_triggers_exist_and_are_enabled(conn):
+    """0024 のガードが存在し、**有効**であること(独立役員審査 軽-8)。
+
+    トリガの存在だけを見ても足りない。所有ロールは
+    ``ALTER TABLE ops.dev_chat DISABLE TRIGGER USER`` の 1 行でガードを無音化でき
+    (その手口は本テストスイートのフィクスチャ自身が残留行の掃除に使っている)、
+    ``tgenabled`` が 'D' に落ちたまま元に戻し忘れれば追記オンリーは空手形になる。
+    'O'(= origin/local のセッション複製設定で発火)であることまで確認する。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT tgname, tgenabled FROM pg_trigger
+            WHERE tgrelid = 'ops.dev_chat'::regclass AND NOT tgisinternal
+            ORDER BY tgname
+            """
+        )
+        triggers = dict(cur.fetchall())
+    assert set(triggers) == {"dev_chat_append_only", "dev_chat_no_truncate"}
+    assert all(state == "O" for state in triggers.values()), triggers
+
+
 def test_bars_is_partitioned(conn):
     with conn.cursor() as cur:
         cur.execute(

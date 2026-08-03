@@ -155,10 +155,14 @@ def _seed(conn, run, *, sufficient: bool = True) -> None:
         cur.execute("ALTER TABLE ops.dev_chat DISABLE TRIGGER USER")
         cur.execute("DELETE FROM ops.dev_chat")
         cur.execute("ALTER TABLE ops.dev_chat ENABLE TRIGGER USER")
+        # 1 件目は 10 分前の未中継(中継が止まっている状態 — 独立役員審査 中-7 の
+        # 滞留警告の系統)。残り 2 件は直近の会話。
         cur.execute(
             """
-            INSERT INTO ops.dev_chat (sender, body) VALUES
-                ('representative', '代表からの連絡'), ('design_lead', '設計リードの返信')
+            INSERT INTO ops.dev_chat (sender, body, created_at) VALUES
+                ('representative', '滞留している連絡', now() - interval '10 minutes'),
+                ('representative', '代表からの連絡', now()),
+                ('design_lead', '設計リードの返信', now())
             """
         )
 
@@ -440,6 +444,17 @@ def test_dev_chat_renders_thread_in_chronological_order(conn, app):
 def test_dev_chat_shows_relay_state_of_representative_messages(app):
     captions = [str(c.value) for c in app("開発室").caption]
     assert any("中継待ち" in c for c in captions), captions
+
+
+def test_dev_chat_warns_when_relay_is_stalled(app):
+    """独立役員審査 中-7: 中継が止まっていることを「中継待ち」で沈黙させない。"""
+    at = app("開発室")
+    warnings = [str(w.value) for w in at.warning]
+    stalled = next((w for w in warnings if "中継されていない" in w), None)
+    assert stalled is not None, warnings
+    assert "1 件" in stalled and "bot.devchat.relay" in stalled
+    # 個々の吹き出しにも滞留を出す(赤字)。
+    assert any(":red[" in str(c.value) for c in at.caption)
 
 
 def test_dev_chat_input_appends_to_the_thread(conn, app):
