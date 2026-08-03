@@ -299,8 +299,42 @@ def replay_position(
     (それは締めの原価恒等式が名指しする)。株式分割・併合・現物払戻も未対応のため同じく
     拒否される — 対応するときは証憑 kind を足してここに再生を書く。
     """
+    qty = Decimal(0)
+    cost = Decimal(0)
+    for _day, _entry_id, side, f_qty, f_price in position_events(
+        conn, book_id, instrument_id, as_of=as_of
+    ):
+        if side == "buy":
+            qty += f_qty
+            cost += f_qty * f_price
+        elif side == "sell":
+            if qty <= 0:
+                continue
+            released = cost * f_qty / qty
+            cost -= released
+            qty -= f_qty
+    return qty, cost
+
+
+def position_events(
+    conn: psycopg.Connection,
+    book_id: str,
+    instrument_id: int,
+    *,
+    as_of: _date | None = None,
+) -> list[tuple[_date, int, str, Decimal, Decimal]]:
+    """建玉イベントを ``(entry_date, entry_id, side, qty, price)`` の列で返す。
+
+    並びは ``replay_position`` と同じ ``(entry_date, entry_id)``(その再生の入力そのもの
+    であり、両者が別の順序を見ないよう 1 か所に集約している)。除外規則も同じ —
+    ``POSITION_EVIDENCE_KINDS`` の証憑を持つ仕訳のうち、逆仕訳エントリ自体と
+    ``as_of`` までに取り消されたものを落とす。
+
+    数量だけを時系列で見たい呼び出し(``post_fill`` の売却可能性検査)が、原価の畳み込みを
+    経ずに同じイベント列へ到達するために公開している。
+    """
     sql = """
-        SELECT e.kind, je.evidence_id, e.payload_ref
+        SELECT je.entry_date, je.entry_id, e.kind, je.evidence_id, e.payload_ref
         FROM ledger.journal_entries je
         JOIN ledger.evidence e ON e.evidence_id = je.evidence_id
         WHERE je.book_id = %s
@@ -320,29 +354,75 @@ def replay_position(
         )
         rows = cur.fetchall()
 
-    qty = Decimal(0)
-    cost = Decimal(0)
-    for kind, evidence_id, payload_ref in rows:
+    events: list[tuple[_date, int, str, Decimal, Decimal]] = []
+    for day, entry_id, kind, evidence_id, payload_ref in rows:
         fill = load_evidence_payload(conn, evidence_id, payload_ref)
         if not isinstance(fill, dict):
             continue
         if int(fill.get("instrument_id", -1)) != int(instrument_id):
             continue
-        f_qty = to_decimal(fill["qty"])
-        f_price = to_decimal(fill["price"])
         # 現物拠出は取得(買い)と同じ向きで建玉を積む。売り方向の現物払戻は未対応
         # (証憑 kind を分けて side を持たせる拡張になる)。
         side = "buy" if kind == "in_kind_contribution" else fill["side"]
-        if side == "buy":
-            qty += f_qty
-            cost += f_qty * f_price
-        elif side == "sell":
-            if qty <= 0:
-                continue
-            released = cost * f_qty / qty
-            cost -= released
-            qty -= f_qty
-    return qty, cost
+        events.append(
+            (day, entry_id, side, to_decimal(fill["qty"]), to_decimal(fill["price"]))
+        )
+    return events
+
+
+def worst_running_qty_with_sell(
+    events: list[tuple[_date, int, str, Decimal, Decimal]],
+    *,
+    entry_date: _date,
+    qty: Decimal,
+) -> tuple[Decimal, _date]:
+    """候補の売りを日付位置に挿入した**全履歴**再生の、running 数量の最小値とその日を返す。
+
+    **なぜ ``as_of=entry_date`` 時点の保有数量では足りないのか**(独立審査 再22-1)。
+    売却可能性は「その日に何株持っていたか」ではなく「**入れた後の全履歴のどの時点でも
+    建玉が負にならないか**」である。``as_of`` だけで見ると、**後日付の売りが既に記帳されて
+    いるとき同じ株を二重に払い出せる**(審査実測 P3: 買 d0 100 → 売 d3 100 を記帳した後の
+    売 d1 50 が受理され、qty=−50 の幻の売建が立つ)。しかもこの状態で**原価恒等式は沈黙
+    する** — 残高も再生も同じ −25,000 になるためであり、締めに負数量の検査は無い。
+    新-22 の是正が検出器の偽陽性を消す代償に記帳ガードへ開けた穴であり、``as_of`` 判定に
+    **加えて**塞ぐ必要がある。
+
+    **単純な「全期間 ``qty >= q`` との AND」では足りない**(同審査)。買いが後日付で先行して
+    いると、途中に負の区間があっても期末残高は正になりうる(手計算: 買 d0 100 / 買 d4 100 /
+    売 d3 60 が記帳済みのとき、売 d1 100 は ``as_of=d1`` で 100、全期間で 140 とどちらも
+    通るが、挿入後の推移は d1:0 → **d3:−60** → d4:40 で d3 に負区間ができる)。見るべきは
+    端点ではなく**最小値**である。
+
+    挿入位置は「``entry_date`` の**末尾**」— いま記帳する仕訳は最大の ``entry_id`` を得る
+    ため、``(entry_date, entry_id)`` 順で同日の既存イベントの後ろに落ちる。判定と実際の
+    再生順が一致していなければ、通した記帳が翌日の恒等式で鳴る。
+
+    最小値は**各イベント適用後**の状態について取る(記帳前の残高ゼロは含めない — 含めると
+    健全な帳簿でも常に 0 になり「どれだけ余裕があるか」を返せなくなる)。戻り値の日付は
+    最小値が発生した日(``entry_date`` を含む)であり、拒否メッセージが「いつ足りないのか」
+    を名指しするために使う。売却可能性の判定は ``最小値 >= 0``。
+    """
+    running = Decimal(0)
+    worst: tuple[Decimal, _date] | None = None
+    inserted = False
+
+    def observe(value: Decimal, day: _date) -> None:
+        nonlocal worst
+        if worst is None or value < worst[0]:
+            worst = (value, day)
+
+    for day, _entry_id, side, ev_qty, _price in events:
+        if not inserted and day > entry_date:
+            running -= qty
+            observe(running, entry_date)
+            inserted = True
+        running += ev_qty if side == "buy" else -ev_qty
+        observe(running, day)
+    if not inserted:
+        running -= qty
+        observe(running, entry_date)
+    assert worst is not None  # 候補の売りが必ず 1 点観測される
+    return worst
 
 
 def held_instruments(conn: psycopg.Connection, book_id: str) -> list[int]:

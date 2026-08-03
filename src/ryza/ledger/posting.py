@@ -241,8 +241,15 @@ def post_fill(
     (d2 の締めでは消える)。毎日 #運営 に流す検査なので、偽陽性の第一の源は先に潰す
     (通知疲れは検出器を殺す)。新-13 が ``post_mark_to_market`` で行った是正と同型である。
 
-    保有超過の判定も同じ日付境界になる。d1 に 100 株しか持たない銘柄を d1 付けで 150 株
-    売る記帳は、d2 の買いが先に入っていても拒否される — これは仕様である(不変原則4)。
+    **売却可能性の判定は原価の日付境界とは別物である**(独立審査 再22-1)。原価は
+    ``as_of=entry_date`` で切るが、**売れるかどうかは全履歴で見る** — 候補の売りを
+    ``entry_date`` の位置に挿入した全期間再生で、running 数量が全時点で 0 以上であることを
+    要求する(``_util.worst_running_qty_with_sell``)。``as_of`` の保有数量だけで通すと、
+    **後日付の売りが既に記帳されているとき同じ株を二重に払い出せる**(審査実測 P3: 買 d0
+    100 → 売 d3 100 を記帳した後の 売 d1 50 が受理され qty=−50 の幻の売建が立つ。
+    しかも残高も再生も −25,000 で一致するため**原価恒等式は沈黙する**)。全期間の期末数量
+    との AND でも足りない — 買いが後日付で先行していると途中の負区間を見逃す。端点ではなく
+    最小値を見ること。
 
     **これ単独では偽陽性は消えない**: ``replay_position`` の再生順も
     ``(entry_date, entry_id)`` にする必要がある(同関数の docstring)。``entry_id`` 順のまま
@@ -291,16 +298,23 @@ def post_fill(
         lines.append({"account_id": "cash", "credit": gross + f, "currency": currency})
         desc = f"買約定 銘柄{instrument_id} {q}@{p}"
     else:
-        # 恒等式と同じ日付境界で切る(新-22)。全期間再生にすると後日付の買いが
+        # 売却可能性は**全履歴**で見る(独立審査 再22-1)。``as_of=entry_date`` の保有数量
+        # だけで通すと、後日付の売りが記帳済みのとき同じ株を二重に払い出せる。
+        worst_qty, worst_day = _util.worst_running_qty_with_sell(
+            _util.position_events(conn, book_id, instrument_id),
+            entry_date=entry_date,
+            qty=q,
+        )
+        if worst_qty < 0:
+            raise ValueError(
+                f"売り数量が保有を超過: sell={q} で建玉が負になる"
+                f"(銘柄{instrument_id} {worst_day.isoformat()} 時点で {worst_qty})"
+            )
+        # 原価は恒等式と同じ日付境界で切る(新-22)。全期間再生にすると後日付の買いが
         # 平均原価に混ざり、その日の securities 残高と再生原価がずれる。
         held_qty, cost = _util.replay_position(
             conn, book_id, instrument_id, as_of=entry_date
         )
-        if q > held_qty:
-            raise ValueError(
-                f"売り数量が保有を超過: sell={q} held={held_qty}"
-                f"(銘柄{instrument_id} {entry_date.isoformat()} 時点)"
-            )
         cost_released = cost * q / held_qty if held_qty > 0 else Decimal(0)
         realized = gross - cost_released  # 正=実現益
 
