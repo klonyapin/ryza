@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import urllib.error
+import urllib.request
+
+import pytest
+
 from ryza.bot import COLOR_FLASH, webhooks
 
 
@@ -47,6 +52,34 @@ def test_post_body_moves_mention_to_content_and_sets_urgent_color():
 def test_post_body_plain():
     body = webhooks.build_post_body({"title": "t", "color": 2})
     assert body == {"embeds": [{"title": "t", "color": 2}]}
+
+
+# ── URL マスキング(独立役員審査 2026-08-03 の条件)──────────────────────────
+def test_mask_url_hides_token():
+    url = "https://discord.com/api/webhooks/123456789/SECRET-token_abc"
+    assert webhooks.mask_url(url) == "https://discord.com/api/webhooks/123456789/***"
+
+
+def test_mask_url_unexpected_format_hides_everything():
+    assert webhooks.mask_url("not-a-webhook-url") == "<webhook url masked>"
+    assert webhooks.mask_url("") == "<webhook url masked>"
+
+
+def test_post_failure_masks_url(monkeypatch):
+    """投稿失敗の例外メッセージ・連鎖に生 URL(トークン)が混入しない。"""
+    url = "https://discord.com/api/webhooks/42/SECRETTOKEN"
+
+    def _boom(req, timeout):
+        raise urllib.error.URLError(f"cannot reach {url}?wait=true")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    with pytest.raises(webhooks.WebhookPostError) as exc_info:
+        webhooks.post(url, {"title": "t"})
+    message = str(exc_info.value)
+    assert "SECRETTOKEN" not in message
+    assert "webhooks/42/***" in message
+    # from None で元例外の連鎖を切っている(トレースバック経由の漏洩も防ぐ)。
+    assert exc_info.value.__cause__ is None and exc_info.value.__context__ is None
 
 
 # ── DB 記録(ops.discord_webhooks・0017)─────────────────────────────────────

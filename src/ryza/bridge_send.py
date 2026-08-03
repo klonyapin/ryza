@@ -17,12 +17,21 @@
 使い方: ``echo "本文" | python -m ryza.bridge_send [--title タイトル]``
 DB・discord.py に依存しない(stdlib の urllib のみ)。Bot 本体の outbox 経路とは
 独立の軽量経路(開発対話用)。
+
+**資格情報の分散について(独立役員審査 2026-08-03 の注記)**: 本ブリッジの秘密
+(Bot トークン・webhook URL)は ``~/.ryza/discord_bot.env`` に、Bot 本体の webhook
+URL は DB(``ops.discord_webhooks``・0017)にあり、保管が 2 系統に分散している。
+webhook URL は知っていれば誰でも投稿できる秘密のため、エラー経路では必ずマスク
+(``_mask_webhook_url``)して出力する。保管の一元化・最小権限化は DB ロール分離
+(実弾移行前提)と合わせて行う(``ops/reminders.yaml`` の
+``db-role-separation-webhook-url`` に登録済み)。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 import urllib.request
@@ -39,6 +48,16 @@ _CHUNK_LIMIT = 3800
 
 # ブリッジの名義は役職キーで引く(台帳の改名・キャラ変更に自動追従)。
 BRIDGE_ROLE = "dev_lead"
+
+# webhooks.mask_url と同じマスク形式。bot.webhooks を import しないのは、本モジュールを
+# stdlib のみ(psycopg 非依存)に保つため(docstring の軽量経路の約束)。
+_WEBHOOK_URL_RE = re.compile(r"(?P<prefix>.*?/webhooks/\d+)/\S+")
+
+
+def _mask_webhook_url(url: str) -> str:
+    """エラー出力用に webhook URL のトークン部を隠す(``.../webhooks/<id>/***``)。"""
+    m = _WEBHOOK_URL_RE.match(url)
+    return f"{m.group('prefix')}/***" if m else "<webhook url masked>"
 
 
 def load_env(path: Path = _ENV_PATH) -> dict[str, str]:
@@ -114,7 +133,14 @@ def send(text: str, *, title: str | None = None, env: dict[str, str] | None = No
                 "username": member.display_name,
                 "avatar_url": member.icon_url,
             }
-            _post_json(webhook_url, body, {})
+            try:
+                _post_json(webhook_url, body, {})
+            except Exception as exc:  # noqa: BLE001 - URL をマスクして報告(トークン漏洩防止)
+                detail = str(exc).replace(webhook_url, _mask_webhook_url(webhook_url))
+                raise SystemExit(
+                    f"webhook 送信失敗({_mask_webhook_url(webhook_url)}): "
+                    f"{type(exc).__name__}: {detail}"
+                ) from None
             time.sleep(0.5)
         return len(embeds)
 

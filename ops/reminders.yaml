@@ -151,3 +151,15 @@ reminders:
       labels: [impl]
       body: "A-13(src/ryza/audit/a13.py)は git 履歴とデータベース(press.outbox)の両方を必要とするため、Cloud Run 版 ops-weekly では走らずスキップされる(週次ダイジェストに「スキップ(A13_REPO_PATH 未配線)」と表示)。GCE VM 上(daily と同居)で A13_REPO_PATH を設定した週次実行(systemd timer 等)を配線し、ダイジェストの A-13 行が「実行」になることを確認する。checkout の定期更新(git fetch/pull)も運用側で用意する(A-13 自身は read-only で fetch しない)。"
     status: pending
+
+  - id: db-role-separation-webhook-url
+    what: "DB ロール分離: ops.discord_webhooks(webhook URL)の読取を配送コンポーネント専用ロールへ限定(実弾移行前提)"
+    conditions:
+      - type: date_after
+        date: "2026-09-01"
+    action:
+      type: issue_create
+      title: "DB ロール分離: webhook URL(ops.discord_webhooks)の最小権限化"
+      labels: [impl]
+      body: "ops.discord_webhooks.webhook_url は URL を知る者が誰でも当該チャンネルへ投稿できる秘密で、Bot トークンより露出面が広い(独立役員審査 2026-08-03・migrations/0017)。現構成は単一 DB ロール(ryza)でアプリ全体が動くため、同一ロール内での読取制限は不可能。実弾移行までに配送コンポーネント(Bot)専用の DB ロールを分離し、他ジョブのロールからは REVOKE する。~/.ryza(ブリッジ資格情報)と DB に分散している秘密の保管一元化も同時に検討する。デモ期間は単一利用者 VM・非公開 DB のため残余リスクを受容(0017 冒頭コメント)。"
+    status: pending

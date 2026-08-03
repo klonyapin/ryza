@@ -21,6 +21,7 @@ REST POST(stdlib urllib)で、``payload_for`` / ``build_post_body`` は純関数
 from __future__ import annotations
 
 import json
+import re
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
@@ -31,6 +32,23 @@ from ryza.bot import COLOR_FLASH
 
 # ensure する webhook の表示名(全チャンネル共通)。
 WEBHOOK_NAME = "ryza-org"
+
+_WEBHOOK_URL_RE = re.compile(r"(?P<prefix>.*?/webhooks/\d+)/\S+")
+
+
+class WebhookPostError(RuntimeError):
+    """webhook 投稿の失敗。メッセージ中の URL は常にマスク済み(トークンを漏らさない)。"""
+
+
+def mask_url(webhook_url: str) -> str:
+    """ログ・例外用に webhook URL のトークン部を隠す(``.../webhooks/<id>/***``)。
+
+    webhook URL はトークン込みで「知っていれば誰でも投稿できる」秘密(0017 冒頭
+    コメント)。URL を文字列化しうる経路(例外メッセージ・ログ)は必ずここを通す。
+    形式が想定外の文字列は ID すら出さず全体を伏せる。
+    """
+    m = _WEBHOOK_URL_RE.match(webhook_url)
+    return f"{m.group('prefix')}/***" if m else "<webhook url masked>"
 
 
 @dataclass(frozen=True)
@@ -83,6 +101,8 @@ def post(webhook_url: str, embed: dict[str, Any], *, urgent: bool = False) -> st
     """webhook へ 1 件投稿し Discord メッセージ ID を返す(失敗時は例外 → outbox 再送)。
 
     ``?wait=true`` でメッセージ本体を受け取り、``outbox.mark_sent`` に渡す ID を得る。
+    失敗は ``WebhookPostError``(URL マスク済み・``from None`` で元例外の連鎖も切る)に
+    包み直し、呼び出し側のログ・トレースバックへ生 URL が混入しないようにする。
     """
     data = json.dumps(build_post_body(embed, urgent=urgent)).encode("utf-8")
     req = urllib.request.Request(
@@ -91,8 +111,20 @@ def post(webhook_url: str, embed: dict[str, Any], *, urgent: bool = False) -> st
         headers={"Content-Type": "application/json", "User-Agent": "RyzaBot/1.0"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 - Discord API 固定
-        message = json.load(resp)
+    masked_error: WebhookPostError | None = None
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 - Discord API 固定
+            message = json.load(resp)
+    except Exception as exc:  # noqa: BLE001 - マスクして包み直す(トークン漏洩防止)
+        detail = str(exc).replace(webhook_url, mask_url(webhook_url))
+        masked_error = WebhookPostError(
+            f"webhook 投稿失敗({mask_url(webhook_url)}): "
+            f"{type(exc).__name__}: {detail}"
+        )
+    if masked_error is not None:
+        # except ブロックの外で raise することで __context__ も空にする
+        # (from None は表示を抑止するだけで連鎖オブジェクト自体は残るため)。
+        raise masked_error from None
     return str(message["id"])
 
 
@@ -128,7 +160,9 @@ def resolve_webhook(conn: psycopg.Connection, logical: str) -> str | None:
 __all__ = [
     "WEBHOOK_NAME",
     "WebhookPayload",
+    "WebhookPostError",
     "build_post_body",
+    "mask_url",
     "payload_for",
     "post",
     "record_webhook",

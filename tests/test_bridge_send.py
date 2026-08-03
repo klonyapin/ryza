@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from ryza import bridge_send, org
 
 
@@ -34,6 +36,27 @@ def test_build_embeds_title_only_on_first_chunk():
     assert embeds[0]["title"] == "長文"
     assert "title" not in embeds[1]
     assert all(e["author"]["name"] == member.display_name for e in embeds)
+
+
+def test_mask_webhook_url_matches_bot_format():
+    url = "https://discord.com/api/webhooks/99/tok-en"
+    assert bridge_send._mask_webhook_url(url) == "https://discord.com/api/webhooks/99/***"
+    assert bridge_send._mask_webhook_url("junk") == "<webhook url masked>"
+
+
+def test_send_failure_masks_webhook_url(monkeypatch):
+    """webhook 送信失敗時のエラー出力に生 URL(トークン)が混入しない。"""
+    url = "https://discord.com/api/webhooks/7/TOPSECRET"
+
+    def _boom(u, body, headers):
+        raise OSError(f"connect failed: {u}")
+
+    monkeypatch.setattr(bridge_send, "_post_json", _boom)
+    with pytest.raises(SystemExit) as exc_info:
+        bridge_send.send("本文", env={"DISCORD_WEBHOOK_URL": url})
+    message = str(exc_info.value)
+    assert "TOPSECRET" not in message
+    assert "webhooks/7/***" in message
 
 
 def test_load_env_missing_file(tmp_path):
