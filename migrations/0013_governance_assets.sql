@@ -13,11 +13,10 @@
 --                        直近 N 件を読み込む(「前回私はこう懸念した」の引き継ぎ — 05 §2)
 --
 -- 整合性の要:
---   1. 議事録と決議は証憑(05 §4「決議は証憑となり監査 A-5 の対象」)なので追記オンリー。
---      UPDATE / DELETE はトリガで禁止する(0005 の ledger.forbid_mutation と同型)
---   2. stances は追記オンリー運用だがトリガでは縛らない(要約の性質上、誤記の削除余地を残す。
---      正本は minutes 側にあり、stances は着任用の派生キャッシュ)
---   3. 全テーブル run_id 必須(リネージ — 不変原則3)
+--   1. 議事録・決議・stances は証憑・引継記録なのですべて追記オンリー(05 §4・§6-3)。
+--      UPDATE / DELETE はトリガで禁止する(0005 の ledger.forbid_mutation と同型)。
+--      stances の訂正は撤回行の追記で表現する(kind='retraction' + retracts 参照 — 下記)
+--   2. 全テーブル run_id 必須+meta.runs への FK(リネージ — 不変原則3・0001 の慣行)
 --
 -- 冪等: IF NOT EXISTS / CREATE OR REPLACE。
 
@@ -37,7 +36,7 @@ CREATE TABLE IF NOT EXISTS governance.minutes (
     attendees  text[] NOT NULL CHECK (cardinality(attendees) >= 1),
                -- 役職名の配列(representative|cio|independent_officer|audit — governance.yaml roles)
     body_md    text NOT NULL,               -- 全対話(Markdown)。要約でなく全文を残す(05 §4)
-    run_id     bigint NOT NULL,             -- 記録したジョブ実行(リネージ)
+    run_id     bigint NOT NULL REFERENCES meta.runs (run_id),  -- 記録したジョブ実行(リネージ)
     created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS minutes_meeting_idx ON governance.minutes (meeting, held_at);
@@ -51,7 +50,8 @@ CREATE TABLE IF NOT EXISTS governance.minute_resolutions (
     title         text NOT NULL,
     resolution_md text NOT NULL,            -- 決議本文(反対意見・却下理由も残す — 05 §6-3)
     proposal_ref  text,                     -- 承認事項なら governance.decisions.proposal_ref と突合
-    resolved_by   text NOT NULL,            -- 決議者(代表のみ — 05 §5)
+    resolved_by   text NOT NULL             -- 決議者。決議ボタンは代表のみ押せる(05 §5)を CHECK で強制
+                  CHECK (resolved_by = 'representative'),  -- governance.yaml roles のキー
     created_at    timestamptz NOT NULL DEFAULT now(),
     UNIQUE (minute_id, seq)
 );
@@ -81,19 +81,36 @@ REVOKE UPDATE, DELETE ON governance.minute_resolutions FROM PUBLIC;
 -- role は CHECK で縛らない: governance.yaml roles が正であり、役職の追加(FM ポッド等)の
 -- たびにスキーマ変更を要しないため。妥当性はローダ(src/ryza/governance/personas.py)と
 -- 監査 A-13(governance.yaml との突合)が担う。
+--
+-- 追記オンリー+撤回行方式(独立役員審査 2026-08-03 の是正1): 着任時の引継記録が
+-- 事後改変されると「前回の懸念」の証跡性が失われるため、minutes と同様に UPDATE/DELETE を
+-- 禁止する。訂正は kind='retraction' の行を追記し retracts で対象行を指す方式を採用
+-- (superseded_by 列を対象行に書く方式は、対象行の UPDATE を要するため追記オンリーと
+-- 両立しない)。ローダは撤回された行と撤回行自体を除外して読む。
 CREATE TABLE IF NOT EXISTS governance.stances (
     stance_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     role      text NOT NULL,                -- cio|independent_officer|audit ...(governance.yaml roles)
     kind      text NOT NULL
-              CHECK (kind IN ('claim',      -- 主張
-                              'concern',    -- 懸念(独立役員は毎回最低1件 — 05 §3)
-                              'dissent')),  -- 反対意見・少数意見(議論規約2)
+              CHECK (kind IN ('claim',        -- 主張
+                              'concern',      -- 懸念(独立役員は毎回最低1件 — 05 §3)
+                              'dissent',      -- 反対意見・少数意見(議論規約2)
+                              'retraction')), -- 撤回(訂正の追記表現。summary に理由)
     summary   text NOT NULL,                -- 要約(着任プロンプトに添付される)
     minute_id bigint REFERENCES governance.minutes (minute_id),  -- 出所議事録(あれば)
+    retracts  bigint REFERENCES governance.stances (stance_id),  -- 撤回対象(retraction のみ必須)
     stated_at timestamptz NOT NULL DEFAULT now(),
-    run_id    bigint NOT NULL               -- 記録したジョブ実行(リネージ)
+    run_id    bigint NOT NULL REFERENCES meta.runs (run_id),  -- 記録したジョブ実行(リネージ)
+    CHECK ((kind = 'retraction') = (retracts IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS stances_role_idx ON governance.stances (role, stated_at DESC);
+CREATE INDEX IF NOT EXISTS stances_retracts_idx ON governance.stances (retracts)
+    WHERE retracts IS NOT NULL;
+
+CREATE OR REPLACE TRIGGER stances_no_mutation
+    BEFORE UPDATE OR DELETE ON governance.stances
+    FOR EACH ROW EXECUTE FUNCTION governance.forbid_mutation();
+
+REVOKE UPDATE, DELETE ON governance.stances FROM PUBLIC;
 
 -- ────────────────────────────────────────────────────────────────────────────
 -- データカタログ用コメント
@@ -113,7 +130,11 @@ COMMENT ON COLUMN governance.minute_resolutions.proposal_ref IS
 COMMENT ON COLUMN governance.minute_resolutions.resolved_by IS '決議者。決議ボタンは代表のみ(05 §5)。';
 
 COMMENT ON TABLE governance.stances IS
-    '役職ごとの主張・懸念の要約。着任時に直近 N 件を読み込む(05 §2 永続記憶)。正本は minutes。';
+    '役職ごとの主張・懸念の要約(追記オンリー)。着任時に直近 N 件を読み込む(05 §2 永続記憶)。'
+    '正本は minutes。訂正は retraction 行の追記で表現。';
 COMMENT ON COLUMN governance.stances.role IS 'governance.yaml roles のキー(cio 等)。';
-COMMENT ON COLUMN governance.stances.kind IS 'claim(主張)|concern(懸念)|dissent(反対・少数意見)。';
+COMMENT ON COLUMN governance.stances.kind IS
+    'claim(主張)|concern(懸念)|dissent(反対・少数意見)|retraction(撤回)。';
 COMMENT ON COLUMN governance.stances.minute_id IS '出所議事録(governance.minutes)。無ければ NULL。';
+COMMENT ON COLUMN governance.stances.retracts IS
+    '撤回対象の stance_id(kind=retraction のみ・CHECK で強制)。撤回された行はローダが除外する。';

@@ -8,9 +8,11 @@
 **本モジュールは LLM を呼ばない**(純粋な読み込み・組み立てのみ)。呼び出しは
 役員室チャット(ダッシュボード実装時)・月次委員会ジョブの管轄。
 
-独立性の担保(05 §6-2): stances は role 単位で分離して読む。独立役員は執行側と
-プロンプト資産・記憶を共有しないため、本モジュールは常に単一 role の資産のみを
-扱い、他 role の記憶を混ぜる API を持たない。
+独立性について(05 §6-2): stances は role 単位で分離して読み、本モジュールは
+単一 role の資産のみを扱う API とする。ただしこれは**慣習+テストによる分離**で
+あり、DB レベルの強制(RLS・役職別資格情報の分離)は未実装。執行側コードが
+他 role の stances を直接 SELECT することを物理的には防げない点に注意
+(強制化は役員室・監査ジョブ実装時の課題)。
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ _PERSONA_ROOT = Path(__file__).resolve().parents[3] / "personas"
 # アンダースコアを用いるため、両表記を受け付けて正規化する。
 OFFICER_ROLES = ("cio", "independent_officer", "audit")
 
-_KIND_LABELS = {"claim": "主張", "concern": "懸念", "dissent": "反対意見"}
+_KIND_LABELS = {"claim": "主張", "concern": "懸念", "dissent": "反対意見", "retraction": "撤回"}
 
 
 def _dir_name(role: str) -> str:
@@ -91,16 +93,34 @@ def record_stance(
     summary: str,
     run_id: int,
     minute_id: int | None = None,
+    retracts: int | None = None,
 ) -> int:
-    """主張・懸念の要約を ``governance.stances`` に追記する(05 §4)。"""
+    """主張・懸念の要約を ``governance.stances`` に追記する(05 §4)。
+
+    テーブルは追記オンリー(UPDATE/DELETE 禁止トリガ)。訂正は
+    ``kind='retraction'`` + ``retracts=<対象 stance_id>`` の行を追記する。
+    撤回は自 role の行に対してのみ許す(他 role の記憶を消させない)。
+    """
+    if retracts is not None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT role FROM governance.stances WHERE stance_id = %s", (retracts,)
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise ValueError(f"撤回対象 stance_id={retracts} が存在しない")
+        if row[0] != _db_role(role):
+            raise ValueError(
+                f"role '{_db_role(role)}' は role '{row[0]}' の stance を撤回できない"
+            )
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO governance.stances (role, kind, summary, minute_id, run_id)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO governance.stances (role, kind, summary, minute_id, retracts, run_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING stance_id
             """,
-            (_db_role(role), kind, summary, minute_id, run_id),
+            (_db_role(role), kind, summary, minute_id, retracts, run_id),
         )
         return cur.fetchone()[0]
 
@@ -108,14 +128,22 @@ def record_stance(
 def recent_stances(
     conn: psycopg.Connection, role: str, *, limit: int = 10
 ) -> list[Stance]:
-    """当該 role の直近 N 件の主張・懸念(新しい順)。他 role の記憶は返さない。"""
+    """当該 role の直近 N 件の主張・懸念(新しい順)。
+
+    単一 role のみを読む(他 role の記憶は返さない — docstring 冒頭の注意どおり
+    これは API 慣習であり DB レベルの強制ではない)。撤回された行と撤回行自体は
+    着任プロンプトに載せないため除外する。
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT stance_id, role, kind, summary, stated_at
-            FROM governance.stances
-            WHERE role = %s
-            ORDER BY stated_at DESC, stance_id DESC
+            SELECT s.stance_id, s.role, s.kind, s.summary, s.stated_at
+            FROM governance.stances s
+            WHERE s.role = %s
+              AND s.kind <> 'retraction'
+              AND NOT EXISTS (SELECT 1 FROM governance.stances r
+                              WHERE r.retracts = s.stance_id)
+            ORDER BY s.stated_at DESC, s.stance_id DESC
             LIMIT %s
             """,
             (_db_role(role), limit),
