@@ -16,6 +16,7 @@ import pytest
 from ryza.fm import ben, jim
 from ryza.fm.config import BenConfig
 from ryza.research.llm import FixtureProvider, StructuredLLM
+from ryza.risk.classify import history_coverage_since
 
 BOOK = "DEMO_FUND"
 MODEL = "test-mid"
@@ -27,6 +28,23 @@ REPLAY_DELTA = timedelta(weeks=12)
 @pytest.fixture
 def replay_as_of() -> datetime:
     return datetime.now(UTC) - REPLAY_DELTA
+
+
+def _assert_e6_disclosure(conn, result: dict, as_of: datetime) -> None:
+    """リプレイ結果は E6(point-in-time ユニバース)の充足状況を必ず持つ(審査 C-4)。
+
+    本テストの分類は**当時に記録された**(``recorded_at`` を as_of に合わせた)ため、
+    履歴は as_of をカバーしており但し書きは外れる。CI では migration が毎回新規適用
+    されるため「カバー済みリプレイ」の経路が一度も通らない、という審査 C-21 の指摘に
+    対応して、ここは分岐で吸収せず ``e6_covered=True`` を固定する(未カバー側は
+    tests/fm/test_universe_pit.py が固定する)。
+    """
+    status = result["pit_universe"]
+    since = history_coverage_since(conn)
+    assert since is not None and as_of >= since
+    assert status["replay"] is True and status["source"] == "history"
+    assert status["e6_covered"] is True
+    assert status["note"] is None
 
 
 def _ben_cfg(**overrides) -> BenConfig:
@@ -65,6 +83,7 @@ def test_jim_replay_cycle(
     )
 
     result = jim.run_jim(conn, run, book_id=BOOK, as_of=replay_as_of)
+    _assert_e6_disclosure(conn, result, replay_as_of)
     assert result["universe"] == 1 and result["entries"] == 1
     assert result["passed"] == 1 and result["blocked"] == 0
     order = result["orders"][0]
@@ -113,6 +132,7 @@ def test_ben_replay_cycle(
     result = ben.run_ben(
         conn, run, llm, model=MODEL, book_id=BOOK, as_of=replay_as_of, cfg=_ben_cfg()
     )
+    _assert_e6_disclosure(conn, result, replay_as_of)
     assert result["candidates"] == 1 and result["passed"] == 1
     prompt = provider.calls[0]["user"]
     assert "過去の開示" in prompt and "未来のニュース" not in prompt

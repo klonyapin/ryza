@@ -40,7 +40,11 @@ from ryza.gate.compliance import GateResult, OrderProposal, PositionState
 from ryza.gate.orders import gate_and_record
 from ryza.ips import IPSConfig, Mandate, load_and_validate
 from ryza.provenance import Run
-from ryza.risk.classify import Classification
+from ryza.risk.classify import (
+    Classification,
+    classification_pit_status,
+    recorded_before,
+)
 
 _JST = ZoneInfo("Asia/Tokyo")
 
@@ -71,6 +75,18 @@ class Candidate:
     symbol: str
     asset_class: str  # IPS §8.1 タクソノミー
     classification: Classification
+
+
+@dataclass(frozen=True)
+class UniverseRead:
+    """ユニバース読出しの結果と、**実際に使った読出し経路**(審査 C-20)。
+
+    経路名を結果に同梱するのは、実行サマリの表示のために条件を再導出すると、既定の
+    READ COMMITTED では並行 commit を挟んで実際の読出しと食い違い得るため。
+    """
+
+    candidates: list[Candidate]
+    source: str
 
 
 @dataclass(frozen=True)
@@ -109,32 +125,72 @@ class SubmitResult:
 
 
 # ── 入力読出し(すべて point-in-time)──────────────────────────────────────────
+# ユニバースの読出しは**常に**追記オンリー履歴(0026)から行う(審査 C-17)。
+# 現在値キャッシュ(0015)を「当日は等価だから」と併用する設計は破綻する: 現在値行の
+# as_of は上書き更新で巻き戻り得るため、等価性を現在値表自身から判定できない。
+# 走査は1日1回で DISTINCT ON 1 段の差は性能上の意味を持たず、経路を1本にする方が
+# 「判断に使った分類」の説明可能性で勝る。
+#
+# 時間軸は2つ(bitemporal — 審査 C-16):
+#   as_of        <= 判断時点         … その分類が有効になっていたか
+#   created_at   <  判断時点の当日終端 … その分類がその時点で**記録されていた**か
+# 後者が無いと、今日 1 行追記するだけで過去のリプレイ結果が変わる。
+#
+# **タグ照合は「as_of 時点で最新の行」を選んだ後に効かせる**: 先に絞ると、タグが後から
+# 付いた銘柄の古い行が拾われ、分類の変更が過去に漏れる(look-ahead — 審査 C-4)。
+UNIVERSE_SOURCE = "history"
+
+_UNIVERSE_HISTORY_SQL = """
+    WITH latest AS (
+        SELECT DISTINCT ON (instrument_id)
+               instrument_id, universe_tags, instrument_flags, is_single_name,
+               product, unit_size
+        FROM market.instrument_classification_history
+        WHERE as_of <= %(as_of)s AND created_at < %(recorded_before)s
+        ORDER BY instrument_id, as_of DESC, history_id DESC
+    )
+    SELECT DISTINCT ON (i.instrument_id)
+           i.instrument_id, i.symbol, i.asset_class, i.venue,
+           l.universe_tags, l.instrument_flags, l.is_single_name,
+           l.product, l.unit_size
+    FROM latest l
+    JOIN market.instruments i ON i.instrument_id = l.instrument_id
+    WHERE l.universe_tags && %(tags)s
+      AND i.valid_from <= %(as_of)s
+      AND (i.valid_to IS NULL OR i.valid_to > %(as_of)s)
+    ORDER BY i.instrument_id, i.valid_from DESC
+    LIMIT %(limit)s
+"""
+
+
+def is_replay(as_of: datetime) -> bool:
+    """判断時点が**過去日**か(JST 日付で判定)。当日・未来は通常運転として扱う。"""
+    return as_of.astimezone(_JST).date() < datetime.now(tz=_JST).date()
+
+
 def load_universe(
     conn: psycopg.Connection, mandate: Mandate, *, as_of: datetime, limit: int = 500
-) -> list[Candidate]:
-    """マンデートのユニバースに属する現行銘柄(決定論分類つき)を返す。
+) -> UniverseRead:
+    """マンデートのユニバースに属する銘柄(その時点の決定論分類つき)を返す。
 
-    ``market.instrument_classification`` の**行がある銘柄のみ**が対象(行なし=未分類=
-    ゲートが fail-closed で block する — T-015 の設計)。分類の as_of が判断時点より
-    新しい行は使わない(point-in-time)。
+    分類の**行がある銘柄のみ**が対象(行なし=未分類=ゲートが fail-closed で block
+    する — T-015 の設計)。読出しは常に追記オンリー履歴から bitemporal に行う
+    (経路の選択は無い — 審査 C-17。理由は ``_UNIVERSE_HISTORY_SQL`` 上のコメント)。
+
+    返り値は候補と**実際に使った読出し経路**の組(``UniverseRead``)。経路名を実行時に
+    持ち回るのは、サマリ表示のために条件を再導出すると並行 commit 下で実際の読出しと
+    食い違うため(審査 C-20)。履歴がその as_of をカバーしているかは
+    ``universe_pit_status`` が別途報告する。
     """
     with conn.cursor() as cur:
         cur.execute(
-            """
-            SELECT DISTINCT ON (i.instrument_id)
-                   i.instrument_id, i.symbol, i.asset_class, i.venue,
-                   c.universe_tags, c.instrument_flags, c.is_single_name,
-                   c.product, c.unit_size
-            FROM market.instrument_classification c
-            JOIN market.instruments i ON i.instrument_id = c.instrument_id
-            WHERE c.universe_tags && %s
-              AND c.as_of <= %s
-              AND i.valid_from <= %s
-              AND (i.valid_to IS NULL OR i.valid_to > %s)
-            ORDER BY i.instrument_id, i.valid_from DESC
-            LIMIT %s
-            """,
-            (list(mandate.universe), as_of, as_of, as_of, limit),
+            _UNIVERSE_HISTORY_SQL,
+            {
+                "tags": list(mandate.universe),
+                "as_of": as_of,
+                "recorded_before": recorded_before(as_of),
+                "limit": limit,
+            },
         )
         rows = cur.fetchall()
     candidates: list[Candidate] = []
@@ -156,7 +212,30 @@ def load_universe(
                 ),
             )
         )
-    return candidates
+    return UniverseRead(candidates=candidates, source=UNIVERSE_SOURCE)
+
+
+def universe_pit_status(
+    conn: psycopg.Connection, *, as_of: datetime, source: str
+) -> dict[str, Any]:
+    """ユニバースの point-in-time 保証(E6)の充足状況。**実行サマリに必ず載せる**。
+
+    ``covered=True`` は「この as_of の分類が追記オンリー履歴で再現されている」の意で、
+    このときだけ E6 の但し書きが外れる(審査 C-4 の裁定の解除条件)。履歴の記録開始
+    (``min(created_at)``)より前の as_of は ``covered=False`` のままで、``note`` に
+    未達の理由が入る — 移行前の期間について達成を主張しない。
+
+    ``source`` は**呼び出し側が実際の読出しから受け取った経路**を渡す(再導出しない
+    — 審査 C-20)。
+    """
+    status = classification_pit_status(conn, as_of=as_of)
+    return {
+        "replay": is_replay(as_of),
+        "source": source,
+        "e6_covered": status["covered"],
+        "history_since": status["since"],
+        "note": status["note"],
+    }
 
 
 def load_positions(conn: psycopg.Connection, book_id: str) -> tuple[PositionState, ...]:
@@ -529,15 +608,19 @@ def _order_summary(
 
 
 __all__ = [
+    "UNIVERSE_SOURCE",
     "Candidate",
     "Intent",
     "SubmitResult",
+    "UniverseRead",
     "dedupe_intents",
     "ips_asset_class",
+    "is_replay",
     "load_nav_and_cash",
     "load_pending_orders",
     "load_positions",
     "load_prices",
     "load_universe",
     "submit_intents",
+    "universe_pit_status",
 ]

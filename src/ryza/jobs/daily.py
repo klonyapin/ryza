@@ -25,7 +25,10 @@
 **risk 段(T-015)**: 00 §9 の順序どおり会計締めの直後に置く(設計リード裁定
 2026-08-03)— execution 段の締めが書いた当日の ``ledger.nav_snapshots``(NAV の正。
 ``risk.nav_daily`` は執行照合を重ねた risk 用ビュー)を読んで limits_state を更新し、
-リスクレポートを ops へ投入する。
+リスクレポートを ops へ投入する。**execution 段が落ちた日は締めの失敗を risk 段へ
+渡す**(``close_ok``)— 締めが走っていない日は当日スナップショットも再締めも無く、
+リスク日次は前日までの未再締め系列を測ることになるため、レポート先頭に警告を出して
+urgent にする(独立審査 再々審査 起草者の留意点 (a))。
 
 **各段は独立に失敗許容**: 各段を savepoint(``conn.transaction()``)で囲み、失敗しても
 後続段は走る(前段失敗時は前日データで動く)。実行サマリを ``#運営``(ops)へ投入する。
@@ -294,6 +297,11 @@ def _fm_summary(result: dict[str, Any]) -> dict[str, Any]:
         summary["skipped"] = result["skipped"]
     if "rejected" in result:
         summary["rejected"] = len(result["rejected"])
+    # E6(point-in-time ユニバース)未達の但し書きは黙って落とさない(審査 C-4)。
+    # 通常運転(当日 as_of・履歴カバー済み)では note は None なので何も足さない。
+    note = (result.get("pit_universe") or {}).get("note")
+    if note:
+        summary["e6_note"] = note
     return summary
 
 
@@ -410,6 +418,34 @@ def _build_restatement_embed(
         ),
         "color": COLOR_FLASH if urgent else COLOR_NORMAL,
         "fields": fields,
+        "author": org.author_for_role("audit"),
+        "footer": {"text": DISCLAIMER},
+    }
+
+
+def _build_residue_embed(
+    residue: dict[str, Any], *, book_id: str, day: str, as_of: datetime
+) -> dict[str, Any]:
+    """説明不能な残渣(数量ゼロなのに残る securities)の通知(#運営 — 独立審査 新-15)。
+
+    照合ブレイクと同格の専用 embed にする。実行サマリの 1 行に混ぜると ✅ 付きで埋もれる
+    (再-7 と同じ欠陥)。残渣は放置すると評価替えの経路を通らないまま NAV に居座り、
+    ``book_returns`` → ``ewma_vol`` → 誤 ``vol_exceeded`` の経路に乗る。
+    """
+    jst_str = as_of.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
+    return {
+        "title": f"⚠️ 説明不能な建玉残渣 {jst_str}",
+        "description": (
+            f"{book_id} {day}: 数量ゼロなのに securities 残高が残る銘柄が "
+            f"{len(residue)} 件ある。評価替え由来ではないため締めは洗い替えていない — "
+            "逆仕訳のオペミス、評価替えを騙る手仕訳、約定を経ない建玉(現物拠出)の"
+            "いずれかを確認すること。試算表はゼロバランスのままなので気づけない。"
+        ),
+        "color": COLOR_FLASH,
+        "fields": [
+            {"name": f"銘柄 {iid}", "value": f"帳簿価額 {v['book_value']}", "inline": True}
+            for iid, v in list(residue.items())[:10]
+        ],
         "author": org.author_for_role("audit"),
         "footer": {"text": DISCLAIMER},
     }
@@ -619,19 +655,45 @@ def run_daily(
                 conn, channel_ops,
                 _build_restatement_embed(restated, as_of=as_of), run.run_id,
             )
+        # 数量ゼロなのに残る securities(評価替え由来でないため洗い替えの対象外)。
+        # 検出は締めが行い(ledger.closing — 独立審査 新-15)、ここで人へ届ける。
+        residue = close_result["ledger"].get("unexplained_residue") or {}
+        if residue:
+            detail["unexplained_residue"] = len(residue)
+            enqueue(
+                conn, channel_ops,
+                _build_residue_embed(
+                    residue, book_id=DEMO_BOOK, day=jst_date.isoformat(), as_of=as_of
+                ),
+                run.run_id,
+            )
         if breaks:
             detail["breaks"] = len(breaks)
             enqueue(conn, channel_ops, _build_breaks_embed(breaks, as_of=as_of), run.run_id)
         return detail
 
-    stages.append(_run_stage(conn, "execution", _execution))
+    execution_stage = _run_stage(conn, "execution", _execution)
+    stages.append(execution_stage)
 
     # ── 6. リスクエンジン(T-015)──────────────────────────────────────────────
     # 00 §9 の順序どおり会計締め(execution 段の照合→NAV 確定)の直後に置く(設計
     # リード裁定 2026-08-03)。execution 段が書いた当日 NAV を読んで limits_state を
     # 更新する。決定論・LLM 不関与のため dry-run でもそのまま実行する。
+    #
+    # **締めの成否を渡す**(独立審査 再々審査 (a)): execution 段は savepoint で囲まれて
+    # いるので、段が落ちた日は当日のスナップショットも再締めも**残らない**(段の
+    # ロールバックで消える)。つまり ``execution_stage.ok`` はそのまま「当日の締めが
+    # 系列に反映されたか」であり、偽なら risk 段は未再締めの・前日までの系列を測る。
+    # その事実を伏せたまま DD・実現ボラ・ES を出さない(risk 側が先頭表示+urgent)。
     stages.append(
-        _run_stage(conn, "risk", lambda: run_risk_daily(conn, run, as_of=as_of))
+        _run_stage(
+            conn,
+            "risk",
+            lambda: run_risk_daily(
+                conn, run, as_of=as_of,
+                close_ok=execution_stage.ok, close_error=execution_stage.error,
+            ),
+        )
     )
 
     # ── 7. 朝刊生成(冪等・Kill Switch ゲート)───────────────────────────────

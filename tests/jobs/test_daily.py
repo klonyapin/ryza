@@ -16,6 +16,7 @@ from ryza.fm.theses import quarantine_thesis, record_thesis
 from ryza.ingest.jquants import JQuantsAuthError
 from ryza.jobs import daily
 from ryza.jobs.daily import make_default_ingest, run_daily, run_ingest_sources
+from ryza.risk.daily import CLOSE_FAILED_NOTE
 
 
 def _seed(insert_enriched_doc):
@@ -155,6 +156,66 @@ def test_daily_risk_stage_reports_to_ops(
             """
         )
         assert cur.fetchone()[0] >= 1
+
+
+# ── 締め段の失敗を risk 段へ伝える(独立審査 再々審査 起草者の留意点 (a))────────
+def test_daily_close_failure_is_surfaced_in_risk_report(
+    conn, run, llm_config, make_daily_llms, insert_enriched_doc, monkeypatch
+):
+    """締めが落ちた日、リスク日次は未再締めの系列を**黙って**測らない。
+
+    execution 段は savepoint で囲まれているので、締めが例外を投げた日は当日の
+    スナップショットも再締めも残らない。それでも risk 段は前日までの系列で測れて
+    しまうため、レポート先頭の警告と urgent で「測定の as_of がずれている」ことを
+    必ず読ませる。
+    """
+    _seed(insert_enriched_doc)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("close boom")
+
+    monkeypatch.setattr(daily, "run_demo_close", _boom)
+    result, _ = _run(conn, run, llm_config, make_daily_llms)
+
+    execution = result.stage("execution")
+    assert not execution.ok and "close boom" in (execution.error or "")
+    risk_stage = result.stage("risk")
+    assert risk_stage.ok  # 後続段は走る(失敗許容)
+    assert risk_stage.detail["DEMO_FUND"]["close_ok"] is False
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT embed_json, urgent FROM press.outbox
+            WHERE channel = 'ops' AND embed_json->>'title' LIKE 'リスクレポート%'
+            ORDER BY id DESC LIMIT 1
+            """
+        )
+        embed, urgent = cur.fetchone()
+    assert urgent is True
+    assert embed["description"].startswith(f"【要確認】{CLOSE_FAILED_NOTE}")
+    assert embed["color"] == COLOR_FLASH
+
+
+def test_daily_close_success_leaves_risk_report_unchanged(
+    conn, run, llm_config, make_daily_llms, insert_enriched_doc
+):
+    """締めが成功した日は従来どおり(締め警告を出さない — 毎日赤にしない)。"""
+    _seed(insert_enriched_doc)
+    result, _ = _run(conn, run, llm_config, make_daily_llms)
+    assert result.stage("execution").ok
+    assert result.stage("risk").detail["DEMO_FUND"]["close_ok"] is True
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT embed_json FROM press.outbox
+            WHERE channel = 'ops' AND embed_json->>'title' LIKE 'リスクレポート%'
+            ORDER BY id DESC LIMIT 1
+            """
+        )
+        embed = cur.fetchone()[0]
+    assert CLOSE_FAILED_NOTE not in embed["description"]
+    assert not [f for f in embed["fields"] if f["name"] == "本日の締め"]
 
 
 # ── 冪等(同日再実行で二重投稿しない)──────────────────────────────────────────
@@ -454,6 +515,20 @@ def test_restatement_embed_surfaces_unsynced_nav_daily():
         as_of=datetime(2026, 8, 4, 10, 0, tzinfo=UTC),
     )
     assert "risk 側は未追随" in embed["fields"][0]["value"]
+
+
+def test_residue_embed_names_the_instruments():
+    """説明不能な残渣は専用 embed で名指しする(実行サマリに埋もれさせない — 新-15)。"""
+    embed = daily._build_residue_embed(
+        {"1001": {"book_value": "-1000000"}},
+        book_id="DEMO_FUND", day="2026-08-03",
+        as_of=datetime(2026, 8, 4, 10, 0, tzinfo=UTC),
+    )
+    assert embed["color"] == COLOR_FLASH
+    assert "1 件" in embed["description"]
+    assert embed["fields"][0] == {
+        "name": "銘柄 1001", "value": "帳簿価額 -1000000", "inline": True
+    }
 
 
 # ── 失敗許容: 一段が落ちても後段は走る ──────────────────────────────────────────

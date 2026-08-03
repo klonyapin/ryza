@@ -31,6 +31,12 @@
 - **データ不足時は fail-safe**(指示書): 帳簿リターン系列が N(=20)営業日に満たない
   間は vol/es フラグを立てず、``notes`` に「データ不足 n/N営業日」を明記する。
   DD はデータ1日目から有効
+- **保留・除外は機械可読で残す**(独立役員審査 T-018 重大-3 の恒久対応):
+  ``notes`` は人向けの日本語文であり、読み手側で「どの指標がなぜ判定保留か」を
+  復元できない。``RiskState.deferred``(``Deferral`` の列)と ``RiskState.excluded``
+  (``Exclusion`` の列)が同じ事実を構造化して持ち、``risk.limits_state_events.metrics``
+  経由でダッシュボードと監査が同じ理由を読む。``notes`` はこれらの表示形であって
+  正ではない
 """
 
 from __future__ import annotations
@@ -90,8 +96,15 @@ class ESResult:
 
     測定空白の縮退(独立役員審査 2026-08-03 条件2): リターン系列が ``min_obs`` に
     満たない銘柄は測定から**除外して残部で測定**し ``excluded`` に列挙する(1銘柄の
-    データ不足で全体が判定保留化するのを防ぐ)。除外が保有銘柄の過半、または保有が
-    あるのに観測ゼロのときは ``deferred=True``(判定保留 — フラグは立てず urgent 注記)。
+    データ不足で全体が判定保留化するのを防ぐ)。判定を保留したときは
+    ``deferral_reason`` に**計算した本人が**理由コードを入れる(``deferred`` はその
+    有無を見るだけの派生値)。
+
+    理由を呼び出し側で推測させない(独立役員審査 2026-08-04 重大-1): 旧実装は
+    ``deferred``(bool)しか返さず、``evaluate`` が「除外銘柄に観測があるか」という
+    代理指標から理由を当てていたため、**過半でないのに ``majority_excluded``** と
+    記録される系統的な誤りがあった(3 銘柄保有・1 銘柄が短系列・残る 2 銘柄の共通
+    観測日がゼロ、など)。理由は分岐を持つ本人しか正しく言えない。
     """
 
     historical: float | None  # ヒストリカル法(観測不足なら None)
@@ -99,7 +112,62 @@ class ESResult:
     adopted: float  # 採用値 = max(両者)。ポジション無し/観測ゼロは 0
     n_obs: int  # ポートフォリオ・リターンの観測数
     excluded: tuple[int, ...] = ()  # 短系列のため測定から除外した instrument_id
-    deferred: bool = False  # 判定保留(除外が過半/保有ありで観測ゼロ)
+    #: 判定保留の理由コード(REASON_*)。保留していなければ None。
+    deferral_reason: str | None = None
+
+    @property
+    def deferred(self) -> bool:
+        """判定保留か(理由コードの有無 — フラグは立てず urgent 注記に回る)。"""
+        return self.deferral_reason is not None
+
+
+# 判定保留の理由コード(``Deferral.reason``)。値は機械可読の識別子で、表示文言は
+# 読み手側(ダッシュボード・レポート)が持つ。
+REASON_INSUFFICIENT_RETURNS = "insufficient_returns"  # 帳簿リターンが N 営業日に満たない
+REASON_INSUFFICIENT_OBS = "insufficient_obs"  # ES のポートフォリオ観測が N 日に満たない
+REASON_NO_OBSERVATIONS = "no_observations"  # 保有はあるがリターン観測が 1 件も無い
+REASON_MAJORITY_EXCLUDED = "majority_excluded"  # 除外銘柄が保有の過半(全除外を含む)
+REASON_NO_COMMON_DAYS = "no_common_days"  # 測定対象は残ったが共通観測日がゼロ
+
+# 測定から銘柄を外した理由(``Exclusion.reason``)。
+REASON_SHORT_SERIES = "short_series"  # リターン系列が min_obs 未満(ES の縮退)
+REASON_MISSING_PRICE = "missing_price"  # 時価が取れず評価自体ができない(daily 側)
+
+# 保留・除外が及ぶ測定の識別子(``Deferral.metric`` / ``Exclusion.measure``)。
+METRIC_REALIZED_VOL = "realized_vol"
+METRIC_ES95 = "es95"
+MEASURE_VALUATION = "valuation"  # 時価評価(= ES とガードレールの入力そのもの)
+
+
+@dataclass(frozen=True)
+class Deferral:
+    """判定を保留した測定と、その理由(機械可読 — 独立役員審査 T-018 重大-3)。
+
+    ``notes`` の日本語文と同じ事実を、読み手が分岐に使える形で持つ。1 つの測定に
+    複数の理由が並ぶことがある(例: 帳簿リターン不足 **かつ** ES 観測ゼロ)。
+    ``observed`` / ``required`` は判定に必要な観測数と実績(``0`` 起点の件数)。
+    """
+
+    metric: str  # METRIC_* のいずれか
+    reason: str  # REASON_* のいずれか
+    observed: int
+    required: int
+
+
+@dataclass(frozen=True)
+class Exclusion:
+    """測定から外した銘柄とその理由(採用値が「何を含まないか」の説明責任)。
+
+    ES は観測不足以外の理由(時価欠測による評価除外など)でも採用値が動くため、
+    除外の事実を ``sufficient``(bool)に潰さず銘柄単位で残す。``observed`` /
+    ``required`` は短系列除外のときだけ意味を持つ(それ以外は None)。
+    """
+
+    instrument_id: int
+    measure: str  # METRIC_ES95 / MEASURE_VALUATION
+    reason: str  # REASON_*
+    observed: int | None = None
+    required: int | None = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +187,14 @@ class RiskState:
     vol_exceeded: bool
     es_exceeded: bool
     notes: tuple[str, ...]  # データ不足・除外銘柄などの明記(fail-safe の説明責任)
+    #: 判定を保留した測定とその理由(``notes`` の機械可読版)。空なら全測定が有効。
+    deferred: tuple[Deferral, ...] = ()
+    #: 測定から外した銘柄とその理由(ES の短系列除外+呼び出し側の評価除外)。
+    excluded: tuple[Exclusion, ...] = ()
+
+    def deferred_metrics(self) -> frozenset[str]:
+        """判定保留になっている測定名の集合(``METRIC_*``)。"""
+        return frozenset(d.metric for d in self.deferred)
 
 
 def book_returns(series: Sequence[NavPoint]) -> list[float]:
@@ -176,7 +252,14 @@ def es95(
     だけで構成したポートフォリオ・リターン系列に適用する(欠測日の混入で分散を歪めない)。
     リターン系列が ``min_obs`` 未満の銘柄は除外して残部で測定する(縮退 — ``ESResult``
     docstring)。除外分のエクスポージャーは測定に含まれない(過小方向)ため、除外は
-    必ず注記され、過半に達したら判定保留(``deferred``)。ポジションが無い間は 0(指示書)。
+    必ず注記され、残部で測れないときは判定保留にして ``deferral_reason`` に理由を返す:
+
+    - ``no_observations``: 保有銘柄のリターンが 1 件も無い(データが届いていない)
+    - ``majority_excluded``: 除外が保有の過半(全除外を含む — 残部が無い場合もこれ)
+    - ``no_common_days``: 測定対象銘柄は残ったが**共通観測日がゼロ**(取引所休日の
+      ずれ・上場直後など)。残部は存在するのに系列が組めない別事象
+
+    ポジションが無い間は 0(指示書)— これは保留ではない(測るべき保有が無い)。
     """
     if nav <= 0:
         return ESResult(None, None, 0.0, 0)
@@ -196,7 +279,7 @@ def es95(
         if len(instrument_returns.get(i, {})) >= min_obs
     }
     excluded = tuple(sorted(set(weights) - set(included)))
-    deferred = len(excluded) > len(weights) / 2
+    majority_excluded = len(excluded) > len(weights) / 2
     common_days: set[date] | None = None
     for rets in included.values():
         days_set = set(rets)
@@ -207,7 +290,14 @@ def es95(
     n = len(port)
     if n == 0:
         # 保有があるのに観測ゼロ = 測定空白。値 0 を「リスクなし」と読ませない(判定保留)。
-        return ESResult(None, None, 0.0, 0, excluded=excluded, deferred=True)
+        # 理由は 3 通りに分かれ、ここでしか正しく区別できない(重大-1)。
+        if included:
+            reason = REASON_NO_COMMON_DAYS  # 残部はあるが日付が揃わない
+        elif any(instrument_returns.get(i) for i in weights):
+            reason = REASON_MAJORITY_EXCLUDED  # 全銘柄が短系列で落ちた(⊃ 過半)
+        else:
+            reason = REASON_NO_OBSERVATIONS  # そもそもリターンが 1 件も無い
+        return ESResult(None, None, 0.0, 0, excluded=excluded, deferral_reason=reason)
 
     # ヒストリカル: 下位 5% テイル(最低1観測)の平均損失。
     k = max(1, int(n * _ALPHA))
@@ -217,7 +307,30 @@ def es95(
     mean = sum(port) / n
     var = sum((r - mean) ** 2 for r in port) / n
     param = math.sqrt(var) * _PHI_Z95 / _ALPHA
-    return ESResult(hist, param, max(hist, param), n, excluded=excluded, deferred=deferred)
+    return ESResult(
+        hist, param, max(hist, param), n,
+        excluded=excluded,
+        deferral_reason=REASON_MAJORITY_EXCLUDED if majority_excluded else None,
+    )
+
+
+def _es_deferral_note(reason: str, n_obs: int) -> str:
+    """ES 判定保留の注記文(理由コード → 人向けの説明)。
+
+    ``majority_excluded`` だけは残部の有無で言い分けが変わる: 全銘柄が落ちた日に
+    「残部の測定値は参考値」と書くと、存在しない残部を読み手に想像させる
+    (独立役員審査 2026-08-04 重大-1 の再現ケース)。
+    """
+    if reason == REASON_NO_OBSERVATIONS:
+        return "【要確認】ES 測定不能(保有ありだがリターン系列なし)— 判定保留"
+    if reason == REASON_NO_COMMON_DAYS:
+        return (
+            "【要確認】ES: 測定対象銘柄の共通観測日がゼロのため測定不能 — 判定保留"
+            "(残部は存在しない)"
+        )
+    if reason == REASON_MAJORITY_EXCLUDED and n_obs == 0:
+        return "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+    return "【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)"
 
 
 def evaluate(
@@ -227,12 +340,17 @@ def evaluate(
     ips: IPSConfig,
     *,
     extra_notes: Sequence[str] = (),
+    extra_exclusions: Sequence[Exclusion] = (),
 ) -> RiskState:
     """リスク状態を測定してフラグに変換する(純関数)。
 
     - DD フラグはデータ1日目から有効(到達 ≥ で発動)
     - vol/es フラグは帳簿リターンが ``realized_vol_ewma_days`` 営業日そろうまで
-      立てない(fail-safe)。その間は ``notes`` にデータ不足を明記する
+      立てない(fail-safe)。その間は ``notes`` にデータ不足を明記し、同じ事実を
+      ``deferred``(機械可読)に入れる
+    - ``extra_exclusions`` は**エンジンに届く前に**測定から外れた銘柄(時価欠測で
+      評価できなかった保有など)。エンジン自身の短系列除外と同じ列に載せて、
+      採用値が何を含まないかを 1 か所で読めるようにする
     """
     hl = ips.hard_limits
     dd, peak = drawdown(series)
@@ -244,21 +362,39 @@ def evaluate(
     es = es95(positions, series[-1].nav, instrument_returns, min_obs=days)
 
     notes = list(extra_notes)
+    deferred: list[Deferral] = []
+    excluded = list(extra_exclusions) + [
+        Exclusion(
+            instrument_id=i,
+            measure=METRIC_ES95,
+            reason=REASON_SHORT_SERIES,
+            observed=len(instrument_returns.get(i, {})),
+            required=days,
+        )
+        for i in es.excluded
+    ]
     if not sufficient:
         notes.append(f"データ不足 {n}/{days}営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)")
+        # 帳簿リターン不足は vol と ES の**両方**の判定を止める(es_exceeded も
+        # sufficient を条件にしている)。読み手が指標ごとに分岐できるよう 2 件に分ける。
+        deferred += [
+            Deferral(METRIC_REALIZED_VOL, REASON_INSUFFICIENT_RETURNS, n, days),
+            Deferral(METRIC_ES95, REASON_INSUFFICIENT_RETURNS, n, days),
+        ]
     if es.excluded:
         notes.append(
             f"ES: 短系列(<{days}営業日)のため測定から除外: "
             f"instruments {list(es.excluded)}(残部で測定 — 除外分は過小方向)"
         )
-    if es.deferred:
-        # 保有があるのに測定空白/除外が過半 — 判定保留は urgent 注記(審査条件2)。
-        if es.n_obs == 0:
-            notes.append("【要確認】ES 測定不能(保有ありだがリターン系列なし)— 判定保留")
-        else:
-            notes.append("【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)")
+    if es.deferral_reason is not None:
+        # 保有があるのに測れない — 判定保留は urgent 注記(審査条件2)。理由は
+        # ``es95()`` が返したものをそのまま使う(推測しない — 重大-1)。注記文だけは
+        # 「残部が存在するか」で言い分けが変わるため、ここで理由コードから引く。
+        notes.append(_es_deferral_note(es.deferral_reason, es.n_obs))
+        deferred.append(Deferral(METRIC_ES95, es.deferral_reason, es.n_obs, days))
     elif es.n_obs and es.n_obs < days:
         notes.append(f"ES 観測 {es.n_obs}日 < {days}営業日 — ES フラグは判定保留(fail-safe)")
+        deferred.append(Deferral(METRIC_ES95, REASON_INSUFFICIENT_OBS, es.n_obs, days))
 
     dd_soft = dd >= Decimal(str(hl.dd_soft_limit))
     dd_hard = dd >= Decimal(str(hl.dd_hard_limit))
@@ -283,6 +419,8 @@ def evaluate(
         vol_exceeded=vol_exceeded,
         es_exceeded=es_exceeded,
         notes=tuple(notes),
+        deferred=tuple(deferred),
+        excluded=tuple(excluded),
     )
 
 
@@ -346,7 +484,19 @@ def guardrail_usage(
 
 __all__ = [
     "ESResult",
+    "Deferral",
+    "Exclusion",
+    "METRIC_ES95",
+    "METRIC_REALIZED_VOL",
+    "MEASURE_VALUATION",
     "NavPoint",
+    "REASON_INSUFFICIENT_OBS",
+    "REASON_INSUFFICIENT_RETURNS",
+    "REASON_MAJORITY_EXCLUDED",
+    "REASON_NO_COMMON_DAYS",
+    "REASON_MISSING_PRICE",
+    "REASON_NO_OBSERVATIONS",
+    "REASON_SHORT_SERIES",
     "RiskPosition",
     "RiskState",
     "TRADING_DAYS",

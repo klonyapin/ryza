@@ -140,6 +140,33 @@ def test_dev_chat_guard_triggers_exist_and_are_enabled(conn):
     assert all(state == "O" for state in triggers.values()), triggers
 
 
+def test_classification_history_guards_exist_and_are_enabled(conn):
+    """0026 の追記オンリーガードが存在し、**有効**であること(0024 と同基準)。
+
+    分類履歴は E6(point-in-time ユニバース)の証跡そのもので、無音化されると
+    「当時の分類」を後から書き換えられる。``tgenabled`` が 'D'(= 掃除のために
+    フィクスチャが一時的に落とす状態)のまま残っていないことまで見る。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT tgname, tgenabled FROM pg_trigger
+            WHERE tgrelid = 'market.instrument_classification_history'::regclass
+              AND NOT tgisinternal
+            ORDER BY tgname
+            """
+        )
+        triggers = dict(cur.fetchall())
+    assert set(triggers) == {
+        "instrument_classification_history_no_mutation",
+        "instrument_classification_history_no_truncate",
+        # 記録時刻の固定(E6 カバレッジの偽装防止 — 審査 C-19)。テストは PIT 検証の
+        # ためにこの 1 本だけを一時的に外すので、無効のまま残らないことを見る。
+        "instrument_classification_history_stamp_recorded_at",
+    }
+    assert all(state == "O" for state in triggers.values()), triggers
+
+
 def test_bars_is_partitioned(conn):
     with conn.cursor() as cur:
         cur.execute(

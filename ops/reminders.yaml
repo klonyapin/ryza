@@ -305,7 +305,18 @@ reminders:
       title: "銘柄分類の point-in-time 履歴化(E6 の前提)"
       labels: [impl]
       body: "market.instrument_classification(migrations/0015)は instrument_id 主キーの上書き型で、分類の履歴を持たない。過去 as_of のリプレイでは『当時の分類』を再現できず、①最新分類の as_of が as_of より新しいとユニバースが静かに空になる、②分類が後から付いた銘柄を過去に遡って候補にできてしまう(look-ahead)。是正案: SCD2 化(instrument_id, valid_from)または追記オンリーの履歴表 + as_of ビュー(market.bars_asof と同型)。**それまでの間、リプレイ結果・バックテスト結果を提示するときは『E6(point-in-time ユニバース)未達』の但し書きを必ず付す**(設計リード裁定 2026-08-03)。スキーマ変更のため保護領域手続。"
-    status: pending
+    # 2026-08-04 実装: 追記オンリーの履歴表 market.instrument_classification_history
+    # (migrations/0026)+ 分類確定時の同一トランザクション追記(risk/classify.py)+
+    # リプレイのユニバース読出しを履歴経由に(fm/base.py load_universe)。
+    # **但し書きは自動化した**: fm.base.universe_pit_status が「履歴が as_of を
+    # カバーしているか」を判定し、未カバーなら E6 未達の note を実行サマリに載せる
+    # (daily の _fm_summary → e6_note)。履歴の記録開始(min(created_at))より前の
+    # as_of は未達表示のまま(移行前の改訂は物理的に存在しないため — 達成を偽らない)。
+    # 2026-08-04 独立審査(条件付き承認)の是正: 読出しを bitemporal 化(as_of +
+    # created_at。今日の追記で過去のリプレイが変わらない)・現在値キャッシュを判断
+    # 経路から排除(常に履歴経路)・カバレッジ根拠を履歴表のデータへ・created_at を
+    # DB 側で固定(偽装防止)。意見書は docs/reviews/t017-fm-agents-independent-review.md。
+    status: done
 
   - id: fm-stage-savepoint-split
     what: "daily の fm 段が単一 savepoint(独立役員審査 T-017 C-5)— Ben の例外が Jim の決定論注文を巻き戻す"
@@ -683,6 +694,47 @@ reminders:
       title: "ledger: qty==0 の銘柄も評価替えを打つ(全売却後の securities 残渣で NAV が恒久過大)"
       labels: [impl, ledger, risk]
       body: "建玉を全売却した銘柄の `securities` 勘定に前日 MTM の残渣が残り、NAV が**恒久的に過大**になる。`ledger.closing.run_daily_close`(`closing.py` の held_instruments ループ)も `ledger.closing._reapply_mtm` も、`qty == 0` を評価替えの**前**にスキップするため、建玉ゼロの銘柄が時価ゼロへ洗い替えられないからである。売却時の `post_fill` は取得原価ぶん(`cost_released`)しか `securities` を取り崩さないので、評価益ぶんが資産に残る。**独立審査の実測(origin/main でも同一 — 本 PR の回帰ではない)**: 1000株@1000 買い → 終値 1200 で評価替え → 翌日 1200 で全売り → `securities` 残高 200,000・数量 0、NAV 10,200,000→10,400,000、`book_returns` は `[+0.0196, 0.0]`(真値 `[0.0, 0.0]`)。これは新-3 と構造的に同一の恒久的偽リターンであり、`ewma_vol` 経由で誤 `vol_exceeded` の経路に乗る。**本 PR(mtm-replay)固有の害**: 遅延全売り日の再締めが `mtm_reapplied=True` と『その日の終値で評価替えして NAV に反映した』注記を付けながら 1 銘柄も評価替えしない(`positions={}` で残渣は資産に残る)。是正: `qty == 0` でも評価替えを打つ(delta = 0 − 帳簿価額)。**run_daily_close と _reapply_mtm の両呼び出し口を同時に**直すこと(片方だけだと当日と再締めで NAV が食い違う)。売り約定の残渣そのものを post_fill 側で消す設計(時価で取り崩す)も代替として検討し、移動平均法の実現損益計算への影響を評価すること。**src/ryza/ledger/ は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。別 PR とする。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md MTM リプレイ審査記録 新-10。"
+    # 2026-08-04 実装: run_daily_close と _reapply_mtm の両方で qty==0 の銘柄も評価替えの
+    # 対象にし、残渣(= 売却で取り崩されない評価益ぶんの帳簿価額)をゼロへ洗い替える。
+    # 数量ゼロの時価は価格に依らずゼロなので終値は引かない(post_mark_to_market の
+    # price=None 経路 — 建玉ゼロの銘柄の終値を要求すると上場廃止・バー欠測で締めごと
+    # 落ちる)。証憑は price=null + zero_qty_writeoff で「終値 0 円で評価した」と書かない。
+    # **審査の処方(delta = 0 − 帳簿価額)はそのままでは危険**: replay_position は
+    # broker_fill しか再生しないため現物拠出・資産振替の securities も数量ゼロに見え、
+    # 総額を消すと実在の資産が消える(実測: 現物拠出 1,000,000 の日の NAV が丸ごと戻り
+    # tests/execution/test_close.py の 2 本が落ちた)。そこで _util.mtm_book_value を
+    # 新設し、**評価替え(price_snapshot 証憑)が作った残高だけ**を洗い替える。
+    # 代替案(post_fill 側で時価取り崩し)は不採用: 実現損益が『時価 − 時価 = 0』になり
+    # 移動平均法の実現/未実現の切り分けが壊れるため(残渣の所在が変わるだけ)。
+    # 実測(修正後): d1 NAV 10,400,000 → 10,200,000、securities 残高 0、returns [0.0, 0.0]。
+    # 2026-08-04 独立審査(残渣修正審査記録)= 条件付き承認。新-13(将来日付売りの先行記帳で
+    # 実在建玉を消す回帰。as_of の非対称)・新-14(kind 偽装で洗い替えを誘発)・新-15
+    # (説明不能な残渣の検出器が無い)・新-16(記録スキーマの二重化)を同 PR で是正済み。
+    # 新-14 の構造的根治は mtm-separate-account、新-17 は in-kind-contribution-mtm へ分割。
+    status: done
+
+  - id: mtm-separate-account
+    what: "評価替えの残高を推定でなく勘定体系で切る(MTM を独立勘定へ分離 — 残渣修正審査 新-14 の構造的根治)"
+    conditions:
+      - type: date_after
+        date: "2026-08-24"
+    action:
+      type: issue_create
+      title: "ledger: MTM を独立勘定へ分離し、mtm_book_value の推定をやめる"
+      labels: [impl, ledger, risk]
+      body: "全売却後の残渣を洗い替える量は `_util.mtm_book_value`(`securities` 勘定のうち evidence.kind='price_snapshot' かつ `journal_entries.posted_by` が締めジョブ由来の行の合計)で**推定**している。洗い替えは NAV を双方向に動かす原始操作なのに、判定子が仕訳の自由記入列である点が本質的な弱さである(独立審査の実測: kind を騙る手仕訳 Dr securities 3,000,000 / Cr capital は、posted_by 判定の追加**前**は次の締めで全額消され NAV 13,000,000→10,000,000、貸方 500,000 は逆に NAV を無から 10,500,000 に増やした)。posted_by の連言追加でこの 2 攻撃は塞いだが、`post_entry` の呼び出し側は依然その値を騙れる。根治: 評価替えの結果を `securities` に混ぜず**独立勘定**(例: `securities_mtm` / 未実現評価勘定)に積み、残渣の同定を勘定残高そのもの(推定不要)にする。BS 表示は securities + mtm の合算、`securities_book_value` / recon の valuation 突合・ダッシュボードの読み替えも同時に設計すること。**勘定科目の追加は migrations(保護領域)を伴うため独立役員審査+みなし承認が必要。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md 残渣修正審査記録 新-14。"
+    status: pending
+
+  - id: in-kind-contribution-mtm
+    what: "現物拠出の建玉が一度も評価替えされない前提の是正(残渣修正審査 新-17)"
+    conditions:
+      - type: date_after
+        date: "2026-08-24"
+    action:
+      type: issue_create
+      title: "ledger: 約定を経ない建玉(現物拠出)の建玉数量をどこが持つか決める"
+      labels: [impl, ledger]
+      body: "`_util.replay_position` は broker_fill 証憑しか再生しないため、約定を経ずに建った `securities`(現物拠出 Dr securities / Cr capital・資産振替)は**数量ゼロに見え、一度も評価替えされない**(独立審査の実測: 終値 1500/2000/500 を渡しても残高は拠出額 1,000,000 のまま、`detail.positions` にも現れない)。数量ゼロ残渣の洗い替えが『約定外の建玉に触れない』で正しくいられるのはこの前提のおかげであり、in-kind を時価評価する必要が出た時点で前提は崩れる(評価替えの対象になった途端、数量の出どころが無い)。決めるべきこと: ①現物拠出を制度として扱うのか(扱わないなら post_entry 側で securities への直接記帳を禁じる方が明快)、②扱うなら建玉数量の真実をどこに持たせるか(`trade.fills` 相当の建玉イベント表 or 拠出時に数量付きの証憑を要求する)。当面は締めの `unexplained_residue`(新-15)が該当銘柄を毎日名指しするので、黙って評価から漏れる状態にはない。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 残渣修正審査記録 新-17。"
     status: pending
 
   - id: close-stage-failure-visibility
@@ -694,7 +746,19 @@ reminders:
       type: issue_create
       title: "jobs.daily: 締め段の失敗をリスク日次へ伝え、未再締めの系列で黙って測らせない"
       labels: [impl, risk, ledger]
-      body: "`ledger.closing.reclose_stale` の呼び出し口は `execution/close.py` の `run_demo_close` だけであり、`jobs/daily.py` の `_run_stage` は execution 段の例外を握って後続を走らせる。したがって締めが落ちた日は、当日のスナップショットも再締めも走らないまま `run_risk_daily` が**未再締めの系列を黙って測る**(遅延仕訳が入ったままの NAV で DD・実現ボラ・ES を出し、`risk.limits_state` を更新する)。レポート上は『データ n 営業日』としか出ず、締めが飛んだ事実は実行サマリの execution 段にしか残らない。是正案: (1) `run_risk_daily` に『直近の締めが成功したか』を渡し、失敗日は測定を保留する(fail-safe — T-014 判断11 と同じ姿勢)か、(2) 少なくとも `state_metrics` と embed に『当日の締め未完了』を明記して urgent にする。締めの成否は execution 段の StageResult か、`ledger.nav_snapshots` に当日の行があるかで判定できる。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 起草者の留意点3点の独立評価 (a)。"
+      body: "`ledger.closing.reclose_stale` の呼び出し口は `execution/close.py` の `run_demo_close` だけであり、`jobs/daily.py` の `_run_stage` は execution 段の例外を握って後続を走らせる。したがって締めが落ちた日は、当日のスナップショットも再締めも走らないまま `run_risk_daily` が**未再締めの系列を黙って測る**(遅延仕訳が入ったままの NAV で DD・実現ボラ・ES を出し、`risk.limits_state` を更新する)。レポート上は『データ n 営業日』としか出ず、締めが飛んだ事実は実行サマリの execution 段にしか残らない。是正案: (1) `run_risk_daily` に『直近の締めが成功したか』を渡し、失敗日は測定を保留する(fail-safe — T-014 判断11 と同じ姿勢)か、(2) 少なくとも `state_metrics` と embed に『当日の締め未完了』を明記して urgent にする。締めの成否は execution 段の StageResult か、`ledger.nav_snapshots` に当日の行があるかで判定できる。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 起草者の留意点3点の独立評価 (a)。 **完了(2026-08-04)**: 是正案 (2) を採った(測定は続けて事実を必ず可視化する)。`jobs/daily.py` が execution 段の `StageResult.ok` を `run_risk_daily(close_ok=...)` へ渡す — 段は savepoint で囲まれているため、落ちた日は当日スナップショットも再締めも残らず、`ok` はそのまま『締めが系列に反映されたか』になる。失敗日は `risk/daily.py` がレポート先頭(独立フィールド『本日の締め』+ description 冒頭)に `⚠ 本日の締めが失敗 — 測定は前日までの系列に基づく` を出し、フラグが 1 つも立っていなくても urgent にし、`state_metrics` に `close_ok` / `close_error` を残す。ダッシュボードのリスクページも `close_ok=false` の測定を警告表示する。案 (1)(測定自体の保留)を採らなかったのは、保留すると `risk.limits_state` が更新されずゲートが古い状態で通し続けるため — 測定を止めるより『この数字は前日までの系列だ』と宣言する方が fail-safe である(独立審査もこの判断を支持。ただし誤 dd_hard の解除が委員会専決である点への留保が付き、IPS 復帰手順への追記を `ips-dd-release-procedure` に登録した)。 **独立審査の条件是正(重大-2)**: 初版の既定 `close_ok=True` は『知らない』を『成功した』と台帳に断定するため、締めが落ちた朝に CLI を手動再実行するだけで警告が消えた。既定を `None`(不明)に変え、そのときは `ledger.nav_snapshots` に当日行があるかを risk 側で自己検証する(無ければ `CLOSE_MISSING_NOTE` + urgent + `metrics.close_ok=false` / `close_self_checked=true`)。呼び出し側の作法に fail-safe を依存させない。出典: docs/reviews/risk-observability-independent-review.md 重大-2。"
+    status: done # 2026-08-04 実装: jobs/daily → run_risk_daily(close_ok) + レポート先頭警告 + urgent(審査 重大-2 是正済み)
+
+  - id: ips-dd-release-procedure
+    what: "IPS §3.2 復帰手順に『dd_hard 設定時イベントの close_ok 確認』を追記する(独立役員審査 2026-08-04 の留保条件)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "IPS §3.2 復帰条項の運用手順に close_ok 確認を明記する(CIO 起票)"
+      labels: [decision, risk, ips]
+      body: "締めが落ちた日でもリスク日次は測定を続ける(前日までの系列であることを宣言して続行 — `risk/daily.py` の `close_ok`)。この設計は独立役員審査 2026-08-04 で支持されたが、**留保条件が 1 つ付いている**: 未再締めの系列は過去 NAV が誤りうるため `dd_hard` が誤って立つ可能性があり、その解除は委員会専決(`risk.state.release_dd_hard`)である。誤検知でも解除には委員会の明示操作が要り、運用者は『測定の前提が壊れていた日に立ったフラグか』を判断する材料を手順として持っていない。是正: IPS §3.2 の復帰条項の運用手順に『dd_hard が立った際は、当該 `risk.limits_state_events`(event=engine_update)の `metrics.close_ok` / `close_self_checked` を確認し、false であれば締めを完了させたうえで再測定してから復帰可否を審議する』を明記する。**コード変更は不要**(`metrics` に既に記録済み)。IPS は L2 文書のため CIO 起票メモ+投資委員会決議で改訂すること(定款第4条)。起票メモには『この確認を怠ると、締め障害由来の誤 dd_hard がラッチとして残り、解除のたびに委員会の議事が消費される』というコストを添える。出典: docs/reviews/risk-observability-independent-review.md(設計判断の段落)。"
     status: pending
 
   - id: protect-execution-config
@@ -769,8 +833,8 @@ reminders:
       type: issue_create
       title: "risk.state_metrics に deferred / excluded を追加し、保留理由を機械可読にする"
       labels: [impl, risk]
-      body: "ryza.risk.state.state_metrics が残す測定値は `sufficient`(bool)と `n_returns` しか持たず、『どの指標がなぜ判定保留なのか』が読み手側で復元できない。ダッシュボードは暫定として『sufficient が偽なら vol/ES bullet を unknown にする』という粗い分岐で回避しているが(dashboard/app.py _insufficiency_note・独立役員審査 T-018 重大-3)、ES は観測不足以外の理由(価格欠測による銘柄除外など)でも採用値が変わるため、この分岐では保留理由を正しく説明できない。是正: state_metrics に `deferred`(判定を保留した指標名のリスト+各理由)と `excluded`(評価から外した銘柄+理由)を追加し、risk.limits_state_events.metrics 経由でダッシュボードと監査が同じ理由を読めるようにする。ダッシュボード側の暫定分岐は追加後に置き換える。**src/ryza/risk/ は保護領域のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 重大-3。"
-    status: pending
+      body: "ryza.risk.state.state_metrics が残す測定値は `sufficient`(bool)と `n_returns` しか持たず、『どの指標がなぜ判定保留なのか』が読み手側で復元できない。ダッシュボードは暫定として『sufficient が偽なら vol/ES bullet を unknown にする』という粗い分岐で回避しているが(dashboard/app.py _insufficiency_note・独立役員審査 T-018 重大-3)、ES は観測不足以外の理由(価格欠測による銘柄除外など)でも採用値が変わるため、この分岐では保留理由を正しく説明できない。是正: state_metrics に `deferred`(判定を保留した指標名のリスト+各理由)と `excluded`(評価から外した銘柄+理由)を追加し、risk.limits_state_events.metrics 経由でダッシュボードと監査が同じ理由を読めるようにする。ダッシュボード側の暫定分岐は追加後に置き換える。**src/ryza/risk/ は保護領域のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 重大-3。 **完了(2026-08-04)**: `engine.Deferral`(指標名・理由コード・観測数/必要数)と `engine.Exclusion`(銘柄・対象測定・理由)を追加し、`RiskState.deferred` / `RiskState.excluded` として評価結果に載せ、`state_metrics` が `deferred` / `excluded_instruments` / `es95_deferred` として `risk.limits_state_events.metrics` に記録する。理由コードは `insufficient_returns` / `insufficient_obs` / `no_observations` / `majority_excluded`(保留)と `short_series` / `missing_price`(除外)。時価欠測で評価から外れた銘柄(`risk/daily.load_positions`)も同じ列に載るため、『ES の採用値が何を含まないか』を 1 か所で読める。ダッシュボードは新キーを優先して**指標ごとに**保留理由を表示し(`_deferral_note`)、除外銘柄を名指しする(`_exclusion_note`)。`deferred` キーを持たない過去のイベント行は従来表示に落とす(後方互換 — metrics は追記のみで遡って書き換わらない)。既存キー(`sufficient` / `n_returns` / `es95_*`)は残した。 **独立審査の条件是正(重大-1)**: 初版は `evaluate` が理由を代理指標から推測しており、過半でないのに `majority_excluded` と記録する誤りがあった(3 銘柄・1 銘柄短系列・残る 2 銘柄の共通観測日ゼロ)。理由は `es95()` 自身が `ESResult.deferral_reason` として返す構造に変え、`no_common_days` を独立コードとして追加した(`deferred` は理由の有無を見る派生値)。注記文も残部の有無で言い分ける。評価結果の全キーは `tests/risk/engine_snapshot.json` にゴールデン固定し、判定変更が必ずテスト差分に出るようにした。出典: docs/reviews/risk-observability-independent-review.md 重大-1・推奨。"
+    status: done # 2026-08-04 実装: engine.Deferral/Exclusion → state_metrics.deferred/excluded_instruments + ダッシュボード新表示(審査 重大-1 是正済み)
 
   - id: db-indexes-dashboard
     what: "ダッシュボードの重いクエリ向け索引を追加する(ledger.journal_lines / meta.runs。独立役員審査 T-018 中-10)"
