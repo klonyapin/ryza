@@ -392,3 +392,27 @@ reminders:
       labels: [impl]
       body: "0020 は配送時にアイコン上書きを解決するため、embed_json の author に内部キー member_id を載せる方式を採った(src/ryza/org.py embed_author / AUTHOR_MEMBER_KEY)。これは press.outbox の全行に Discord API のフィールドではない値が永続化されることを意味し、除去は送信直前の1関数(org.resolve_author)だけに依存している(独立役員審査 0020 C-10)。将来 embed_json を別経路(新しい配送先・再送ツール・エクスポート)へ流す実装が resolve_author を通し忘れると、未知フィールドが Discord へ送られる。是正: press.outbox に author_member_id 列を追加する(あるいは embed_json と並ぶ meta 列を設ける)か、outbox.OutboxMessage のデータ構造として embed とは別に持ち、embed_json には Discord のフィールドだけを入れる。press.outbox はスキーマ変更のため保護領域の手続を経ること。現行方式でも実害が出ていないのは、Discord が未知フィールドを無視するためであり(0020 時点で確認)、緊急性は低い。"
     status: pending
+
+  - id: resolution-critic-recency
+    what: "決議の決定論チェックを『最終代表発言以降に独立役員が発言したか』へ精緻化し、確認付き決議の連続を監査アラート対象にする(独立役員 再確認審査 懸念A)"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "決議チェックの精緻化(批判の鮮度)と確認付き決議の連続検出"
+      labels: [governance]
+      body: "現行の boardroom.mark_resolution は『議事録の出席者に独立役員が居るか』しか見ない(src/ryza/governance/boardroom.py)。そのため会議の冒頭で独立役員が別論点に1度発言していれば、その後に代表が持ち出した本題が無批判のまま決議できてしまう(独立役員 再確認審査 懸念A)。実装内容: ①チェックを『最終の代表発言以降に独立役員の発言があるか』へ精緻化する(guard_scope_text と同じ区間の考え方を決議側にも適用)、②confirmed_without_critic=True で通した決議を証跡として残す(現状は DB に痕跡が無く、連続使用を検出できない — governance.minute_resolutions への列追加は保護領域のため独立役員審査が必要)、③監査ジョブ(src/ryza/audit)に『確認付き決議の連続』を 05-governance §6-5(形骸化の防止)のアラートとして追加する。②の列追加なしに③は成立しないため順序に注意。"
+    status: pending
+
+  - id: meeting-reaction-round-consistency
+    what: "進行役の定型応答の直後に反応ラウンドが回る筋を整理する(独立役員 再確認審査 懸念C)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "会議1ターンの反応ラウンド条件を整理する(進行役フォールバック後の扱い)"
+      labels: [impl]
+      body: "boardroom.conduct_meeting は、ルータが誰も選ばなかった場合に進行役の定型文(LLM 呼び出しなし)を返した後も、残枠があるため反応ラウンドのルータを1回回す(独立役員 再確認審査 懸念C)。『誰も反応すべきでない』と判断した直後に『反応すべき役職はいるか』を問い直す構造は筋が通らず、ルータ呼び出し1回ぶんの無駄でもある。整理の選択肢: (a) 進行役フォールバックの場合は反応ラウンドをスキップする(意味論としては最も素直)、(b) 進行役の定型文をトランスクリプトに入れずに反応ラウンドを回す、(c) 現行を維持し『代表発言の再解釈の機会』として docstring に根拠を明記する。いずれかを選び、テストで固定すること。挙動の是非は実運用のログ(meta.runs.params.runtime.rounds)を数ターン分見てから判断してよい。"
+    status: pending
