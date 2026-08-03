@@ -37,6 +37,7 @@ import yaml
 
 from ryza.db.conn import connect
 from ryza.ingest.freshness import DEFAULT_SLAS, FreshnessSLA, _latest_as_of
+from ryza.risk import navflow
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -187,37 +188,48 @@ DEFAULT_BOOK_ID = "DEMO_FUND"
 def fetch_nav_series(
     conn: psycopg.Connection, *, book_id: str = DEFAULT_BOOK_ID
 ) -> list[dict[str, Any]]:
-    """帳簿の日次 NAV 系列(日付昇順)と当日の外部フロー純額。
+    """帳簿の日次 NAV 系列(日付昇順)と、その点に帰属する外部フロー純額。
 
     NAV の正は ``ledger.nav_snapshots``(``ryza.risk.daily.load_nav_series`` と同じ選択。
     ``risk.nav_daily`` は執行照合を重ねた risk 用ビューであり、正ではない)。
 
-    外部フロー(出資・払戻)は ``ledger.accounts.category='equity'`` かつ
-    ``account_id <> 'retained'``(拠出資本勘定)への仕訳の日次合算で、これを引かないと
-    増資日のリターンが跳ねる。集計式も risk エンジンと同一にしてある。
+    外部フロー(出資・払戻)の突合は ``ryza.risk.navflow`` に**一本化**してある
+    (独立審査 T-018 重要-5: 同じ定義を 2 箇所に持ったことが、休日フローの取りこぼしを
+    片方だけ直せば済むように見せていた)。フローは entry_date 完全一致ではなく
+    「その日以降の最初の snap_date」へ寄せる — 締めの走らない日に付いた出資を
+    リターンに数えてしまう(実測 +50%)のを防ぐため。
+    まだスナップショットの無いフローは系列に載らないので
+    :func:`fetch_pending_flows` で別に取り、UI 側で注記する。
     """
+    flows = navflow.load_external_flows(conn, book_id)
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT s.snap_date AS day, s.nav, s.status,
-                   coalesce(f.net_flow, 0) AS net_flow
-            FROM ledger.nav_snapshots s
-            LEFT JOIN (
-                SELECT je.entry_date AS d, sum(jl.credit - jl.debit) AS net_flow
-                FROM ledger.journal_lines jl
-                JOIN ledger.journal_entries je ON je.entry_id = jl.entry_id
-                JOIN ledger.accounts a
-                  ON a.book_id = jl.book_id AND a.account_id = jl.account_id
-                WHERE jl.book_id = %(book)s
-                  AND a.category = 'equity' AND a.account_id <> 'retained'
-                GROUP BY je.entry_date
-            ) f ON f.d = s.snap_date
-            WHERE s.book_id = %(book)s
-            ORDER BY s.snap_date
+            SELECT snap_date AS day, nav, status
+            FROM ledger.nav_snapshots
+            WHERE book_id = %(book)s
+            ORDER BY snap_date
             """,
             {"book": book_id},
         )
-        return _rows(cur)
+        rows = _rows(cur)
+    for row in rows:
+        row["net_flow"] = flows.net_flow(row["day"])
+    return rows
+
+
+def fetch_pending_flows(
+    conn: psycopg.Connection, *, book_id: str = DEFAULT_BOOK_ID
+) -> list[dict[str, Any]]:
+    """NAV スナップショットがまだ無い日の外部フロー(``[{"day", "amount"}]``)。
+
+    系列最終日より後の出資・払戻は NAV 系列のどの点にも載らない。黙って落とすと
+    「次の締めで NAV が跳ねる理由」が画面から消えるため、別枠で返して UI が注記する。
+    """
+    return [
+        {"day": p.entry_date, "amount": p.amount}
+        for p in navflow.load_external_flows(conn, book_id).pending
+    ]
 
 
 # ── リスク ────────────────────────────────────────────────────────────────────

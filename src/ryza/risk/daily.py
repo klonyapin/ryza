@@ -16,7 +16,10 @@ snap_date ごとに upsert する系列をそのまま使う(provisional も測�
 
 外部フロー調整: 出資・払戻は ``ledger.accounts.category='equity'`` かつ
 ``account_id <> 'retained'``(拠出資本勘定)への仕訳から日次合算する。損益の
-振替(retained)はフローに含めない。
+振替(retained)はフローに含めない。**フローの帰属日は「その日以降の最初の
+snap_date」**(``ryza.risk.navflow`` — 休日に付いたフローの取りこぼしを防ぐ。
+独立審査 T-018 重要-5)。まだスナップショットの無いフローは
+``NavSeries.pending_flows`` として返し、レポートに注記する(黙って落とさない)。
 
 CLI: ``python -m ryza.risk.daily``(冪等 — 同日再実行は limits_state を同値上書きし、
 イベント台帳とレポートが 1 件ずつ増えるのみ)。
@@ -26,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -40,6 +44,7 @@ from ryza.ips import IPSConfig
 from ryza.provenance import Run, start_run
 from ryza.risk import engine
 from ryza.risk.classify import classify_current_instruments
+from ryza.risk.navflow import PendingFlow, load_external_flows, pending_flows_note
 from ryza.risk.state import upsert_limits_state
 
 _JST = ZoneInfo("Asia/Tokyo")
@@ -50,8 +55,28 @@ _RETURN_LOOKBACK_DAYS = 400
 
 
 # ── DB 読出し ─────────────────────────────────────────────────────────────────
-def load_nav_series(conn: psycopg.Connection, book_id: str) -> list[engine.NavPoint]:
-    """帳簿の NAV 系列(日付昇順)+外部フロー(拠出資本勘定の日次純額)。"""
+@dataclass(frozen=True)
+class NavSeries:
+    """NAV 系列(フロー調整済み)と、まだスナップショットの無い未反映フロー。
+
+    ``pending_flows`` を返り値に持たせているのは、呼び出し側が未反映フローの存在を
+    **検知できる形**にするため(独立審査 T-018 重要-5 の裁定「黙って落とさない」)。
+    """
+
+    points: list[engine.NavPoint]
+    pending_flows: tuple[PendingFlow, ...] = ()
+
+    def __bool__(self) -> bool:  # 「系列があるか」の判定は点の有無で行う
+        return bool(self.points)
+
+
+def load_nav_series(conn: psycopg.Connection, book_id: str) -> NavSeries:
+    """帳簿の NAV 系列(日付昇順)+外部フロー(拠出資本勘定の日次純額)。
+
+    フローは ``ryza.risk.navflow`` の規約で「その日以降の最初の snap_date」へ寄せる
+    (休日フローの取りこぼし修正 — 重要-5)。系列最終日より後のフローは点にできない
+    ため ``pending_flows`` として別に返す。
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -61,23 +86,14 @@ def load_nav_series(conn: psycopg.Connection, book_id: str) -> list[engine.NavPo
             (book_id,),
         )
         navs = cur.fetchall()
-        cur.execute(
-            """
-            SELECT je.entry_date, sum(jl.credit - jl.debit)
-            FROM ledger.journal_lines jl
-            JOIN ledger.journal_entries je ON je.entry_id = jl.entry_id
-            JOIN ledger.accounts a
-              ON a.book_id = jl.book_id AND a.account_id = jl.account_id
-            WHERE jl.book_id = %s AND a.category = 'equity' AND a.account_id <> 'retained'
-            GROUP BY je.entry_date
-            """,
-            (book_id,),
-        )
-        flows = dict(cur.fetchall())
-    return [
-        engine.NavPoint(day=d, nav=Decimal(n), net_flow=Decimal(flows.get(d, 0)))
-        for d, n in navs
-    ]
+    flows = load_external_flows(conn, book_id)
+    return NavSeries(
+        points=[
+            engine.NavPoint(day=d, nav=Decimal(n), net_flow=flows.net_flow(d))
+            for d, n in navs
+        ],
+        pending_flows=flows.pending,
+    )
 
 
 def load_positions(
@@ -286,6 +302,9 @@ def run_risk_daily(
     NAV 系列がまだ無い帳簿は limits_state を**作らない**(未測定を「リスク OK」と
     主張しない — T-014 判断11 と同じ姿勢。ゲートは行欠落を fail-closed で block)。
     レポートにはその旨を明記する。
+
+    スナップショット未生成の外部フローがある帳簿は、注記を載せたうえで urgent で
+    上げる(測定に入っていない入出金の存在を当日中に見せる — 重要-5 の裁定)。
     """
     ips = ips or IPSConfig.load()
     as_of = as_of or datetime.now(UTC)
@@ -293,7 +312,10 @@ def run_risk_daily(
         "classification": classify_current_instruments(conn, run_id=run.run_id)
     }
     for book_id in ips.books:
-        series = load_nav_series(conn, book_id)
+        loaded = load_nav_series(conn, book_id)
+        series = loaded.points
+        # 未反映フロー(スナップショット未生成)は測定に入らない。黙って落とさず注記する。
+        pending_note = pending_flows_note(loaded.pending_flows)
         if not series:
             embed = {
                 "title": (
@@ -302,18 +324,25 @@ def run_risk_daily(
                 "description": (
                     "NAV 系列なし(会計締め未実行)。リスク状態は未測定のため "
                     "risk.limits_state は作成しない(fail-closed — 発注はゲートが block)。"
+                    + (f"\n{pending_note}" if pending_note else "")
                 ),
                 "color": COLOR_FLASH,
                 "fields": [],
                 "footer": {"text": DISCLAIMER},
             }
             oid = enqueue(conn, channel_ops, embed, run.run_id, urgent=True)
-            detail[book_id] = {"status": "no_nav", "report_outbox_id": oid}
+            detail[book_id] = {
+                "status": "no_nav",
+                "pending_flows": len(loaded.pending_flows),
+                "report_outbox_id": oid,
+            }
             continue
         positions, notes = load_positions(conn, book_id, as_of=as_of)
         returns = load_instrument_returns(
             conn, [p.instrument_id for p in positions], as_of=as_of
         )
+        if pending_note:
+            notes.append(pending_note)
         state = engine.evaluate(series, positions, returns, ips, extra_notes=notes)
         effective = upsert_limits_state(conn, book_id, state, as_of=as_of, run_id=run.run_id)
         usage = engine.guardrail_usage(
@@ -326,10 +355,11 @@ def run_risk_daily(
             channel_ops,
             embed,
             run.run_id,
-            urgent=any(effective.values()) or state.es95.deferred,
+            urgent=any(effective.values()) or state.es95.deferred or bool(pending_note),
         )
         detail[book_id] = {
             "status": "measured",
+            "pending_flows": len(loaded.pending_flows),
             "drawdown": str(state.drawdown),
             "ewma_vol": state.ewma_vol_annual,
             "es95": state.es95.adopted,

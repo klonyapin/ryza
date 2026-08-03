@@ -82,6 +82,12 @@ def _nav_series() -> list[dict[str, Any]]:
 
 
 @st.cache_data(ttl=60)
+def _pending_flows() -> list[dict[str, Any]]:
+    """スナップショット未生成の外部フロー(NAV 系列に載らない — 重要-5)。"""
+    return queries.fetch_pending_flows(_conn())
+
+
+@st.cache_data(ttl=60)
 def _cost_summary() -> dict[str, Any]:
     return queries.fetch_cost_summary(_conn())
 
@@ -321,25 +327,45 @@ def page_overview(conn) -> None:
 
 
 # ── 成績 ──────────────────────────────────────────────────────────────────────
-def _render_flow_notice(series: list[dict[str, Any]]) -> None:
-    """外部フロー発生日の注記(独立役員審査 2026-08-03 重要-6)。
+def _render_flow_notice(
+    series: list[dict[str, Any]], pending: list[dict[str, Any]] | None = None
+) -> None:
+    """外部フロー発生日の注記(独立役員審査 2026-08-03 重要-6・重要-5)。
 
     underwater 図は NAV そのものを見る図なので、出資で NAV が跳ねた日・払戻で NAV が
     落ちた日は「回復/下落」に見える。払戻を −30% の損失と読み違えないよう、フローの
     あった日を図の直下で名指しする(期間リターンの方は TWR で調整済み)。
+
+    フローの帰属日は仕訳日ではなく「その日以降の最初のスナップショット日」である
+    (``ryza.risk.navflow``)。スナップショットがまだ無いフロー(``pending``)は系列の
+    どの点にも載らないため、別行で明示する — 次の締めで NAV が跳ねる原因になる。
+
+    先頭点は除く: 系列の起点より前の出資(設定時の払込など)はすべて先頭点に寄るが、
+    前の点が無い以上そこに段差は生じない(起点 NAV が既にそれを含む)。段差の説明という
+    この注記の用途に対しては誤誘導になるため出さない。金額は明細表の net_flow に残る。
     """
-    flows = [r for r in series if float(r.get("net_flow") or 0) != 0]
-    if not flows:
-        return
-    items = " / ".join(
-        f"{r['day']} {'出資' if float(r['net_flow']) > 0 else '払戻'}"
-        f" {viz.fmt_jpy(abs(float(r['net_flow'])))}"
-        for r in flows[-8:]
-    )
-    st.caption(
-        f":orange[外部フロー発生日({len(flows)} 日・図は未調整)]: {items}"
-        " — 上の図の段差はこの出資・払戻によるもので、損益ではない。"
-    )
+    flows = [r for r in series[1:] if float(r.get("net_flow") or 0) != 0]
+    if flows:
+        items = " / ".join(
+            f"{r['day']} {'出資' if float(r['net_flow']) > 0 else '払戻'}"
+            f" {viz.fmt_jpy(abs(float(r['net_flow'])))}"
+            for r in flows[-8:]
+        )
+        st.caption(
+            f":orange[外部フロー発生日({len(flows)} 日・図は未調整)]: {items}"
+            " — 上の図の段差はこの出資・払戻によるもので、損益ではない"
+            "(仕訳日が休日の場合は直後のスナップショット日に寄せてある)。"
+        )
+    if pending:
+        items = " / ".join(
+            f"{r['day']} {'出資' if float(r['amount']) > 0 else '払戻'}"
+            f" {viz.fmt_jpy(abs(float(r['amount'])))}"
+            for r in pending[-8:]
+        )
+        st.caption(
+            f":red[スナップショット未生成の外部フロー({len(pending)} 件)]: {items}"
+            " — まだ NAV 系列にもリターン測定にも入っていない(次の会計締めで反映)。"
+        )
 
 
 def page_performance(conn) -> None:
@@ -361,7 +387,7 @@ def page_performance(conn) -> None:
         "(IPS §3.1)で、外部フロー調整は入れない NAV そのものの水没度合い。"
         "リミット判定に使う測定値はリスクエンジンの出力(「リスク」ページ)。"
     )
-    _render_flow_notice(series)
+    _render_flow_notice(series, _pending_flows())
 
     st.subheader("期間別リターン(外部フロー調整済み TWR)")
     rows = [

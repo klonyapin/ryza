@@ -9,14 +9,18 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 
 import psycopg
 import pytest
 import queries
+import viz
 from psycopg.types.json import Jsonb
 
 from ryza.ingest.freshness import FreshnessSLA
 from ryza.ledger.posting import post_entry
+from ryza.risk.daily import load_nav_series
+from ryza.risk.engine import book_returns
 
 NOW = datetime.now(UTC)
 
@@ -261,6 +265,82 @@ def test_fetch_nav_series_joins_external_flows(conn, run):
     prev, cur = series
     ret = (float(cur["nav"]) - float(cur["net_flow"]) - float(prev["nav"])) / float(prev["nav"])
     assert ret == pytest.approx(0.0)
+
+
+def _post_capital(conn, run, *, day: date, amount: int, book_id: str = "DEMO_FUND") -> None:
+    """出資(+)/払戻(−)の仕訳を 1 本入れる。"""
+    cash, capital = (
+        ({"account_id": "cash", "debit": amount}, {"account_id": "capital", "credit": amount})
+        if amount > 0
+        else (
+            {"account_id": "cash", "credit": -amount},
+            {"account_id": "capital", "debit": -amount},
+        )
+    )
+    post_entry(
+        conn,
+        book_id=book_id,
+        entry_date=day,
+        description="テスト外部フロー",
+        lines=[{**cash, "currency": "JPY"}, {**capital, "currency": "JPY"}],
+        evidence={
+            "kind": "invoice", "payload_ref": f"test://flow/{day}/{amount}",
+            "sha256": hashlib.sha256(f"{day}{amount}".encode()).digest(),
+            "source": "test", "retrieved_at": NOW,
+        },
+        run_id=run.run_id,
+    )
+
+
+def test_fetch_nav_series_rolls_forward_holiday_flow(conn, run):
+    """スナップショットの無い日(休日)の出資は次の測定日に寄る(独立審査 重要-5)。
+
+    修正前は entry_date 完全一致で結合していたため 1/3 の出資が落ち、1/2 → 1/5 の
+    リターンが +50% と表示されていた(実際の運用損益は 0%)。
+    """
+    _insert_nav(conn, day=date(2030, 1, 2), nav=1_000_000)
+    _insert_nav(conn, day=date(2030, 1, 5), nav=1_500_000)
+    _post_capital(conn, run, day=date(2030, 1, 3), amount=500_000)
+    series = [r for r in queries.fetch_nav_series(conn) if r["day"].year == 2030]
+    assert [r["day"] for r in series] == [date(2030, 1, 2), date(2030, 1, 5)]
+    assert float(series[1]["net_flow"]) == 500_000.0
+    prev, cur = series
+    ret = (float(cur["nav"]) - float(cur["net_flow"]) - float(prev["nav"])) / float(prev["nav"])
+    assert ret == pytest.approx(0.0)
+
+
+def test_fetch_pending_flows_after_last_snapshot(conn, run):
+    """系列最終日より後のフローは NAV 系列に載らないので別枠で返す(黙って落とさない)。"""
+    _insert_nav(conn, day=date(2030, 1, 2), nav=1_000_000)
+    before_pending = queries.fetch_pending_flows(conn)
+    before_series = queries.fetch_nav_series(conn)
+    _post_capital(conn, run, day=date(2030, 1, 6), amount=500_000)
+    added = [r for r in queries.fetch_pending_flows(conn) if r not in before_pending]
+    assert added == [{"day": date(2030, 1, 6), "amount": Decimal(500_000)}]
+    # 系列側は変わらない(未反映フローは点にできない)。
+    assert queries.fetch_nav_series(conn) == before_series
+
+
+def test_nav_series_matches_risk_engine(conn, run):
+    """ダッシュボードとリスクエンジンの日次リターンが同一 fixture で一致する。
+
+    重要-5 は「同じフロー突合の定義を 2 箇所に持っていた」ことが根本原因だった。
+    定義は ``ryza.risk.navflow`` に一本化してあり、この test がその一致を固定する。
+    """
+    for day, nav in ((2, 1_000_000), (5, 1_400_000), (7, 1_540_000), (8, 1_940_000)):
+        _insert_nav(conn, day=date(2030, 1, day), nav=nav)
+    _post_capital(conn, run, day=date(2030, 1, 3), amount=500_000)  # 休日(snapshot なし)
+    _post_capital(conn, run, day=date(2030, 1, 4), amount=-100_000)  # 同じ点に寄る払戻
+    _post_capital(conn, run, day=date(2030, 1, 8), amount=400_000)  # 測定日当日
+
+    rows = queries.fetch_nav_series(conn)
+    points = load_nav_series(conn, "DEMO_FUND").points
+    assert [r["day"] for r in rows] == [p.day for p in points]
+    assert [Decimal(str(r["net_flow"])) for r in rows] == [p.net_flow for p in points]
+    dash = [r for _, r in viz.flow_adjusted_returns(rows)]
+    assert dash == pytest.approx(book_returns(points))
+    # 期待値: 1/5 は純増 40 万で運用損益 0%、1/7 は +10%、1/8 は 40 万出資で 0%。
+    assert dash == pytest.approx([0.0, 0.1, 0.0])
 
 
 def test_fetch_nav_series_filters_by_book(conn, run):

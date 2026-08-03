@@ -382,7 +382,9 @@ def flow_adjusted_returns(rows: Sequence[Mapping[str, Any]]) -> list[tuple[date,
 
     ``r_t = (nav_t − flow_t − nav_{t−1}) / nav_{t−1}``。定義は
     ``ryza.risk.engine.book_returns`` と同一(出資・払戻をリターンに数えない TWR)。
-    直前 NAV が 0 以下の区間は除外する。
+    直前 NAV が 0 以下の区間は除外する。``flow_t`` は区間 ``(t−1, t]`` の外部フロー純額
+    (``queries.fetch_nav_series`` が ``ryza.risk.navflow`` の規約で寄せた値 — 休日の
+    仕訳もこの区間に入る)。
     """
     out: list[tuple[date, float]] = []
     for prev, cur in zip(rows, rows[1:], strict=False):
