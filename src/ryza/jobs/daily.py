@@ -7,7 +7,9 @@
   → outbox → 実行サマリ
 
 **FM 段(T-017)**: Jim(非 LLM・日次)を毎日、Ben(LLM・週次)を ``config/fm_ben.yaml``
-の実行曜日に走らせ、提案を ``gate_and_record`` へ通す。**分析の後・執行の前**に置く
+の実行曜日に走らせ、提案を ``gate_and_record`` へ通す。**FM ごとに別段**
+(``fm.jim`` / ``fm.ben``)にしてあり、Ben の例外で Jim の決定論注文が巻き戻らない
+(独立役員審査 T-017 C-5)。**分析の後・執行の前**に置く
 (FM 提案 → ゲート → 執行の順 — 設計リード裁定 2026-08-03)。Kill Switch 中は提案自体を
 作らない(ゲートも G-0 で block するが、通らないと分かっている案を作らない)。
 ※ 銘柄の決定論分類(``market.instrument_classification``)を作るのは risk 段(T-015)
@@ -429,36 +431,42 @@ def run_daily(
     stages.append(_run_stage(conn, "analysis", _analysis))
 
     # ── 4. FM(戦略): Jim 日次 + Ben 週次 → ゲート → 注文案 — T-017 ────────────
-    def _fm() -> dict[str, Any]:
+    # **FM ごとに別段(別 savepoint)**にする(独立役員審査 T-017 C-5)。1段にまとめると
+    # Ben(LLM・週次)の例外で同じ段の Jim(決定論・日次)の提案・注文まで巻き戻り、
+    # 日次の決定論シグナルが週次の LLM 障害に巻き込まれる。段の失敗許容は FM 単位で効かせる。
+    def _fm_jim() -> dict[str, Any]:
         if is_engaged(conn):
             # Kill Switch 中は提案を作らない(ゲートも block するが、通らない案は作らない)。
             return {"skipped": "kill_switch"}
         fm_ips, fm_mandates = load_and_validate()
-        detail: dict[str, Any] = {
-            "jim": _fm_summary(
-                run_jim(
-                    conn, run, book_id=DEMO_BOOK, as_of=as_of,
-                    ips=fm_ips, mandates=fm_mandates,
-                )
+        return _fm_summary(
+            run_jim(
+                conn, run, book_id=DEMO_BOOK, as_of=as_of,
+                ips=fm_ips, mandates=fm_mandates,
             )
-        }
+        )
+
+    stages.append(_run_stage(conn, "fm.jim", _fm_jim))
+
+    def _fm_ben() -> dict[str, Any]:
+        if is_engaged(conn):
+            return {"skipped": "kill_switch"}
         ben_cfg = BenConfig.load()
         weekday = as_of.astimezone(JST).isoweekday()
         if fm_llm is None:
-            detail["ben"] = {"skipped": "LLM 未注入"}
-        elif weekday != ben_cfg.weekday:
-            detail["ben"] = {"skipped": f"週次(実行曜日={ben_cfg.weekday} 当日={weekday})"}
-        else:
-            detail["ben"] = _fm_summary(
-                run_ben(
-                    conn, run, fm_llm, model=config.model_for(ben_cfg.model_tier),
-                    book_id=DEMO_BOOK, as_of=as_of, cfg=ben_cfg,
-                    ips=fm_ips, mandates=fm_mandates,
-                )
+            return {"skipped": "LLM 未注入"}
+        if weekday != ben_cfg.weekday:
+            return {"skipped": f"週次(実行曜日={ben_cfg.weekday} 当日={weekday})"}
+        fm_ips, fm_mandates = load_and_validate()
+        return _fm_summary(
+            run_ben(
+                conn, run, fm_llm, model=config.model_for(ben_cfg.model_tier),
+                book_id=DEMO_BOOK, as_of=as_of, cfg=ben_cfg,
+                ips=fm_ips, mandates=fm_mandates,
             )
-        return detail
+        )
 
-    stages.append(_run_stage(conn, "fm", _fm))
+    stages.append(_run_stage(conn, "fm.ben", _fm_ben))
 
     # ── 5. 執行(デモ)→ 締め(照合 → NAV 確定)— T-016 ──────────────────────
     def _execution() -> dict[str, Any]:

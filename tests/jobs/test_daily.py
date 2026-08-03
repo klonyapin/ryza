@@ -6,9 +6,11 @@ Kill Switch ゲートを、ローカル DB + ``DryRunProvider``(実 API を呼�
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from ryza.bot import killswitch
+from ryza.fm.config import BenConfig
 from ryza.ingest.jquants import JQuantsAuthError
 from ryza.jobs import daily
 from ryza.jobs.daily import make_default_ingest, run_daily, run_ingest_sources
@@ -44,7 +46,7 @@ def test_daily_end_to_end(conn, run, llm_config, make_daily_llms, insert_enriche
     # fm 段は分析の後・執行の前(FM 提案 → ゲート → 執行 — T-017)。
     # risk 段は会計締め(execution 段)の直後(00 §9・設計リード裁定 2026-08-03)。
     assert [s.name for s in result.stages] == [
-        "ingest", "preprocess", "analysis", "fm", "execution", "risk",
+        "ingest", "preprocess", "analysis", "fm.jim", "fm.ben", "execution", "risk",
         "morning", "ops_summary",
     ]
     assert result.ok
@@ -280,11 +282,11 @@ def test_daily_fm_stage_proposes_and_executes(
 
     result, _ = _run(conn, run, llm_config, make_daily_llms)
 
-    fm = result.stage("fm")
-    assert fm is not None and fm.ok, fm.error
-    assert fm.detail["jim"]["passed"] == 1 and fm.detail["jim"]["blocked"] == 0
+    jim = result.stage("fm.jim")
+    assert jim is not None and jim.ok, jim.error
+    assert jim.detail["passed"] == 1 and jim.detail["blocked"] == 0
     # Ben は LLM 未注入(run_daily に fm_llm を渡していない)のためスキップ。
-    assert "skipped" in fm.detail["ben"]
+    assert "skipped" in result.stage("fm.ben").detail
     # 同日の執行段が約定させ、注文には論拠(thesis_id)が紐づいている。
     assert result.stage("execution").detail["filled"] == 1
     with conn.cursor() as cur:
@@ -308,10 +310,49 @@ def test_daily_fm_stage_skipped_on_kill_switch(
     killswitch.engage(conn, "1", ["1"], reason="test")
 
     result, _ = _run(conn, run, llm_config, make_daily_llms)
-    assert result.stage("fm").detail == {"skipped": "kill_switch"}
+    assert result.stage("fm.jim").detail == {"skipped": "kill_switch"}
+    assert result.stage("fm.ben").detail == {"skipped": "kill_switch"}
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM trading.fm_theses")
         assert cur.fetchone()[0] == 0
+
+
+def test_ben_failure_does_not_roll_back_jim(
+    conn, run, llm_config, make_daily_llms, insert_enriched_doc, monkeypatch
+):
+    """Ben(LLM・週次)の例外で Jim(決定論・日次)の提案・注文が巻き戻らない。
+
+    独立役員審査 T-017 C-5 の是正(fm 段を FM ごとの savepoint に分割)を固定する。
+    Ben を当日実行にするため実行曜日を当日に差し替え、run_ben を例外に置き換える。
+    """
+    _seed(insert_enriched_doc)
+    instrument_id = _seed_jim_universe(conn, run)
+    weekday = datetime.now(UTC).astimezone(daily.JST).isoweekday()
+    base_cfg = BenConfig.load()
+    monkeypatch.setattr(
+        daily.BenConfig, "load",
+        classmethod(lambda cls: replace(base_cfg, weekday=weekday)),
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("ben boom")
+
+    monkeypatch.setattr(daily, "run_ben", _boom)
+
+    result, _ = _run(conn, run, llm_config, make_daily_llms, fm_llm=object())
+
+    ben = result.stage("fm.ben")
+    assert ben is not None and not ben.ok and "ben boom" in (ben.error or "")
+    # Jim の段は成功したまま残り、同日の執行段が約定させる(巻き戻っていない)。
+    jim = result.stage("fm.jim")
+    assert jim.ok and jim.detail["passed"] == 1
+    assert result.stage("execution").detail["filled"] == 1
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM trading.fm_theses WHERE fm = 'jim' AND instrument_id = %s",
+            (instrument_id,),
+        )
+        assert cur.fetchone()[0] == 1
 
 
 # ── 失敗許容: 一段が落ちても後段は走る ──────────────────────────────────────────
