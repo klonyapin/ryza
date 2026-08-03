@@ -246,6 +246,8 @@ SELECT format(
 -- 注意: ALTER DEFAULT PRIVILEGES により**将来作られるテーブルにも SELECT が付く**。
 --   秘密を持つテーブルを新設したら、この除外リストに追加すること
 --   (恒久策は ops/reminders.yaml db-role-separation-webhook-url のロール分離)。
+--   ops.org_icon_overrides / ops.org_icon_override_log(0020)は公開画像 URL のみで
+--   秘密を持たず、組織ページの表示に読取が必要なため**除外しない**(SELECT のまま)。
 SELECT format('REVOKE ALL ON %s FROM %I', t.rel, '__DASH_ROLE__')
   FROM (VALUES ('ops.discord_webhooks')) AS t(rel)
  WHERE to_regclass(t.rel) IS NOT NULL;
@@ -264,12 +266,24 @@ ALTER ROLE "__BR_ROLE__"
 ALTER ROLE "__BR_ROLE__" SET default_transaction_read_only = off;
 
 GRANT CONNECT ON DATABASE "__DB__" TO "__BR_ROLE__";
-GRANT USAGE ON SCHEMA governance, meta TO "__BR_ROLE__";
+GRANT USAGE ON SCHEMA governance, meta, ops TO "__BR_ROLE__";
 -- 着任プロンプト(stances)・決議一覧・Run の読み出しに必要な SELECT。
 GRANT SELECT ON governance.minutes, governance.minute_resolutions, governance.stances,
                 meta.runs TO "__BR_ROLE__";
 GRANT INSERT ON governance.minutes, governance.minute_resolutions, governance.stances
   TO "__BR_ROLE__";
+-- キャラクターアイコンの上書き(0020・代表指示 2026-08-03)。組織ページの編集 UI が
+-- このロールで書く。書けるのはこの 2 表だけで、ops の他の表(trading_state・flags・
+-- discord_webhooks 等)への権限は与えない — Kill Switch や webhook 秘密への経路を作らない。
+-- 現在値表は上書きが本義のため UPDATE と、初期値へ戻すための DELETE が要る。
+-- 履歴表は**追記オンリー**(INSERT のみ。UPDATE/DELETE を与えず履歴を消せなくする)。
+SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON ops.org_icon_overrides TO %I',
+              '__BR_ROLE__')
+ WHERE to_regclass('ops.org_icon_overrides') IS NOT NULL;
+\gexec
+SELECT format('GRANT INSERT ON ops.org_icon_override_log TO %I', '__BR_ROLE__')
+ WHERE to_regclass('ops.org_icon_override_log') IS NOT NULL;
+\gexec
 -- meta.runs は開始 INSERT → 終了時に status/finished_at/cost を UPDATE する。UPDATE は
 -- **列レベル**に限定し、job_name / code_version / started_at / params の事後改竄を防ぐ
 -- (リネージの証跡性。再審査 条件3)。列名は migrations/0001_meta.sql に一致させること。
