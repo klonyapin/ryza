@@ -1,11 +1,13 @@
 # FM マンデート: Peter(承認: 2026-08-03 投資委員会 — 値の決定は設計リードへ委任)
 # 正: docs/design/81-fm-mandates.md §3。IPS(config/ips.yaml)に常に劣後 — 狭める方向のみ有効
 fm: peter
-version: "1"
+version: "2"   # v2: 2026-08-03 独立レビュー条件5対応(σ配分・レバ上限追加)
 approved_at: "2026-08-03"
 universe: [jp_equity_midcap_cash, us_equity_cash]
 style_reference: {turnover: mid, holding: weeks_to_months}
 capital_jpy: 2000000
+pod_sigma_budget: 0.15   # 対仮想資本・年率
+pod_gross_leverage_limit: 1.0
 pod_dd_limit: 0.20
 pod_concentration_limit: 0.30
 additional_prohibitions: [derivatives, short_selling]
