@@ -118,14 +118,20 @@ def _close(conn, day: date, book: str = "DEMO_FUND") -> None:
 
 
 def _post(conn, run_id, day: date, *, instrument: bool = False, book="DEMO_FUND") -> int:
-    """仕訳を 1 本立てる。``instrument=True`` は建玉を動かす明細を含む。"""
+    """仕訳を 1 本立てる。``instrument=True`` は建玉を動かす明細(instrument_id 付き)を含む。
+
+    ``position_changing_late`` の述語は**行レベル・建玉性**(``jl.instrument_id IS NOT NULL``)
+    であって勘定科目を見ないので、ここで使う勘定は何でもよい。原価勘定 ``securities`` を
+    使わないのは 0034 のガード(数量を再生できる証憑のみ)に掛かるためで、この検査の
+    意味とは無関係である — 建玉性の判定が勘定に依存しないことをむしろ固定している。
+    """
     amount = D(1000)
     cash, capital = ("cash", "capital") if book == "DEMO_FUND" else (
         "cash_bank", "owner_capital"
     )
     lines: list[dict] = (
         [
-            {"account_id": "securities", "debit": amount, "currency": "JPY",
+            {"account_id": "margin_deposit", "debit": amount, "currency": "JPY",
              "instrument_id": 1001},
             {"account_id": capital, "credit": amount, "currency": "JPY"},
         ]

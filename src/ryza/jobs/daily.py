@@ -426,24 +426,38 @@ def _build_restatement_embed(
 def _build_residue_embed(
     residue: dict[str, Any], *, book_id: str, day: str, as_of: datetime
 ) -> dict[str, Any]:
-    """説明不能な残渣(数量ゼロなのに残る securities)の通知(#運営 — 独立審査 新-15)。
+    """説明不能な残渣(原価恒等式の破れ)の通知(#運営 — 独立審査 新-15)。
 
     照合ブレイクと同格の専用 embed にする。実行サマリの 1 行に混ぜると ✅ 付きで埋もれる
     (再-7 と同じ欠陥)。残渣は放置すると評価替えの経路を通らないまま NAV に居座り、
     ``book_returns`` → ``ewma_vol`` → 誤 ``vol_exceeded`` の経路に乗る。
+
+    検出は締めが行う(``ledger.closing`` — 勘定分離 0034 以降は「原価勘定の残高 = 建玉
+    イベント再生の取得原価」という恒等式の破れとして検出する)。**この検査が覆うのは原価
+    勘定側だけである**(独立審査 新-19): 評価調整勘定を直接叩く偽装はここには出ず、
+    ``post_mark_to_market`` の posted_by 検証と 0034 の DB トリガが防ぐ。
     """
     jst_str = as_of.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
     return {
         "title": f"⚠️ 説明不能な建玉残渣 {jst_str}",
         "description": (
-            f"{book_id} {day}: 数量ゼロなのに securities 残高が残る銘柄が "
-            f"{len(residue)} 件ある。評価替え由来ではないため締めは洗い替えていない — "
-            "逆仕訳のオペミス、評価替えを騙る手仕訳、約定を経ない建玉(現物拠出)の"
-            "いずれかを確認すること。試算表はゼロバランスのままなので気づけない。"
+            f"{book_id} {day}: 原価勘定の残高が建玉再生の取得原価と一致しない銘柄が "
+            f"{len(residue)} 件ある。締めは評価調整勘定しか洗い替えないため原価側は"
+            "手つかずである — 逆仕訳のオペミス(買いだけを取り消して売りを残す等)か、"
+            "数量を再生できない申告の約定証憑を疑うこと(証憑を持たない直接記帳は 0034 の"
+            "原価勘定ガードが書込時に拒否するので、ここには現れない)。"
+            "試算表はゼロバランスのままなので気づけない。"
         ),
         "color": COLOR_FLASH,
         "fields": [
-            {"name": f"銘柄 {iid}", "value": f"帳簿価額 {v['book_value']}", "inline": True}
+            {
+                "name": f"銘柄 {iid}",
+                "value": (
+                    f"原価勘定 {v['book_value']} / 再生原価 {v.get('replay_cost', '?')}"
+                    f"({v.get('reason', '?')})"
+                ),
+                "inline": True,
+            }
             for iid, v in list(residue.items())[:10]
         ],
         "author": org.author_for_role("audit"),
@@ -655,7 +669,7 @@ def run_daily(
                 conn, channel_ops,
                 _build_restatement_embed(restated, as_of=as_of), run.run_id,
             )
-        # 数量ゼロなのに残る securities(評価替え由来でないため洗い替えの対象外)。
+        # 原価勘定の残高が建玉再生の原価と合わない銘柄(評価替えの経路では消えない)。
         # 検出は締めが行い(ledger.closing — 独立審査 新-15)、ここで人へ届ける。
         residue = close_result["ledger"].get("unexplained_residue") or {}
         if residue:

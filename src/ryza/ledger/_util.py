@@ -28,6 +28,30 @@ from ryza.provenance.evidence import EvidenceStore, LocalStorage
 
 CODE_VERSION = "T-002"
 
+#: 取得原価を積む勘定(約定・現物拠出)。**評価調整はここに入らない**(0034 の分離)。
+COST_ACCOUNT = "securities"
+
+#: 評価替え(MTM)の累計を積む独立勘定。残渣の同定はこの**残高そのもの**であり、
+#: 仕訳の自由記入列に対する述語での推定ではない(独立審査 新-14 の構造的根治。
+#: 判断の全文は docs/design/11-mtm-account-separation.md)。
+MTM_ACCOUNT = "securities_mtm"
+
+#: 現物拠出を記帳できる ``posted_by``(``post_in_kind_contribution`` が検証する)。
+#: 拠出は**出資の受け入れという運用オペレーション**であって、分析・執行・締めのジョブが
+#: 通る経路ではない。値を絞るのは、NAV を生成するプリミティブの呼び出し元を台帳の上で
+#: 一意にするためである(独立審査 新-21)。
+#:
+#: **これは防御であって境界ではない**: ``posted_by`` は呼び出し側が決める列なので申告制で
+#: ある。実在性(その株を本当に受け入れたか)は台帳の中では検証できない — 拠出は必ず
+#: #運営 へ通知し、人が見る側で照合する(``post_in_kind_contribution``)。
+IN_KIND_POSTED_BY: tuple[str, ...] = ("ops.capital_ops",)
+
+#: 建玉の数量を再生できる証憑の kind(``replay_position`` の対象)。
+#: ``in_kind_contribution`` は約定を経ない建玉(現物拠出)に数量を持たせるための
+#: 証憑であり、これを再生対象に含めないと当該建玉は数量ゼロに見えて**一度も
+#: 評価替えされない**(独立審査 新-17)。
+POSITION_EVIDENCE_KINDS: tuple[str, ...] = ("broker_fill", "in_kind_contribution")
+
 # 証憑ストア経由で保存された payload_ref の URI スキーム(インライン格納との判別に使う)。
 _STORE_URI_SCHEMES = ("file://", "gs://")
 
@@ -219,11 +243,14 @@ def replay_position(
     *,
     as_of: _date | None = None,
 ) -> tuple[Decimal, Decimal]:
-    """記帳済みの約定(broker_fill 証憑)を再生し、移動平均法の (保有数量, 取得原価合計) を返す。
+    """記帳済みの建玉イベントを再生し、移動平均法の (保有数量, 取得原価合計) を返す。
 
-    - buy: qty と cost(=qty*price、手数料は別途費用計上のため原価に含めない)を加算
+    対象は ``POSITION_EVIDENCE_KINDS`` の証憑 — 約定(``broker_fill``)と現物拠出
+    (``in_kind_contribution``)である。
+
+    - buy / 現物拠出: qty と cost(=qty*price、手数料は別途費用計上のため原価に含めない)を加算
     - sell: 数量を減らし、取得原価を平均原価分だけ取り崩す
-    逆仕訳(reversal_of)された約定と、逆仕訳エントリ自体は除外する。
+    逆仕訳(reversal_of)された建玉イベントと、逆仕訳エントリ自体は除外する。
     MTM(price_snapshot)は原価に影響しないため、ここでは対象外。
 
     ``as_of`` を渡すと ``entry_date <= as_of`` の約定だけを再生する(既定 None = 全期間 —
@@ -236,21 +263,28 @@ def replay_position(
     の as_of は逆仕訳の**明細**を日付で落とすので、数量側だけ日付を無視して取り消すと
     「時価 − 帳簿価額」の差分が両者の非対称から生じる — 評価替えの差分計算が壊れる。
 
-    **限界: これは「約定から見た建玉」であって建玉の唯一の真実ではない**(独立審査 新-17)。
-    約定を経ずに建った securities(現物拠出 Dr securities / Cr capital・資産振替)はここに
-    現れないため、``post_mark_to_market`` はそれを**一度も評価替えしない**(実測: 終値
-    1500/2000/500 を渡しても残高は拠出額のまま、``detail.positions`` にも出ない)。
-    数量ゼロの残渣洗い替えが「約定外の建玉に触れない」で正しくいられるのはこの前提の
-    おかげであり、in-kind を時価評価する必要が出た時点で前提は崩れる — 建玉の真実を
-    ``replay_position`` 以外に持たせる設計判断が要る(``ops/reminders.yaml`` の
-    ``in-kind-contribution-mtm``)。
+    **現物拠出の扱い**(独立審査 新-17 の是正): 以前は ``broker_fill`` しか再生しなかった
+    ため、約定を経ずに建った securities(現物拠出 Dr securities / Cr capital)は**数量ゼロに
+    見え、一度も評価替えされなかった**(審査実測: 終値 1500/2000/500 を渡しても残高は拠出額
+    のまま、``detail.positions`` にも出ない)。是正は「建玉の真実をどこに持たせるか」の選択で
+    あり、**拠出時に数量つきの証憑を要求する**方を採った(``posting.post_in_kind_contribution``
+    が ``in_kind_contribution`` 証憑を作る)。建玉イベント表を新設する案は、``trade.fills`` と
+    証憑という既存の 2 つの真実に 3 つ目を足すことになるため採らない。
+
+    **限界: 再生できるのは証憑を持つ経路だけである。** 数量つき証憑を伴わない手仕訳
+    (``Dr securities / Cr capital`` を kind='decision' で立てる等)はここに現れない。0034 の
+    原価勘定ガード(``ledger.check_cost_line``)以降、その記帳は**書込時に拒否される** —
+    原価勘定に載る行は必ず ``POSITION_EVIDENCE_KINDS`` の証憑を持つか実突合済みの逆仕訳で
+    あり、「ここに現れないのに原価勘定にある」状態は逆仕訳のオペミス経由でしか作れない
+    (それは締めの原価恒等式が名指しする)。株式分割・併合・現物払戻も未対応のため同じく
+    拒否される — 対応するときは証憑 kind を足してここに再生を書く。
     """
     sql = """
-        SELECT je.evidence_id, e.payload_ref
+        SELECT e.kind, je.evidence_id, e.payload_ref
         FROM ledger.journal_entries je
         JOIN ledger.evidence e ON e.evidence_id = je.evidence_id
         WHERE je.book_id = %s
-          AND e.kind = 'broker_fill'
+          AND e.kind = ANY(%s)
           AND je.reversal_of IS NULL
           AND NOT EXISTS (
               SELECT 1 FROM ledger.journal_entries r
@@ -261,12 +295,14 @@ def replay_position(
         ORDER BY je.entry_id
     """
     with conn.cursor() as cur:
-        cur.execute(sql, (book_id, as_of, as_of, as_of, as_of))
+        cur.execute(
+            sql, (book_id, list(POSITION_EVIDENCE_KINDS), as_of, as_of, as_of, as_of)
+        )
         rows = cur.fetchall()
 
     qty = Decimal(0)
     cost = Decimal(0)
-    for evidence_id, payload_ref in rows:
+    for kind, evidence_id, payload_ref in rows:
         fill = load_evidence_payload(conn, evidence_id, payload_ref)
         if not isinstance(fill, dict):
             continue
@@ -274,7 +310,9 @@ def replay_position(
             continue
         f_qty = to_decimal(fill["qty"])
         f_price = to_decimal(fill["price"])
-        side = fill["side"]
+        # 現物拠出は取得(買い)と同じ向きで建玉を積む。売り方向の現物払戻は未対応
+        # (証憑 kind を分けて side を持たせる拡張になる)。
+        side = "buy" if kind == "in_kind_contribution" else fill["side"]
         if side == "buy":
             qty += f_qty
             cost += f_qty * f_price
@@ -288,18 +326,65 @@ def replay_position(
 
 
 def held_instruments(conn: psycopg.Connection, book_id: str) -> list[int]:
-    """securities 勘定に instrument_id 付きの明細を持つ全銘柄 ID を返す。"""
+    """建玉勘定(原価 ``securities`` / 評価調整 ``securities_mtm``)に明細を持つ全銘柄 ID。
+
+    評価調整勘定も見るのは、原価がゼロでも評価調整の残渣だけが残る銘柄を締めの視界から
+    落とさないため(全売却済み銘柄の洗い替え対象 — 独立審査 新-10)。
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT DISTINCT instrument_id
             FROM ledger.journal_lines
-            WHERE book_id = %s AND account_id = 'securities' AND instrument_id IS NOT NULL
+            WHERE book_id = %s AND account_id = ANY(%s) AND instrument_id IS NOT NULL
             ORDER BY instrument_id
             """,
-            (book_id,),
+            (book_id, [COST_ACCOUNT, MTM_ACCOUNT]),
         )
         return [r[0] for r in cur.fetchall()]
+
+
+def _account_instrument_balance(
+    conn: psycopg.Connection,
+    book_id: str,
+    instrument_id: int,
+    accounts: list[str],
+    as_of: _date | None,
+) -> Decimal:
+    """指定勘定・指定銘柄の残高(debit − credit)。逆仕訳は貸借の相殺で自然に落ちる。"""
+    sql = """
+        SELECT COALESCE(sum(jl.debit - jl.credit), 0)
+        FROM ledger.journal_lines jl
+        JOIN ledger.journal_entries je ON je.entry_id = jl.entry_id
+        WHERE jl.book_id = %s AND jl.account_id = ANY(%s)
+          AND jl.instrument_id = %s
+    """
+    params: list[Any] = [book_id, accounts, instrument_id]
+    if as_of is not None:
+        sql += " AND je.entry_date <= %s"
+        params.append(as_of)
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return to_decimal(cur.fetchone()[0])
+
+
+def securities_cost_value(
+    conn: psycopg.Connection,
+    book_id: str,
+    instrument_id: int,
+    *,
+    as_of: _date | None = None,
+) -> Decimal:
+    """``securities`` 勘定(**取得原価のみ**)の当該銘柄残高。
+
+    0034 の勘定分離により、この値は「建玉イベント(約定・現物拠出)が積んだ原価」だけを
+    含む。したがって ``replay_position`` が返す原価と**一致すべき恒等式**が成立し、締めが
+    毎日検査できる(``ledger.closing`` の ``unexplained_residue``)。分離前はこの式が
+    書けなかった — 評価調整が同じ勘定に混ざっており、突合には推定で差し引く必要があった。
+    """
+    return _account_instrument_balance(
+        conn, book_id, instrument_id, [COST_ACCOUNT], as_of
+    )
 
 
 def securities_book_value(
@@ -309,35 +394,29 @@ def securities_book_value(
     *,
     as_of: _date | None = None,
 ) -> Decimal:
-    """securities 勘定の当該銘柄の帳簿価額(borrow=debit-credit)を返す。MTM 反映後は時価。"""
-    sql = """
-        SELECT COALESCE(sum(jl.debit - jl.credit), 0)
-        FROM ledger.journal_lines jl
-        JOIN ledger.journal_entries je ON je.entry_id = jl.entry_id
-        WHERE jl.book_id = %s AND jl.account_id = 'securities'
-          AND jl.instrument_id = %s
+    """当該銘柄の帳簿価額 = **原価勘定 + 評価調整勘定**(borrow=debit-credit)。MTM 反映後は時価。
+
+    0034 の分離後も**この関数の意味は変えていない**(呼び出し側 — 評価替えの差分計算・
+    recon の評価額突合・再締めの再適用 — が見たいのは常に「いまの帳簿価額」であるため)。
+    変わったのは内訳が 2 勘定に分かれたことだけである。
     """
-    params: list[Any] = [book_id, instrument_id]
-    if as_of is not None:
-        sql += " AND je.entry_date <= %s"
-        params.append(as_of)
-    with conn.cursor() as cur:
-        cur.execute(sql, params)
-        return to_decimal(cur.fetchone()[0])
+    return _account_instrument_balance(
+        conn, book_id, instrument_id, [COST_ACCOUNT, MTM_ACCOUNT], as_of
+    )
 
 
-#: 評価替え仕訳の ``posted_by``。``mtm_book_value`` の判定子であり、``post_mark_to_market``
-#: はこの値以外での記帳を拒否する(書いた評価替えが後で認識されない状態を作らないため)。
+#: 評価替え仕訳の ``posted_by``。``post_mark_to_market`` と DB トリガ
+#: (``ledger.check_mtm_line`` — migrations/0034)がこの値以外での評価調整勘定への記帳を
+#: 拒否する。0034 の勘定分離以降、これは**読み取り時の判定子ではなく書き込み時のガード**
+#: である(残渣の同定は ``mtm_book_value`` = 勘定残高が行う)。
 #:
-#: **なぜ kind だけでは足りないか**(独立審査 新-14): 洗い替えは NAV を双方向に動かす原始
-#: 操作なのに、判定子が evidence の自由文字列 ``kind='price_snapshot'`` だけだと、その kind
-#: を付けた手仕訳が「評価替えが作った残高」と誤認される。審査実測: Dr securities 3,000,000 /
-#: Cr capital の手仕訳が次の締めで**全額消され** NAV 13,000,000→10,000,000、逆に貸方
-#: 500,000 を立てると NAV が無から 10,500,000 に増えた。
-#:
-#: **これは防御であって境界ではない**: ``posted_by`` も ``post_entry`` の呼び出し側が
-#: 決める列なので、値を騙る記帳は依然として可能である。構造的な根治(MTM を独立勘定へ
-#: 分離し、推定ではなく勘定体系で切る)は ``ops/reminders.yaml`` の ``mtm-separate-account``。
+#: **分離しても外してはならない**(docs/design/11-mtm-account-separation.md §5.2-1): 分離は
+#: 新-14 の攻撃を塞がず、宛先を ``securities`` から ``securities_mtm`` へ移すだけである。
+#: ``Dr securities_mtm / Cr capital`` を締めジョブ名で立てれば、次の締めが同額を洗い替えて
+#: 偽の未実現損を立てる — 審査実測(a)(NAV 13,000,000→10,000,000)と同じ結果が同じ手順で
+#: 再現する。``posted_by`` は ``post_entry`` の呼び出し側が決める列なので、**これは防御で
+#: あって境界ではない**。構造的に断つには DB ロール分離(締め専用ロール + ``current_user``
+#: を見るトリガ)が要るが、単一ロール前提のインフラ全体に波及するため採っていない。
 MTM_POSTED_BY: tuple[str, ...] = ("ledger.closing",)
 
 
@@ -348,47 +427,31 @@ def mtm_book_value(
     *,
     as_of: _date | None = None,
 ) -> Decimal:
-    """securities 帳簿価額のうち**評価替え(price_snapshot 証憑)が作ったぶん**を返す。
+    """評価調整勘定 ``securities_mtm`` の当該銘柄残高 = **評価替えが作った残高**。
 
     全売却後の「残渣」を消す量はこれであって、``securities_book_value`` の総額ではない
-    (独立審査 新-10 の是正を実装する過程で判明した危険): ``replay_position`` は
-    ``broker_fill`` 証憑しか再生しないため、**約定を経ずに建った securities**(現物拠出:
-    Dr securities / Cr capital、資産振替など)は数量ゼロに見える。総額を消しに行くと実在の
-    資産を帳簿から消してしまう(実測: 現物拠出 1,000,000 の日の NAV が丸ごと戻り、
-    ``restated`` が False になる = 訂正が消える)。
+    (独立審査 新-10 の是正を実装する過程で判明した危険): 総額を消しに行くと、約定を経ずに
+    建った建玉(現物拠出)の原価まで帳簿から消える(実測: 現物拠出 1,000,000 の日の NAV が
+    丸ごと戻り、``restated`` が False になる = 訂正が消える)。
 
-    評価替えが作った残高だけを見れば、約定でネットゼロになった銘柄の残渣(= 売りが
-    取り崩さなかった未実現益ぶん)を過不足なく特定でき、約定外の建玉には触れない。
+    **0034 以降これは推定ではない。** 分離前は同じ量を「``securities`` 勘定のうち
+    ``evidence.kind='price_snapshot'`` かつ ``posted_by ∈ MTM_POSTED_BY`` の行の合計」という
+    仕訳の自由記入列に対する述語で**推定**しており、判定子を騙る手仕訳が実在資産を消したり
+    (審査実測 NAV 13,000,000→10,000,000)、無から NAV を増やしたり(同 10,500,000)できた
+    — 独立審査 新-14。いまは勘定残高そのものなので判定子が無い。
 
-    逆仕訳の扱いは ``replay_position`` と同じ(逆仕訳された評価替えは両方落とす)。
-    ``reverse_entry`` が作る逆仕訳の証憑は kind='decision' なので、原仕訳だけを残すと
-    既に取り消された評価替えを二重に消してしまう。
+    **ただし分離は新-14 の攻撃を塞いでいない**(独立審査 新-19・設計文書 11 §5.2-1): 宛先が
+    この勘定へ移っただけであり、締めジョブ名を騙って ``Dr securities_mtm / Cr capital`` を
+    立てれば次の締めが同額を洗い替えて偽の未実現損を立てる(審査実測: NAV 13,000,000→
+    10,000,000、``unexplained_residue`` は**空**)。**原価恒等式はこの経路を検出しない** —
+    恒等式が覆うのは原価勘定側だけである。この勘定の防御は ``post_mark_to_market`` の
+    ``posted_by`` 検証と 0034 の DB トリガ(``ledger.check_mtm_line``)であって、恒等式ではない。
 
-    判定子は **evidence.kind と ``posted_by``(``MTM_POSTED_BY``)の連言**であり、kind の
-    文字列を騙るだけでは洗い替えの対象にならない(独立審査 新-14)。ここでカバーされない
-    数量ゼロの残高は ``closing.run_daily_close`` が ``unexplained_residue`` として毎締めに
-    検出・記録する(新-15)— 黙って消すのでも黙って残すのでもなく、名指しして残す。
+    逆仕訳は貸方に同額を立てるため残高で自然に相殺する(分離前に必要だった逆仕訳の
+    除外ロジックは不要になった)。数量ゼロの残高と原価恒等式(``securities`` 残高 =
+    ``replay_position`` の原価)の破れは ``closing.run_daily_close`` が
+    ``unexplained_residue`` として毎締めに検出・記録する(新-15)。
     """
-    sql = """
-        SELECT COALESCE(sum(jl.debit - jl.credit), 0)
-        FROM ledger.journal_lines jl
-        JOIN ledger.journal_entries je ON je.entry_id = jl.entry_id
-        JOIN ledger.evidence e ON e.evidence_id = je.evidence_id
-        WHERE jl.book_id = %s AND jl.account_id = 'securities'
-          AND jl.instrument_id = %s
-          AND e.kind = 'price_snapshot'
-          AND je.posted_by = ANY(%s)
-          AND je.reversal_of IS NULL
-          AND NOT EXISTS (
-              SELECT 1 FROM ledger.journal_entries r
-              WHERE r.reversal_of = je.entry_id
-                AND (%s::date IS NULL OR r.entry_date <= %s)
-          )
-          AND (%s::date IS NULL OR je.entry_date <= %s)
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            sql,
-            (book_id, instrument_id, list(MTM_POSTED_BY), as_of, as_of, as_of, as_of),
-        )
-        return to_decimal(cur.fetchone()[0])
+    return _account_instrument_balance(
+        conn, book_id, instrument_id, [MTM_ACCOUNT], as_of
+    )

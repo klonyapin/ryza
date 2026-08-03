@@ -3,7 +3,8 @@
 - post_entry: 汎用の複式仕訳記帳(貸借一致・証憑必須・OPS 費用のタグ必須を検証)
 - reverse_entry: 逆仕訳(訂正)
 - post_fill: 約定の記帳(現物買い/売り・手数料。実現損益は移動平均法)
-- post_mark_to_market: 評価替え(未実現損益の洗い替え)
+- post_in_kind_contribution: 現物拠出(約定を経ない建玉の受け入れ。数量つき証憑を作る)
+- post_mark_to_market: 評価替え(未実現損益の洗い替え。記帳先は評価調整勘定)
 - post_ops_cost: 運営費用(GCP/LLM 等)の記帳
 
 すべての関数は psycopg 接続 `conn` を第1引数に取り、呼び出し側がコミットを制御する。
@@ -18,6 +19,9 @@ from typing import Any
 
 import psycopg
 
+from ryza import org
+from ryza.bot import COLOR_FLASH, DISCLAIMER
+from ryza.bot.outbox import enqueue
 from ryza.ledger import _util
 
 # post_ops_cost の category -> 勘定科目 ID / 証憑 kind
@@ -254,7 +258,7 @@ def post_fill(
     lines: list[dict[str, Any]] = []
     if side == "buy":
         lines.append(
-            {"account_id": "securities", "debit": gross, "currency": currency,
+            {"account_id": _util.COST_ACCOUNT, "debit": gross, "currency": currency,
              "instrument_id": int(instrument_id)}
         )
         if f > 0:
@@ -274,7 +278,7 @@ def post_fill(
         if f > 0:
             lines.append({"account_id": "commission", "debit": f, "currency": currency})
         lines.append(
-            {"account_id": "securities", "credit": cost_released, "currency": currency,
+            {"account_id": _util.COST_ACCOUNT, "credit": cost_released, "currency": currency,
              "instrument_id": int(instrument_id)}
         )
         if realized >= 0:
@@ -295,6 +299,169 @@ def post_fill(
     )
 
 
+def post_in_kind_contribution(
+    conn: psycopg.Connection,
+    *,
+    book_id: str,
+    instrument_id: int,
+    qty: Any,
+    price: Any,
+    entry_date: _date,
+    run_id: int,
+    currency: str = "JPY",
+    credit_account: str = "capital",
+    description: str | None = None,
+    source: str = "in_kind",
+    reference: str | None = None,
+    posted_by: str = _util.IN_KIND_POSTED_BY[0],
+) -> int:
+    """現物拠出(約定を経ない建玉の受け入れ)を記帳する。Dr securities / Cr capital。
+
+    **なぜ専用 API が要るのか**(独立審査 新-17): 拠出を素の ``post_entry`` で
+    ``Dr securities / Cr capital`` と立てると、``replay_position`` はその建玉の**数量を
+    知らない**。数量ゼロに見える建玉は ``post_mark_to_market`` の対象から外れ、**一度も
+    評価替えされない**(審査実測: 終値 1500/2000/500 を渡しても残高は拠出額 1,000,000 の
+    まま、``detail.positions`` にも現れない)。数量ゼロ残渣の洗い替えが「約定外の建玉に
+    触れない」で正しくいられるのはこの前提のおかげであり、in-kind を時価評価する必要が
+    出た時点で前提は崩れる。
+
+    **建玉数量の真実は証憑に持たせる**(reminder が挙げた選択肢②のうち後者)。拠出時に
+    ``kind='in_kind_contribution'`` の証憑(instrument_id / qty / price)を要求し、
+    ``replay_position`` の再生対象に含める。``trade.fills`` 相当の建玉イベント表を新設する
+    案は採らない — ``trade.fills`` と証憑という既存の 2 つの真実に 3 つ目を足し、どれが
+    正かを毎回決め直す必要が出るためである。
+
+    取得原価は ``qty × price`` であり、これがそのまま原価勘定の借方になる。したがって
+    ``securities`` 残高と ``replay_position`` の原価は拠出後も一致し続ける(0034 の
+    原価恒等式)。以後この建玉は約定と同じ移動平均法で扱われ、売却時の実現損益も、締めの
+    評価替えも通常どおり効く。
+
+    **これは NAV 生成プリミティブである**(独立審査 新-21): 証憑には呼び出し側が書いた
+    数量・単価がそのまま入るため、**原価恒等式は構造的に必ず成立する** — 恒等式は「同じ
+    呼び出しが書いた 2 つの成果物の内部整合」であって実在性の検査ではない。しかも新-17 の
+    是正により、架空の拠出は評価替えにも乗る(是正前は原価のまま動かなかった)。台帳の中に
+    実在性を確かめる手段は無いので、統制は 2 つ置く:
+
+    1. ``posted_by`` を ``_util.IN_KIND_POSTED_BY``(運用オペレーション経路)に限る
+    2. 記帳と**同一トランザクションで** #運営 へ通知を投入する(``press.outbox``)。
+       呼び出し側の作法に依存しない — 通知だけを落とすことができない
+
+    どちらも申告制の域を出ない(``posted_by`` は呼び出し側が決める列である)。塞いだのは
+    「黙って NAV が増える」経路であって「嘘を申告する」経路ではない。後者は人が見る側での
+    照合(#運営 通知 + 監査)に委ねる — 限界の全文は
+    docs/design/11-mtm-account-separation.md §7。
+
+    **未対応**: 現物払戻(拠出の逆向き)と株式分割・併合。どちらも証憑 kind を分けて
+    数量の増減を表現する拡張になる。未対応の経路が ``securities`` を直接動かそうとしても
+    0034 の原価勘定ガードが書込時に拒否する(数量を再生できる証憑でなければ通らない)。
+    """
+    if posted_by not in _util.IN_KIND_POSTED_BY:
+        raise ValueError(
+            f"現物拠出の posted_by は {_util.IN_KIND_POSTED_BY} のいずれか"
+            f"(拠出は運用オペレーション経路のみ — 独立審査 新-21): {posted_by!r}"
+        )
+    q = _util.to_decimal(qty)
+    p = _util.to_decimal(price)
+    if q <= 0:
+        raise ValueError(f"qty は正: {q}")
+    if p <= 0:
+        raise ValueError(f"price は正: {p}")
+    amount = q * p
+
+    evidence = _util.create_evidence(
+        conn,
+        kind="in_kind_contribution",
+        payload={
+            "instrument_id": int(instrument_id),
+            "qty": str(q),
+            "price": str(p),
+            "amount": str(amount),
+            "currency": currency,
+            "credit_account": credit_account,
+            "as_of": entry_date.isoformat(),
+            "reference": reference,
+        },
+        source=source,
+    )
+
+    lines = [
+        {"account_id": _util.COST_ACCOUNT, "debit": amount, "currency": currency,
+         "instrument_id": int(instrument_id)},
+        {"account_id": credit_account, "credit": amount, "currency": currency},
+    ]
+    entry_id = post_entry(
+        conn,
+        book_id=book_id,
+        entry_date=entry_date,
+        description=description or f"現物拠出 銘柄{instrument_id} {q}@{p}",
+        lines=lines,
+        evidence=evidence,
+        run_id=run_id,
+        posted_by=posted_by,
+    )
+    _notify_in_kind(
+        conn,
+        book_id=book_id,
+        instrument_id=int(instrument_id),
+        qty=q,
+        price=p,
+        amount=amount,
+        entry_id=entry_id,
+        entry_date=entry_date,
+        run_id=run_id,
+        posted_by=posted_by,
+        reference=reference,
+    )
+    return entry_id
+
+
+def _notify_in_kind(
+    conn: psycopg.Connection,
+    *,
+    book_id: str,
+    instrument_id: int,
+    qty: Decimal,
+    price: Decimal,
+    amount: Decimal,
+    entry_id: int,
+    entry_date: _date,
+    run_id: int,
+    posted_by: str,
+    reference: str | None,
+) -> None:
+    """現物拠出を #運営 へ通知する(記帳と**同一トランザクション**— 独立審査 新-21)。
+
+    通知を呼び出し側の責務にすると「拠出だけして通知を落とす」ことができてしまう。
+    ``press.outbox`` への投入は同じ ``conn`` の同じトランザクションで行うので、記帳が
+    コミットされたなら通知も必ずコミットされている(逆も同じ)。
+
+    照合ブレイク・残渣と同格の専用 embed にし、``urgent`` で上げる。拠出は運用上ごく稀な
+    事象であり、身に覚えのない拠出は**それ自体が事故か偽装**である — 頻度が低いので
+    urgent の乱発にならない(通知疲れの評価は risk 側 ``PENDING_MATERIALITY_NAV`` と同じ姿勢)。
+
+    ``ryza.bot`` への依存は定数と outbox 投入だけであり、``ledger`` スキーマの書き込み権限
+    (会計エンジンのみ)には触れない。
+    """
+    embed = {
+        "title": "⚠️ 現物拠出の記帳",
+        "description": (
+            f"{book_id} {entry_date.isoformat()}: 銘柄 {instrument_id} を {qty}@{price}"
+            f"(取得原価 {amount})で受け入れた。**約定を経ずに NAV が増える経路**であり、"
+            "台帳の中に実在性を確かめる手段は無い(証憑の数量・単価は記帳した側の申告)。"
+            "出資の受け入れとして意図したものか確認すること。"
+        ),
+        "color": COLOR_FLASH,
+        "fields": [
+            {"name": "仕訳", "value": f"entry {entry_id} / run {run_id}", "inline": True},
+            {"name": "記帳経路", "value": posted_by, "inline": True},
+            {"name": "参照", "value": reference or "(なし)", "inline": True},
+        ],
+        "author": org.author_for_role("audit"),
+        "footer": {"text": DISCLAIMER},
+    }
+    enqueue(conn, "ops", embed, run_id, urgent=True)
+
+
 def post_mark_to_market(
     conn: psycopg.Connection,
     *,
@@ -306,10 +473,12 @@ def post_mark_to_market(
     currency: str = "JPY",
     posted_by: str = _util.MTM_POSTED_BY[0],
 ) -> int | None:
-    """評価替え(未実現損益の洗い替え)。securities 帳簿価額を時価に一致させる。
+    """評価替え(未実現損益の洗い替え)。建玉の帳簿価額を時価に一致させる。
 
-    delta = 時価総額(保有数量×price) − 現在の securities 帳簿価額。
-    delta>0: Dr securities / Cr unrealized_pnl、delta<0: 逆。
+    delta = 時価総額(保有数量×price) − 現在の帳簿価額(原価勘定 + 評価調整勘定)。
+    delta>0: Dr securities_mtm / Cr unrealized_pnl、delta<0: 逆。**記帳先は評価調整勘定**
+    ``securities_mtm`` であり原価勘定ではない(0034 の分離 —
+    docs/design/11-mtm-account-separation.md)。
     差分計上のため unrealized_pnl の累計は常に (時価 − 取得原価) に一致する(洗い替えと等価)。
     delta=0(または保有ゼロで帳簿価額もゼロ)なら記帳せず None を返す。
 
@@ -320,14 +489,15 @@ def post_mark_to_market(
     例外)。数量が残っている銘柄に ``None`` を渡すのは呼び出し側の誤りなので ValueError。
 
     なぜ残渣が出るか: ``post_fill`` の売りは **取得原価ぶん**(移動平均法の
-    ``cost_released``)しか securities を取り崩さず、差額を realized_pnl に振る。評価替えで
-    積んだ「時価 − 取得原価」は securities に残ったままなので、ここでゼロへ落として
+    ``cost_released``)しか原価勘定を取り崩さず、差額を realized_pnl に振る。評価替えで
+    積んだ「時価 − 取得原価」は評価調整勘定に残ったままなので、ここでゼロへ落として
     unrealized_pnl を戻さないと NAV が恒久的に過大になる(残った未実現益が消えない)。
 
-    **数量ゼロで消すのは ``mtm_book_value``(評価替えが作った残高)だけ**で、securities の
-    総額ではない。``replay_position`` は broker_fill しか再生しないので、約定を経ずに建った
-    securities(現物拠出・資産振替)は数量ゼロに見える。総額を消すと実在の資産を帳簿から
-    消してしまう(実測: 現物拠出 1,000,000 の日の NAV が丸ごと戻る)。
+    **数量ゼロで消すのは ``mtm_book_value``(評価調整勘定の残高)だけ**で、帳簿価額の総額
+    ではない。証憑つきの建玉イベントを伴わない直接記帳(数量つき証憑の無い手仕訳)は数量
+    ゼロに見えるため、総額を消すと実在の資産を帳簿から消してしまう(実測: 現物拠出
+    1,000,000 の日の NAV が丸ごと戻る)。0034 の分離後は消す対象が勘定残高そのものなので、
+    原価勘定には**構造的に触れられない**。
 
     **数量も帳簿価額も同じ ``as_of=entry_date`` で切る**(独立審査 新-13)。数量だけ全期間
     再生にすると、**将来日付の売りが先に記帳されている日**の締めが「数量ゼロ ⇒ 残渣」と
@@ -384,16 +554,19 @@ def post_mark_to_market(
         source="price_source",
     )
 
+    # 記帳先は**評価調整勘定**であって原価勘定ではない(0034 の分離)。取得原価と評価調整を
+    # 同じ勘定に足し込まないことで、原価恒等式(securities 残高 = 建玉再生の原価)が
+    # 締めで検査可能になる。
     if delta > 0:
         lines = [
-            {"account_id": "securities", "debit": delta, "currency": currency,
+            {"account_id": _util.MTM_ACCOUNT, "debit": delta, "currency": currency,
              "instrument_id": int(instrument_id)},
             {"account_id": "unrealized_pnl", "credit": delta, "currency": currency},
         ]
     else:
         lines = [
             {"account_id": "unrealized_pnl", "debit": -delta, "currency": currency},
-            {"account_id": "securities", "credit": -delta, "currency": currency,
+            {"account_id": _util.MTM_ACCOUNT, "credit": -delta, "currency": currency,
              "instrument_id": int(instrument_id)},
         ]
 

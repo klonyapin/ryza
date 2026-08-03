@@ -833,8 +833,8 @@ reminders:
       type: issue_create
       title: "ledger: MTM を独立勘定へ分離し、mtm_book_value の推定をやめる"
       labels: [impl, ledger, risk]
-      body: "全売却後の残渣を洗い替える量は `_util.mtm_book_value`(`securities` 勘定のうち evidence.kind='price_snapshot' かつ `journal_entries.posted_by` が締めジョブ由来の行の合計)で**推定**している。洗い替えは NAV を双方向に動かす原始操作なのに、判定子が仕訳の自由記入列である点が本質的な弱さである(独立審査の実測: kind を騙る手仕訳 Dr securities 3,000,000 / Cr capital は、posted_by 判定の追加**前**は次の締めで全額消され NAV 13,000,000→10,000,000、貸方 500,000 は逆に NAV を無から 10,500,000 に増やした)。posted_by の連言追加でこの 2 攻撃は塞いだが、`post_entry` の呼び出し側は依然その値を騙れる。根治: 評価替えの結果を `securities` に混ぜず**独立勘定**(例: `securities_mtm` / 未実現評価勘定)に積み、残渣の同定を勘定残高そのもの(推定不要)にする。BS 表示は securities + mtm の合算、`securities_book_value` / recon の valuation 突合・ダッシュボードの読み替えも同時に設計すること。**勘定科目の追加は migrations(保護領域)を伴うため独立役員審査+みなし承認が必要。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md 残渣修正審査記録 新-14。"
-    status: pending
+      body: "全売却後の残渣を洗い替える量は `_util.mtm_book_value`(`securities` 勘定のうち evidence.kind='price_snapshot' かつ `journal_entries.posted_by` が締めジョブ由来の行の合計)で**推定**している。洗い替えは NAV を双方向に動かす原始操作なのに、判定子が仕訳の自由記入列である点が本質的な弱さである(独立審査の実測: kind を騙る手仕訳 Dr securities 3,000,000 / Cr capital は、posted_by 判定の追加**前**は次の締めで全額消され NAV 13,000,000→10,000,000、貸方 500,000 は逆に NAV を無から 10,500,000 に増やした)。posted_by の連言追加でこの 2 攻撃は塞いだが、`post_entry` の呼び出し側は依然その値を騙れる。根治: 評価替えの結果を `securities` に混ぜず**独立勘定**(例: `securities_mtm` / 未実現評価勘定)に積み、残渣の同定を勘定残高そのもの(推定不要)にする。BS 表示は securities + mtm の合算、`securities_book_value` / recon の valuation 突合・ダッシュボードの読み替えも同時に設計すること。**勘定科目の追加は migrations(保護領域)を伴うため独立役員審査+みなし承認が必要。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md 残渣修正審査記録 新-14。 **完了(2026-08-04)**: 採用して実装した(判断の全文は `docs/design/11-mtm-account-separation.md`)。`migrations/0034_ledger_mtm_account.sql` が `securities_mtm`(資産・評価調整)をファンド帳簿に追加し、`post_mark_to_market` の記帳先をそこへ移した。`mtm_book_value` は述語つき集計から**勘定残高**になり判定子が消えた(逆仕訳の除外も残高相殺で不要)。`securities_book_value`(帳簿価額 = 時価)の意味は変えず中身を 2 勘定の合計にしたので、recon の評価額突合・statements・risk 側は無変更で通る。**採否の決め手は移行コストの実測**: 2026-08-04 時点の本番 DB は journal_entries 2 行(出資仕訳のみ)/ securities 明細 0 行 / nav_snapshots 0 行であり、過去残高の振替仕訳も、振替が水位を進めることによる全営業日の再締めも発生しない。追記オンリー(0005)なので履歴が積まれた後の分離は再分類仕訳しか手段が無く、必ず `reclose_stale` に引っかかる — **コスト無しで入れられるのは今だけ**である。**本命の利得は推定の除去ではなく恒等式**: 原価と評価調整を分けたことで『`securities` 残高 = `replay_position` の取得原価』が毎締めに機械検査できるようになり(`closing` の `unexplained_residue`、reason=`cost_identity_broken` / `zero_qty_residue`)、新-15(説明不能な残渣を誰も見ていない)の検出漏れを塞ぐ。**ただし恒等式が覆うのは原価勘定側だけである(重要 — 独立審査 新-19)**: 評価調整勘定を直接叩く偽装(締めジョブ名を騙った `Dr securities_mtm / Cr capital`)は恒等式に一切現れず(審査実測: NAV 13,000,000→10,000,000・`unexplained_residue` は空)、**分離は新-14 の攻撃を塞がない** — 宛先が移るだけである。その経路の防御は `post_mark_to_market` の posted_by 検証と DB トリガ `ledger.check_mtm_line` であって恒等式ではない。構造的に断つには DB ロール分離が要る(未実施 — 申し送りは 11 §7)。**独立審査(2026-08-04)の条件是正**: 新-18 = トリガの逆仕訳免除を `reversal_of` のフラグから**実突合**(対象仕訳に借貸を入れ替えた同一勘定・同一銘柄・同額の明細があるか — `ledger.reversal_mirrors_line`)へ狭めた。フラグ免除のままでは無関係な entry_id を入れるだけで posted_by 検証を迂回でき、審査実測で新-14(a) が完全再現した。新-19 = コード側の文言を設計文書 §5.2-1 の限界に統一。新-20 = 原価勘定にも同型ガード `ledger.check_cost_line`(instrument_id 必須 + 親証憑 kind ∈ `POSITION_EVIDENCE_KINDS` or 実突合済みの逆仕訳)を追加し、instrument_id NULL の無言 NAV 混入(審査実測 12,000,000 が恒久残存)を封鎖した。posted_by ではなく kind で切ったのは、原価勘定の書き手が複数あり posted_by 許可リストは広すぎるか正当な呼び出しを壊すかのどちらかになる一方、kind は `replay_position` が見る値そのものでガードと恒等式が同じ定義を共有するため(11 §6.2)。"
+    status: done # 2026-08-04 実装: migrations/0034 + 勘定分離 + 原価恒等式検査(独立審査は PR で)
 
   - id: in-kind-contribution-mtm
     what: "現物拠出の建玉が一度も評価替えされない前提の是正(残渣修正審査 新-17)"
@@ -845,7 +845,43 @@ reminders:
       type: issue_create
       title: "ledger: 約定を経ない建玉(現物拠出)の建玉数量をどこが持つか決める"
       labels: [impl, ledger]
-      body: "`_util.replay_position` は broker_fill 証憑しか再生しないため、約定を経ずに建った `securities`(現物拠出 Dr securities / Cr capital・資産振替)は**数量ゼロに見え、一度も評価替えされない**(独立審査の実測: 終値 1500/2000/500 を渡しても残高は拠出額 1,000,000 のまま、`detail.positions` にも現れない)。数量ゼロ残渣の洗い替えが『約定外の建玉に触れない』で正しくいられるのはこの前提のおかげであり、in-kind を時価評価する必要が出た時点で前提は崩れる(評価替えの対象になった途端、数量の出どころが無い)。決めるべきこと: ①現物拠出を制度として扱うのか(扱わないなら post_entry 側で securities への直接記帳を禁じる方が明快)、②扱うなら建玉数量の真実をどこに持たせるか(`trade.fills` 相当の建玉イベント表 or 拠出時に数量付きの証憑を要求する)。当面は締めの `unexplained_residue`(新-15)が該当銘柄を毎日名指しするので、黙って評価から漏れる状態にはない。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 残渣修正審査記録 新-17。"
+      body: "`_util.replay_position` は broker_fill 証憑しか再生しないため、約定を経ずに建った `securities`(現物拠出 Dr securities / Cr capital・資産振替)は**数量ゼロに見え、一度も評価替えされない**(独立審査の実測: 終値 1500/2000/500 を渡しても残高は拠出額 1,000,000 のまま、`detail.positions` にも現れない)。数量ゼロ残渣の洗い替えが『約定外の建玉に触れない』で正しくいられるのはこの前提のおかげであり、in-kind を時価評価する必要が出た時点で前提は崩れる(評価替えの対象になった途端、数量の出どころが無い)。決めるべきこと: ①現物拠出を制度として扱うのか(扱わないなら post_entry 側で securities への直接記帳を禁じる方が明快)、②扱うなら建玉数量の真実をどこに持たせるか(`trade.fills` 相当の建玉イベント表 or 拠出時に数量付きの証憑を要求する)。当面は締めの `unexplained_residue`(新-15)が該当銘柄を毎日名指しするので、黙って評価から漏れる状態にはない。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 残渣修正審査記録 新-17。 **完了(2026-08-04)**: ①現物拠出を制度として扱う、②建玉数量の真実は**拠出時の数量つき証憑**に持たせる、を採った。`posting.post_in_kind_contribution` が `kind='in_kind_contribution'` の証憑(instrument_id / qty / price)を作り、`_util.replay_position` の再生対象(`POSITION_EVIDENCE_KINDS`)に含める。以後 in-kind 建玉は `held_instruments` → `post_mark_to_market` の経路に乗り、約定建玉と同じ移動平均法で扱われる(混在ケースの実測: 拠出 1000@1000 + 買い 1000@2000 → 平均原価 1500、500 株を 2500 で売って実現益 500,000)。逆仕訳した拠出は再生から落ち、評価替えの残渣も洗い替えられる。**建玉イベント表を新設する案は採らない** — `trade.fills` と証憑という既存の 2 つの真実に 3 つ目を足すためである。**数量つき証憑を伴わない直接記帳は 0034 の原価勘定ガード(新-20)が書込時に拒否する** — 恒等式で検出する以前に、数量を再生できない行が原価勘定に載れなくなった。**未対応**: 現物払戻・株式分割・併合(いずれも証憑 kind を分けて数量の増減を表現する拡張。未対応の経路が `securities` を動かそうとすると fail-loud で拒否される)。 **独立審査(2026-08-04)の条件是正 — 新-21**: 拠出は約定を経ずに NAV を増やすプリミティブであり、証憑の数量・単価は記帳した側の申告なので**原価恒等式は構造的に必ず成立する(実在性の検査にならない)**。しかも新-17 の是正により架空の拠出は評価替えにも乗るようになった(是正前は原価のまま動かなかった)。統制として ①`posted_by ∈ _util.IN_KIND_POSTED_BY`(運用オペレーション経路のみ)②記帳と**同一トランザクション**での #運営 通知(`press.outbox`・urgent。呼び出し側が落とせない)を入れた。どちらも申告制の域を出ず、実在性は人が見る側での照合に委ねる — 限界の全文は docs/design/11 §7。"
+    status: done # 2026-08-04 実装: in_kind_contribution 証憑を replay_position の再生対象に(審査 新-21 の統制込み)
+
+  - id: post-fill-asof-symmetry
+    what: "post_fill の cost_released が as_of 非対称で、健全な帳簿でも原価恒等式が偽陽性を出す(MTM 勘定分離審査 新-22)"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "ledger: post_fill の売りを as_of 対称にし、cost_identity_broken の偽陽性を消す"
+      labels: [impl, ledger, risk]
+      body: "`posting.post_fill` の売りは `_util.replay_position(conn, book_id, instrument_id)` を **as_of なし(全期間再生)** で呼んで `cost_released` を決める(`posting.py` の売り分岐)。一方 `closing.run_daily_close` の原価恒等式は `as_of=date` で切るため、**後日付の約定が先に記帳されている日**は健全な帳簿でも両者がずれて `cost_identity_broken` が鳴る。独立審査の実測: d0 買い 100@500 → d2 買い 100@700 を先に記帳 → d1 売り 50@800 → d1 の締めが `{book_value: 20000, replay_cost: 25000, qty: 50, reason: cost_identity_broken}`(d2 の締めでは消える)。この日は #運営 に ⚠️ が飛ぶ。**毎日の通知に載せる検査なので偽陽性の第一の源は先に潰す**(通知疲れは検出器を殺す — 再-7 と同じ論点)。是正の方向: 売りの `cost_released` を `as_of=entry_date` の再生で決める(新-13 が `post_mark_to_market` で行った是正と同型)。**ただし過去日付の約定を後から入れると既記帳の実現損益と食い違う**ため、恒等式側を「その日までに記帳された順序で再生する」に寄せる案も含めて比較すること。会計エンジン(保護領域)。出典: docs/reviews/risk-navflow-rollforward-independent-review.md MTM 勘定分離審査記録 新-22。"
+    status: pending
+
+  - id: mtm-account-live-fund
+    what: "LIVE_FUND 帳簿を作るときに securities_mtm 勘定を seed する手順(MTM 勘定分離審査 新-23)"
+    conditions:
+      - type: date_after
+        date: "2026-09-01"
+    action:
+      type: issue_create
+      title: "ledger: LIVE_FUND 作成時に評価調整勘定 securities_mtm を必ず seed する"
+      labels: [impl, ledger, ops]
+      body: "`migrations/0034_ledger_mtm_account.sql` の勘定追加は **適用時点の `book_type='fund'` に対する一回限りの INSERT** であり、コメントの『将来の LIVE_FUND もここに乗る』は**誤り**である(独立審査 新-23 が実測で指摘、コメントは是正済み)。0006 の 18 科目を写して将来のファンド帳簿を作ると、最初の評価替えが `ValueError: 未知の勘定科目: …securities_mtm` で落ちる。fail-loud ではあるが **LIVE_FUND は実弾(定款第3条の3専決)**であり、初日の締めが落ちる設計にはしない。対応: LIVE_FUND を作る migration / 手順に `securities_mtm`(asset・有価証券評価調整)を含めること、または `ledger.books` への INSERT に対するトリガでファンド帳簿の必須勘定を自動 seed すること。後者なら二度と落とせない。出典: 同審査記録 新-23。"
+    status: pending
+
+  - id: mtm-posted-by-single-source
+    what: "評価替えの posted_by が DB トリガと Python 定数の二重管理(MTM 勘定分離審査 新-24)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "ledger: MTM_POSTED_BY をトリガと Python で単一ソース化する"
+      labels: [impl, ledger]
+      body: "`ledger.check_mtm_line`(migrations/0034)は許可する記帳経路を `'ledger.closing'` で**ハードコード**しており、`_util.MTM_POSTED_BY` と二重管理になっている。2 つ目の値を足すと Python は通し DB が `RaiseException` で拒否する(独立審査 新-24 の実測)。当面の検出として `tests/ledger/test_posting.py::test_every_mtm_posted_by_value_is_accepted_by_the_database`(`MTM_POSTED_BY` の全要素が DB に受理されることを固定)を置いたので**黙って壊れることはない**が、単一ソースにはなっていない。案: (a) 許可値を `ledger` スキーマの小さな設定表に持たせ、トリガと Python の両方がそれを読む(表の更新は migration = 保護領域の変更になる)、(b) トリガ生成を migration テンプレート化して Python 定数から生成する。(a) が素直だが「勘定体系の変更が表の 1 行更新で済む」ことの是非を審査で問うこと。出典: 同審査記録 新-24。"
     status: pending
 
   - id: close-stage-failure-visibility
