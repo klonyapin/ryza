@@ -1,0 +1,48 @@
+# config/execution.yaml — デモ執行(DemoBroker)の手数料・スリッページ パラメータ(T-016)
+#
+# E4「全コスト込み」評価の入力。値の変更は根拠コメントの更新とセットで行うこと。
+# 参照は src/ryza/execution/config.py(ExecutionConfig.load)経由のみ — ハードコード禁止。
+# 迷ったら高コスト側(保守側)に倒す: デモ成績の過大評価は E1〜E9 の趣旨に反する。
+
+version: "1.0"
+
+slippage:
+  # 適用範囲の注意: スリッページ・参加率制約は成行注文のみ。limit 注文は指値到達で
+  # 全量約定(参加率によらず full fill)としており、板の消化を考慮しない点は
+  # 「迷ったら高コスト側」原則の既知の例外(楽観側)。指値到達時のみ・寄り優先の
+  # 約定判定が過大評価を一定程度抑えるが、大口指値の成績はデモが実勢より甘く出る。
+  # 参加率上限(当日出来高の一定割合まで)の導入は実ブローカー統合時に再訪する。
+  # 成行注文の約定価格 = 直近終値 × (1 ± slippage_rate)。
+  #   slippage_rate(bps) = half_spread_bps + impact_coeff_bps × √(注文代金 / 当日売買代金)
+  # 平方根マーケットインパクト則に基づく: Almgren, Thum, Hauptmann & Li (2005)
+  # "Direct Estimation of Equity Market Impact"(Risk 18(7))、Gatheral (2010) の
+  # square-root law。インパクト ≈ Y·σ_daily·√(Q/V)。
+  half_spread_bps: "5"     # 片道スプレッド。東証大型株(TOPIX100 級)の quoted spread は
+                           # おおむね 10bps 前後 → 半スプレッド 5bps を初期値とする。
+                           # 小型株はこれより広いが、上乗せはインパクト項が担う
+  impact_coeff_bps: "140"  # Y·σ_daily を bps 化した係数。Y≈0.7(Almgren et al. 2005 の
+                           # 推定レンジ 0.5〜1.0 の中庸)× 日次ボラ σ≈2%(日本個別株の
+                           # 典型値)→ 0.7×0.02 = 140bps。参加率 1% なら √0.01×140 ≈ 14bps
+  max_bps: "100"           # スリッページ上限(1%)。モデルの暴走ガード。当日売買代金が
+                           # 取得できない銘柄(volume 欠損)はこの上限を適用する
+                           # (計測不能を低コストと主張しない — fail-closed と同じ姿勢)
+
+fees:
+  # 資産クラス(IPS §8.1 タクソノミー = gate_log.order_ref の asset_class)別の売買委託手数料。
+  # 該当キーが無ければ default を使う。率は約定代金比、min_fee/max_fee は取引通貨建て。
+  equity_jp:
+    commission_rate: "0"      # 国内株現物の売買委託手数料は主要ネット証券でゼロ:
+                              # SBI証券「ゼロ革命」(2023-09-30 約定分〜)、楽天証券
+                              # 「ゼロコース」(2023-10-01〜)。三菱UFJ eスマート証券
+                              # (旧auカブコム)も 2026-05 に国内株手数料無料化
+                              # (docs/research/broker-data-apis.md)。デモの想定
+                              # ブローカーはこの水準に合わせる
+    min_fee: "0"
+  equity_us:
+    commission_rate: "0.00495"  # 米国株の主要ネット証券(SBI・楽天・マネックス)の
+                                # 約定代金 × 0.495%(税込)の共通水準
+    min_fee: "0"
+    max_fee: "22"               # 上限 22 米ドル(同 3 社共通)。通貨は銘柄の取引通貨
+  default:
+    commission_rate: "0.00495"  # 未知の資産クラスは高コスト側(米国株と同率)に倒す
+    min_fee: "0"

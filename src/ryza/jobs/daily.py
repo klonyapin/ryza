@@ -2,8 +2,20 @@
 
 設計 30-press-discord §2・00-system-design §2/§10。1 日 1 回、以下を順に走らせる:
 
-  取込 → 前処理(縮退) → 分析エージェント → 市場観更新 → 朝刊生成 → outbox
-  → リスク(T-015: limits_state 更新+リスクレポート) → 実行サマリ
+  取込 → 前処理(縮退) → 分析エージェント → 市場観更新 → 執行(デモ)→ 締め(照合→NAV)
+  → リスク(T-015: limits_state 更新+リスクレポート)→ 朝刊生成 → outbox → 実行サマリ
+
+**執行段(T-016)**: 00 §9 の「ゲート → 執行 → 会計記帳 → 照合 → NAV 確定」のうち
+ゲート以降を担う(ゲートは注文起票側 = FM エージェント(T-017)が ``gate_and_record``
+で通す設計のため、daily に独立の gate 段は無い)。注文が無い日は執行は no-op だが、
+締め(MTM・NAV 記帳 → risk.nav_daily)は毎日走らせて NAV 系列を絶やさない(risk 段の
+入力)。Kill Switch 中は新規執行のみスキップし、締め(内部会計)は走らせる。
+照合ブレイクは ops チャンネルへ embed で通知する。
+
+**risk 段(T-015)**: 00 §9 の順序どおり会計締めの直後に置く(設計リード裁定
+2026-08-03)— execution 段の締めが書いた当日の ``ledger.nav_snapshots``(NAV の正。
+``risk.nav_daily`` は執行照合を重ねた risk 用ビュー)を読んで limits_state を更新し、
+リスクレポートを ops へ投入する。
 
 **各段は独立に失敗許容**: 各段を savepoint(``conn.transaction()``)で囲み、失敗しても
 後続段は走る(前段失敗時は前日データで動く)。実行サマリを ``#運営``(ops)へ投入する。
@@ -41,10 +53,14 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
-from ryza.bot import COLOR_NORMAL, DISCLAIMER
+from ryza.bot import COLOR_FLASH, COLOR_NORMAL, DISCLAIMER
 from ryza.bot.killswitch import is_engaged
 from ryza.bot.outbox import enqueue
 from ryza.db.conn import connect
+from ryza.execution.close import run_demo_close
+from ryza.execution.config import ExecutionConfig
+from ryza.execution.demo import DemoBroker
+from ryza.execution.runner import run_pending
 from ryza.preprocess.embed import HashingEmbedder
 from ryza.preprocess.runner import run_preprocess
 from ryza.press.config import PressConfig
@@ -61,6 +77,9 @@ JST = ZoneInfo("Asia/Tokyo")
 
 # 朝刊 embed の既定タイトル(``embeds.build_morning_embed`` の既定)。冪等判定の目印に使う。
 MORNING_TITLE = "Ryza 朝刊"
+
+# 執行段の対象帳簿。デモ二系統のうち daily が回すのはデモのみ(実弾は定款第3条の専決事項)。
+DEMO_BOOK = "DEMO_FUND"
 
 # 縮退前処理: 準重複検出を無効化する near_threshold(cos 距離は >= 0 なので -1.0 で常に非該当)。
 _DEGRADED_NEAR_THRESHOLD = -1.0
@@ -243,6 +262,37 @@ def _ensure_market_view(conn: psycopg.Connection, run: Run, as_of: datetime) -> 
         )
 
 
+def _build_breaks_embed(breaks: list[dict[str, Any]], *, as_of: datetime) -> dict[str, Any]:
+    """照合ブレイク通知(#運営)の embed を組む(執行照合・ポジション照合共通)。"""
+    jst_str = as_of.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
+    fields = [
+        {
+            "name": str(b.get("item", "?")),
+            "value": (
+                f"帳簿={b.get('ours')} / 相手={b.get('theirs')}"
+                f"(book={b.get('book_id')}, {b.get('recon_date')})"
+            )[:1024],
+            "inline": False,
+        }
+        # embed の field 上限対策で先頭 10 件のみ表示。永続化の現状(審査条件①):
+        # ポジション照合ブレイクは ledger.reconciliations に全件記録されるが、
+        # 執行照合(executions×仕訳)ブレイクはこの通知と risk.nav_daily.detail の
+        # 要約のみで明細の永続化は未実装 — ops/reminders.yaml
+        # (execution-recon-persistence)で将来タスクとして登録済み。
+        for b in breaks[:10]
+    ]
+    return {
+        "title": f"⚠️ 執行・会計照合ブレイク {jst_str}",
+        "description": (
+            "executions×仕訳/ポジション照合に不一致。NAV は provisional のまま。"
+            "解消するまで確定しない(00 §9)。"
+        ),
+        "color": COLOR_FLASH,
+        "fields": fields,
+        "footer": {"text": DISCLAIMER},
+    }
+
+
 def _build_ops_embed(
     stages: list[StageResult], *, kill_switch: bool, posted: bool, as_of: datetime, dry_run: bool
 ) -> dict[str, Any]:
@@ -272,7 +322,7 @@ def _build_ops_embed(
     title = "日次サイクル(dry-run)" if dry_run else "日次サイクル"
     return {
         "title": f"{title} {jst_str}",
-        "description": "日次サイクルの実行サマリ(取込→前処理→分析→市場観→朝刊)。",
+        "description": "日次サイクルの実行サマリ(取込→前処理→分析→執行/締め→朝刊)。",
         "color": COLOR_NORMAL,
         "fields": fields,
         "footer": {"text": DISCLAIMER},
@@ -342,7 +392,48 @@ def run_daily(
 
     stages.append(_run_stage(conn, "analysis", _analysis))
 
-    # ── 4. 朝刊生成(冪等・Kill Switch ゲート)───────────────────────────────
+    # ── 4. 執行(デモ)→ 締め(照合 → NAV 確定)— T-016 ──────────────────────
+    def _execution() -> dict[str, Any]:
+        detail: dict[str, Any] = {}
+        breaks: list[dict[str, Any]] = []
+        if is_engaged(conn):
+            # Kill Switch 中は新規執行をスキップ(通過済み注文も出さない)。
+            # 締め(内部会計・NAV 記帳)は運用監視のため走らせる。
+            detail["orders"] = "skipped(kill_switch)"
+        else:
+            broker = DemoBroker(
+                conn, config=ExecutionConfig.load(), trade_date=jst_date
+            )
+            pending = run_pending(
+                conn, book_id=DEMO_BOOK, broker=broker,
+                run_id=run.run_id, entry_date=jst_date,
+            )
+            detail.update(
+                filled=pending["filled"], rejected=pending["rejected"],
+                expired=pending["expired"], errors=len(pending["errors"]),
+            )
+        close_result = run_demo_close(
+            conn, book_id=DEMO_BOOK, date=jst_date,
+            run_id=run.run_id, on_break=breaks.append,
+        )
+        detail["nav"] = str(close_result["nav"])
+        detail["nav_status"] = close_result["status"]
+        if breaks:
+            detail["breaks"] = len(breaks)
+            enqueue(conn, channel_ops, _build_breaks_embed(breaks, as_of=as_of), run.run_id)
+        return detail
+
+    stages.append(_run_stage(conn, "execution", _execution))
+
+    # ── 5. リスクエンジン(T-015)──────────────────────────────────────────────
+    # 00 §9 の順序どおり会計締め(execution 段の照合→NAV 確定)の直後に置く(設計
+    # リード裁定 2026-08-03)。execution 段が書いた当日 NAV を読んで limits_state を
+    # 更新する。決定論・LLM 不関与のため dry-run でもそのまま実行する。
+    stages.append(
+        _run_stage(conn, "risk", lambda: run_risk_daily(conn, run, as_of=as_of))
+    )
+
+    # ── 6. 朝刊生成(冪等・Kill Switch ゲート)───────────────────────────────
     def _morning() -> dict[str, Any]:
         kill = is_engaged(conn)
         state["kill_switch"] = kill
@@ -364,15 +455,7 @@ def run_daily(
 
     stages.append(_run_stage(conn, "morning", _morning))
 
-    # ── 5. リスクエンジン(T-015)──────────────────────────────────────────────
-    # 00 §9 の順序では会計締め(記帳→NAV→照合→NAV 確定)の直後・リスクレポートの
-    # 位置。会計締めの daily 配線が入った際は、この risk 段はその後に置くこと。
-    # 決定論・LLM 不関与のため dry-run でもそのまま実行する。
-    stages.append(
-        _run_stage(conn, "risk", lambda: run_risk_daily(conn, run, as_of=as_of))
-    )
-
-    # ── 6. 実行サマリを #運営 へ ──────────────────────────────────────────────
+    # ── 7. 実行サマリを #運営 へ ──────────────────────────────────────────────
     def _ops_summary() -> dict[str, Any]:
         embed = _build_ops_embed(
             stages, kill_switch=state["kill_switch"], posted=state["posted"],

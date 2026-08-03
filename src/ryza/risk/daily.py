@@ -10,6 +10,9 @@ NAV 系列の出所(指示書の設計判断): ``ledger.nav_snapshots``(T-002/00
 snap_date ごとに upsert する系列をそのまま使う(provisional も測定に使う —
 「測れる最新値で測る」。締めが走らない日は系列に穴が空くが、リターンは隣接
 スナップショット間で計算されるため測定は継続する)。
+※ T-016 統合(設計リード裁定 2026-08-03): 執行層の締め(``execution/close.py``)が
+同じ NAV を ``risk.nav_daily``(執行照合の status を重ねた risk 用ビュー)にも
+書くが、本モジュールの読み出しは引き続き nav_snapshots(正)のまま。
 
 外部フロー調整: 出資・払戻は ``ledger.accounts.category='equity'`` かつ
 ``account_id <> 'retained'``(拠出資本勘定)への仕訳から日次合算する。損益の
