@@ -403,8 +403,48 @@ def _upsert_nav(
 #: アクルーアル(interest_expense / cash)は「拠出資本に触れない」だけで無効判定になる。
 #: 実測でこの行レベル述語は 現物拠出=True / 費用=False / 出資=False / 約定=True と分離する。
 #:
-#: 水位が無い日は ``entry_id > NULL`` が NULL になり EXISTS が false — 判定材料が
+#: 水位が無い日は ``entry_id > NULL`` が NULL になり判定が false — 判定材料が
 #: 無い日に照合無効を主張しない(restatement 判定と同じ姿勢)。
+#:
+#: **形(2026-08-04 の書き換え — reminders reclose-stale-pruning)**。意味は上のとおりで
+#: 変えていない。変えたのは**同じ述語をどう評価させるか**である。旧形はスナップショット
+#: 1 日ごとに ``max(entry_id) WHERE entry_date <= snap_date`` の相関サブクエリを回して
+#: いたため、コストが スナップショット数 × 仕訳数 で伸びた(実測: 規模A 778.6 ms /
+#: 規模B 8,371.1 ms = 行数 10 倍で 10.7 倍)。索引では直らないことは実測で確定している
+#: (``migrations/0027_query_indexes.sql`` 索引2 の「効かない用途」節: プランナが
+#: 「主キーの逆走査 + フィルタ + LIMIT 1」を選ぶため、どの列組み合わせの索引も使われない)。
+#:
+#: 新形は**日ごとに 1 回だけ集約してから走査する**。``entry_day`` が日付ごとの
+#: ``max(entry_id)`` を 1 パスで作り、各スナップショットはその小さな集合(日数ぶんの行)に
+#: 対して ``max`` を取る。``max(entry_id) WHERE entry_date <= d`` を「日ごとの max の
+#: max」に分解しただけなので値は恒等的に等しい。
+#:
+#: **枝刈りは建玉性の判定にかける**。``position_changing_late`` は stale と判定された日に
+#: しか要らないので、``pos_day`` は ``stale`` が確定してからその範囲だけを集約する
+#: (``entry_id > min(stale.stored_watermark)`` / ``entry_date <= max(stale.snap_date)``)。
+#: stale がゼロなら ``pos_day`` は空になり、建玉性の走査そのものが起きない。
+#: ``EXISTS(∃e: date<=d ∧ id>W)`` を ``max{id : date<=d} > W`` に書き換えているが、
+#: 最大値が閾値を超えることと超える要素が存在することは同値なので判定は変わらない。
+#: 枝刈りの下限も同値性を壊さない — ある日 d が使う要素は ``id > W_d ≥ min(W)`` を
+#: 満たすので、``id > min(W)`` で落とした行は d の判定に影響しない。
+#:
+#: 実測(0027 と同じ合成データ・中央値7回。遅延仕訳なし = 通常日 / 全日 stale = 最悪):
+#: 規模A(仕訳 31,402 行・スナップショット 787 日)788.0 → 28.9 ms / 2,950.7 → 83.6 ms、
+#: 規模B(仕訳 314,002 行・同 787 日)8,558.5 → 46.1 ms(**186x**)/ 53,817.9 → 150.3 ms。
+#: 残るコストは ``entry_day`` の 1 パス集約(規模B で約 41 ms)であり、行数に線形。
+#: スナップショット数 × 仕訳数 の掛け算は消えている。
+#:
+#: **採らなかった枝刈り(重要)**: reminders と 0027 のコメントが挙げていた案
+#: 「全スナップショットの ``stored_watermark`` の**最大値**より後ろの ``entry_id`` を持つ
+#: 最古の ``entry_date`` を求め、その日以降のスナップショットだけを候補にする」は
+#: **検出漏れを起こすため採用していない**。反例: 9/1 の締め(水位 5)の後に 9/1 付けの
+#: 仕訳(entry_id 50)が立ち、その状態で 9/2 の締めが走る(水位 100)。9/1 は
+#: ``50 > 5`` で stale だが、最大水位 100 より後ろの仕訳は存在しないので候補が空になり、
+#: **遅延仕訳を取り込んだ日が永久に再締めされない**。これは本機能が存在する理由そのもの
+#: であり、速さのために落としてよい検出ではない。同じ形で健全にするには閾値を水位の
+#: **最小値**にするしかなく、最小値は最古のスナップショットの水位なので枝刈りが効かない。
+#: 上の分解(日ごと集約)は近似ではなく同値なので、この選択が要らない。
+#: 反例は ``tests/ledger/test_stale_query_rewrite.py`` が対照テストで固定している。
 _STALE_SNAPSHOTS_SQL = """
 WITH snap AS (
     SELECT s.snap_date,
@@ -413,26 +453,41 @@ WITH snap AS (
            row_number() OVER (ORDER BY s.snap_date DESC) - 1 AS age_business_days
     FROM ledger.nav_snapshots s
     WHERE s.book_id = %(book)s AND s.snap_date <= %(through)s
+), entry_day AS MATERIALIZED (
+    SELECT je.entry_date, max(je.entry_id) AS day_max
+    FROM ledger.journal_entries je
+    WHERE je.book_id = %(book)s AND je.entry_date <= %(through)s
+    GROUP BY je.entry_date
 ), measured AS (
     SELECT snap.snap_date, snap.stored_watermark, snap.age_business_days,
-           (SELECT max(je.entry_id) FROM ledger.journal_entries je
-             WHERE je.book_id = %(book)s AND je.entry_date <= snap.snap_date)
-               AS current_watermark,
-           EXISTS (
-               SELECT 1 FROM ledger.journal_entries je
-               JOIN ledger.journal_lines jl ON jl.entry_id = je.entry_id
-               WHERE je.book_id = %(book)s AND je.entry_date <= snap.snap_date
-                 AND je.entry_id > snap.stored_watermark
-                 AND jl.instrument_id IS NOT NULL
-           ) AS position_changing_late
+           (SELECT max(d.day_max) FROM entry_day d
+             WHERE d.entry_date <= snap.snap_date) AS current_watermark
     FROM snap
+), stale AS MATERIALIZED (
+    SELECT * FROM measured
+    WHERE stored_watermark IS NULL
+       OR coalesce(current_watermark, 0) > stored_watermark
+), pos_day AS MATERIALIZED (
+    SELECT je.entry_date, max(je.entry_id) AS day_max
+    FROM ledger.journal_entries je
+    WHERE je.book_id = %(book)s
+      AND je.entry_date <= (SELECT max(snap_date) FROM stale)
+      AND je.entry_id > (SELECT min(stored_watermark) FROM stale)
+      AND EXISTS (
+              SELECT 1 FROM ledger.journal_lines jl
+              WHERE jl.entry_id = je.entry_id AND jl.instrument_id IS NOT NULL
+          )
+    GROUP BY je.entry_date
 )
-SELECT snap_date, stored_watermark, current_watermark, age_business_days,
-       position_changing_late
-FROM measured
-WHERE stored_watermark IS NULL
-   OR coalesce(current_watermark, 0) > stored_watermark
-ORDER BY snap_date
+SELECT stale.snap_date, stale.stored_watermark, stale.current_watermark,
+       stale.age_business_days,
+       coalesce(
+           (SELECT max(p.day_max) FROM pos_day p
+             WHERE p.entry_date <= stale.snap_date) > stale.stored_watermark,
+           false
+       ) AS position_changing_late
+FROM stale
+ORDER BY stale.snap_date
 """
 
 #: 再締めが打ち直さないもの(証憑としての snapshot に必ず書く注記 — 独立審査 再-6)。
