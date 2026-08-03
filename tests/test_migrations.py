@@ -296,3 +296,69 @@ def test_seed_books_and_accounts(conn):
         assert cur.fetchone()[0] == 18  # ファンド帳簿の科目数
         cur.execute("SELECT count(*) FROM ledger.accounts WHERE book_id = 'OPS'")
         assert cur.fetchone()[0] == 13  # 運営帳簿の科目数
+
+
+# ── 0027: 実クエリ向けの索引 ──────────────────────────────────────────────────
+#
+# **検査するのは索引の存在と定義（列と列順・部分索引の述語）だけである。**
+# EXPLAIN のプラン検証はテストにしない — プラン選択は行数・統計・共有バッファの状態・
+# PostgreSQL のバージョンで変わり、CI の空 DB では索引を使わないのが正しい判断になる。
+# 「速くなったか」をテストで主張するとフレークするだけで、根拠にもならない。実測は
+# migrations/0027_query_indexes.sql のコメントに EXPLAIN ANALYZE の前後比較として残す。
+#
+# 列順まで固定するのは、それ自体が審査の対象だったからである（2 列版
+# (book_id, account_id) はプランナに選ばれず、instrument_id を足して初めて効いた）。
+# 列を落とす変更が黙って通らないようにする。
+EXPECTED_INDEX_DEFS: dict[tuple[str, str], str] = {
+    ("ledger", "journal_lines_book_account_instrument_idx"):
+        "CREATE INDEX journal_lines_book_account_instrument_idx "
+        "ON ledger.journal_lines USING btree (book_id, account_id, instrument_id)",
+    ("ledger", "journal_entries_book_date_idx"):
+        "CREATE INDEX journal_entries_book_date_idx "
+        "ON ledger.journal_entries USING btree (book_id, entry_date)",
+    ("meta", "runs_started_at_idx"):
+        "CREATE INDEX runs_started_at_idx ON meta.runs USING btree (started_at)",
+    ("meta", "runs_running_idx"):
+        "CREATE INDEX runs_running_idx ON meta.runs USING btree (run_id DESC) "
+        "WHERE (status = 'running'::text)",
+}
+
+
+def test_query_indexes_exist_with_expected_definition(conn):
+    """0027 の索引が存在し、列・列順・部分索引の述語まで定義どおりであること。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT schemaname, indexname, indexdef
+            FROM pg_indexes
+            WHERE (schemaname, indexname) IN (
+                ('ledger', 'journal_lines_book_account_instrument_idx'),
+                ('ledger', 'journal_entries_book_date_idx'),
+                ('meta',   'runs_started_at_idx'),
+                ('meta',   'runs_running_idx')
+            )
+            """
+        )
+        got = {(s, n): d for s, n, d in cur.fetchall()}
+    missing = set(EXPECTED_INDEX_DEFS) - set(got)
+    assert not missing, f"0027 の索引が存在しない: {missing}"
+    for key, expected in EXPECTED_INDEX_DEFS.items():
+        assert got[key] == expected, f"{key[1]} の定義が想定と違う: {got[key]}"
+
+
+def test_query_indexes_migration_sql_is_idempotent(conn):
+    """0027 の SQL 本体を再実行しても失敗しないこと（CREATE INDEX IF NOT EXISTS）。
+
+    ``test_migrations_are_idempotent`` はランナーが適用済み version を飛ばすことしか
+    見ておらず、SQL 自体の冪等性は検査していない。台帳が失われた状態からの再適用や、
+    別 DB への手当てで同じファイルを流すことは実際に起こるため、ここで直接叩く。
+    """
+    version, path = next(
+        (v, p) for v, p in migrate.discover_migrations() if v == "0027"
+    )
+    assert path.name == "0027_query_indexes.sql"
+    sql = path.read_text(encoding="utf-8")
+    with conn.cursor() as cur:
+        cur.execute(sql)  # 既に適用済みの DB に対して 2 度目の実行
+        cur.execute(sql)  # 3 度目でも同じ
+    conn.rollback()

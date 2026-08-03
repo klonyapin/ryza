@@ -793,6 +793,30 @@ reminders:
       title: "migrations: journal_lines / meta.runs の索引を追加する"
       labels: [impl]
       body: "ダッシュボードの NAV 系列(dashboard/queries.py fetch_nav_series)は ledger.journal_lines × journal_entries × accounts を全走査して出資フローを日次集計し、コスト集計(fetch_cost_daily / fetch_cost_summary)は meta.runs を started_at で全走査する。どちらも支える索引が無い(journal_lines の PK は (entry_id, line_no)、meta.runs の PK は run_id のみ)。現在は行数が小さく問題にならないが、仕訳と実行記録は単調増加するため放置すると再実行のたびに全表走査が効く。暫定対応として app.py 側に @st.cache_data(ttl=60) を入れてある(独立役員審査 中-10 の部分対応)。是正: (1) ledger.journal_lines (book_id, account_id) の索引、(2) ledger.journal_entries (book_id, entry_date) の索引、(3) meta.runs (started_at DESC) の索引、(4) meta.runs (job_name, run_id DESC) の索引を migrations で追加し、EXPLAIN で効いていることを確認する。**migrations は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 中-10。 **追記(2026-08-04・再締め審査 新-5)**: (2) の `ledger.journal_entries (book_id, entry_date)` は優先度が上がった。日次の再締め(`ledger.closing.reclose_stale`)の stale 検出が、スナップショット 1 日につき `journal_entries` への相関サブクエリを 2 本(水位 max・建玉性 EXISTS)回すため、コストは スナップショット数 × 仕訳数 で伸びる(`EXPLAIN ANALYZE` で `SubPlan 3` が `loops=15`)。年単位の運用で毎日の締めが線形に重くなる。索引に加えて安価な枝刈り(全スナップショットの `stored_watermark` 最大値より後ろの `entry_id` を持つ最古の `entry_date` を 1 回求め、その日以降のスナップショットだけを候補にする)も同時に検討すること。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 新-5。"
+    status: done # 2026-08-04 実装: migrations/0027_query_indexes.sql。EXPLAIN ANALYZE の前後比較で採否を決めた結果、(1) は 2 列版が不使用のため 3 列 (book_id, account_id, instrument_id) に変更して採用、(3) は採用、(2)(4) は「索引がプランナに選ばれず実測が変わらない」ため不採用（根拠は migration のコメントに記録）。加えて meta.runs (run_id DESC) WHERE status='running' の部分索引を追加。(2) の本来の是正である枝刈りは reclose-stale-pruning として別項目に登録
+
+  - id: reclose-stale-pruning
+    what: "再締めの stale 検出に枝刈りを入れる(索引では直せないことが実測で確定した — db-indexes-dashboard の残り)"
+    conditions:
+      - type: date_after
+        date: "2026-08-20"
+    action:
+      type: issue_create
+      title: "ledger.closing: reclose_stale の stale 検出を枝刈りで定数時間に近づける"
+      labels: [impl, ledger]
+      body: "`ledger.closing.reclose_stale` の stale 検出(`_STALE_SNAPSHOTS_SQL`)は、スナップショット 1 日ごとに `SELECT max(je.entry_id) ... WHERE book_id = %s AND entry_date <= snap.snap_date` という相関サブクエリを回すため、コストが スナップショット数 × 仕訳数 で伸びる。**索引では直らないことが実測で確定した**(2026-08-04・migrations/0027 の検証): プランナはこのサブクエリを『主キーの逆走査 + フィルタ + LIMIT 1』(見積りコスト 0.43)と評価するので、`(book_id, entry_date)`・`(book_id, entry_date) INCLUDE (entry_id)`・`(book_id, entry_date, entry_id)` のいずれを置いても選ばれず、実行時間が変わらない(規模B = 仕訳 314,013 行・スナップショット 785 日 で 8,278 ms → 8,156 ms = 誤差。`pg_stat_user_indexes.idx_scan` は 0)。実測の伸び方も理論どおりで、行数 10 倍で所要 10.5 倍(788 ms → 8,278 ms)。是正は再々審査 新-5 が併記していた**枝刈り**である: 全スナップショットの `stored_watermark` の最大値より後ろの `entry_id` を持つ最古の `entry_date` を 1 回だけ求め(実測 0.57 ms)、その日以降のスナップショットだけを stale 候補にする。遅延仕訳が無い通常日は候補ゼロになり、検出は事実上ゼロコストになる。**注意点**: `stored_watermark` が NULL のスナップショット(本機能より前に書かれた日)は判定材料が無く現行実装が fail-safe で stale 扱いにしているので、枝刈りでもこの日を落としてはならない。**src/ryza/ledger/ は会計エンジン = 保護領域のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 新-5、migrations/0027_query_indexes.sql の「入れなかったもの (A)」。"
+    status: pending
+
+  - id: navflow-equity-flow-query-rewrite
+    what: "navflow の出資フロー抽出クエリを書き換える(索引が効かない理由が見積り誤差にあることが実測で確定した)"
+    conditions:
+      - type: date_after
+        date: "2026-09-15"
+    action:
+      type: issue_create
+      title: "risk.navflow: NAV_FLOW_SQL の flow CTE をプランナが絞れる形に書き換える"
+      labels: [impl, risk]
+      body: "`ryza.risk.navflow.NAV_FLOW_SQL` の flow CTE は `ledger.journal_lines` を `ledger.accounts` と結合して `category='equity' AND account_id <> 'retained'` の科目に絞るが、**プランナは結合前に『どの account_id が equity か』を知れない**ため、journal_lines 側の行数を平均選択度で見積もる(実測: 真値 13 行に対し見積り 6,107 行)。結果としてどんな索引を置いてもハッシュ結合＋逐次走査が選ばれ、`journal_lines` の全走査が消えない(2026-08-04 の migrations/0027 検証: 規模B で前後とも 58〜61 ms、プラン不変)。結合順を強制すると 2.4x 速い(規模A: 10.5 ms → 4.4 ms、共有バッファ 1,102 → 96)ので、**是正は索引ではなくクエリの書き換えである**。案: 対象科目を先に確定させる(`WITH eq AS (SELECT account_id FROM ledger.accounts WHERE book_id = %(book)s AND category='equity' AND account_id <> 'retained')` を MATERIALIZED にして `jl.account_id IN (SELECT ...)` にする、あるいは LATERAL で科目ごとに journal_lines を引く)。**科目リストを SQL にハードコードしてはならない** — accounts が正であり、二重管理は帳簿の定義がコード側にずれる典型経路である。現状の緩和は dashboard 側の `@st.cache_data(ttl=60)` のみ。**src/ryza/risk/ は保護領域のため独立役員審査+みなし承認の手続を経ること。** 出典: migrations/0027_query_indexes.sql の「入れなかったもの (C)」。"
     status: pending
 
   - id: streamlit-upgrade-dads-visual-check
