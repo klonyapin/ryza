@@ -250,6 +250,15 @@ def run_daily_close(
             # 原価勘定に載った行である。後者は 0034 の原価勘定ガードが書込時に拒否する
             # ようになったため、通常運用では逆仕訳経路と `broker_fill` を騙る申告
             # (新-21)だけが残る。
+            #
+            # **偽陽性を出さないことは検査の前提条件である**(独立審査 新-22)。この検査は
+            # 毎日 #運営 に流れるので、健全な帳簿で鳴った時点で検出器としては死ぬ(通知
+            # 疲れ)。両辺が同じ量を測るには (a) 売りの `cost_released` を `as_of=entry_date`
+            # で決めること(`posting.post_fill`)と (b) 再生順が `(entry_date, entry_id)` で
+            # あること(`_util.replay_position`)の**両方**が要る。片方だけでは、後日付の
+            # 約定が先に記帳されている帳簿で鳴る日が移動するだけである。
+            # いま残るのは真陽性のみ — 上記に加えて「売りの後からその売りより前の日付の
+            # 買いを入れた」帳簿(実現損益が古い平均原価で確定している)。
             cost_balance = _util.securities_cost_value(conn, book_id, iid, as_of=date)
             if cost_balance != cost:
                 unexplained[str(iid)] = {

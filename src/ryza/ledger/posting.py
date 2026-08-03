@@ -230,6 +230,38 @@ def post_fill(
             差額を実現損益(realized_pnl)に計上
     証憑は kind='broker_fill'、約定内容(instrument/side/qty/price/fee)を payload に格納し、
     ポジション再生(移動平均法)の元データになる。
+
+    **売りの建玉再生は ``as_of=entry_date`` で切る**(独立審査 新-22)。以前は ``as_of``
+    なしの全期間再生で ``cost_released`` を決めていたため、締めの原価恒等式
+    (``securities`` 残高(as_of) = ``replay_position`` の取得原価(as_of) — 0034)と
+    **日付境界が非対称**になり、**後日付の約定が先に記帳されている日**は健全な帳簿でも
+    ``cost_identity_broken`` が鳴った。審査実測: d0 買い 100@500 → d2 買い 100@700 を先に
+    記帳 → d1 売り 50@800 で、d1 の締めが
+    ``{book_value: 20000, replay_cost: 25000, qty: 50, reason: cost_identity_broken}``
+    (d2 の締めでは消える)。毎日 #運営 に流す検査なので、偽陽性の第一の源は先に潰す
+    (通知疲れは検出器を殺す)。新-13 が ``post_mark_to_market`` で行った是正と同型である。
+
+    **売却可能性の判定は原価の日付境界とは別物である**(独立審査 再22-1)。原価は
+    ``as_of=entry_date`` で切るが、**売れるかどうかは全履歴で見る** — 候補の売りを
+    ``entry_date`` の位置に挿入した全期間再生で、running 数量が全時点で 0 以上であることを
+    要求する(``_util.worst_running_qty_with_sell``)。``as_of`` の保有数量だけで通すと、
+    **後日付の売りが既に記帳されているとき同じ株を二重に払い出せる**(審査実測 P3: 買 d0
+    100 → 売 d3 100 を記帳した後の 売 d1 50 が受理され qty=−50 の幻の売建が立つ。
+    しかも残高も再生も −25,000 で一致するため**原価恒等式は沈黙する**)。全期間の期末数量
+    との AND でも足りない — 買いが後日付で先行していると途中の負区間を見逃す。端点ではなく
+    最小値を見ること。
+
+    **これ単独では偽陽性は消えない**: ``replay_position`` の再生順も
+    ``(entry_date, entry_id)`` にする必要がある(同関数の docstring)。``entry_id`` 順のまま
+    ここだけ ``as_of`` で切ると、上の実測ケースの偽陽性は d1 から**d2 へ移るだけ**である
+    (as_of=d2 の再生は d2 の買いを d1 の売りより前に置くので原価 90,000 / 残高 95,000)。
+    2 つの是正は対になっている。
+
+    **残る真陽性**: 売りを記帳した**後から**その売りより前の日付の買いを入れると、既記帳の
+    ``cost_released`` は当時の平均原価のままなので恒等式は破れる(実測: d0 買い 100@500 →
+    d5 売り 50 を記帳 → 後から d1 買い 100@700 を記帳すると 残高 95,000 / 再生 90,000)。
+    これは偽陽性ではなく**実現損益が古い平均原価で確定している**という事実であり、名指し
+    されるべきものである。
     """
     if side not in ("buy", "sell"):
         raise ValueError(f"side は buy|sell: {side}")
@@ -266,11 +298,23 @@ def post_fill(
         lines.append({"account_id": "cash", "credit": gross + f, "currency": currency})
         desc = f"買約定 銘柄{instrument_id} {q}@{p}"
     else:
-        held_qty, cost = _util.replay_position(conn, book_id, instrument_id)
-        if q > held_qty:
+        # 売却可能性は**全履歴**で見る(独立審査 再22-1)。``as_of=entry_date`` の保有数量
+        # だけで通すと、後日付の売りが記帳済みのとき同じ株を二重に払い出せる。
+        worst_qty, worst_day = _util.worst_running_qty_with_sell(
+            _util.position_events(conn, book_id, instrument_id),
+            entry_date=entry_date,
+            qty=q,
+        )
+        if worst_qty < 0:
             raise ValueError(
-                f"売り数量が保有を超過: sell={q} held={held_qty}(銘柄{instrument_id})"
+                f"売り数量が保有を超過: sell={q} で建玉が負になる"
+                f"(銘柄{instrument_id} {worst_day.isoformat()} 時点で {worst_qty})"
             )
+        # 原価は恒等式と同じ日付境界で切る(新-22)。全期間再生にすると後日付の買いが
+        # 平均原価に混ざり、その日の securities 残高と再生原価がずれる。
+        held_qty, cost = _util.replay_position(
+            conn, book_id, instrument_id, as_of=entry_date
+        )
         cost_released = cost * q / held_qty if held_qty > 0 else Decimal(0)
         realized = gross - cost_released  # 正=実現益
 
