@@ -7,7 +7,9 @@
   → outbox → 実行サマリ
 
 **FM 段(T-017)**: Jim(非 LLM・日次)を毎日、Ben(LLM・週次)を ``config/fm_ben.yaml``
-の実行曜日に走らせ、提案を ``gate_and_record`` へ通す。**分析の後・執行の前**に置く
+の実行曜日に走らせ、提案を ``gate_and_record`` へ通す。**FM ごとに別段**
+(``fm.jim`` / ``fm.ben``)にしてあり、Ben の例外で Jim の決定論注文が巻き戻らない
+(独立役員審査 T-017 C-5)。**分析の後・執行の前**に置く
 (FM 提案 → ゲート → 執行の順 — 設計リード裁定 2026-08-03)。Kill Switch 中は提案自体を
 作らない(ゲートも G-0 で block するが、通らないと分かっている案を作らない)。
 ※ 銘柄の決定論分類(``market.instrument_classification``)を作るのは risk 段(T-015)
@@ -73,6 +75,7 @@ from ryza.execution.runner import run_pending
 from ryza.fm.ben import run_ben
 from ryza.fm.config import BenConfig
 from ryza.fm.jim import run_jim
+from ryza.fm.theses import quarantine_stats
 from ryza.ips import load_and_validate
 from ryza.preprocess.embed import HashingEmbedder
 from ryza.preprocess.runner import run_preprocess
@@ -278,6 +281,7 @@ def _ensure_market_view(conn: psycopg.Connection, run: Run, as_of: datetime) -> 
 # FM 段の実行サマリに載せる件数キー(orders 明細は embed に載せない — 冗長なため)。
 _FM_SUMMARY_KEYS = (
     "universe", "entries", "exits", "candidates", "closes",
+    "quarantined_holdings",  # 根拠を失った保有(審査 C-11)
     "proposed", "passed", "blocked", "skipped",
 )
 
@@ -323,8 +327,63 @@ def _build_breaks_embed(breaks: list[dict[str, Any]], *, as_of: datetime) -> dic
     }
 
 
+# ── FM 提案の検疫の可視化(独立役員審査 T-017 C-10 の裁定)────────────────────
+# 検疫(trading.fm_theses_quarantine)は解除できない封じ込めであり、判断履歴と建玉根拠を
+# 恒久的にプロンプトから外す。**silent に大量検疫されないこと**が採用条件のため、
+# 日次サマリに必ず件数(当日増分/累計)を出し、閾値超えは別 embed で警告する。
+_QUARANTINE_MASS_COUNT = 5       # 1 日の増分がこれ以上なら mass-quarantine
+_QUARANTINE_MASS_RATIO = 0.10    # 全提案に占める累計比率がこれ以上なら mass-quarantine
+
+
+def _is_mass_quarantine(stats: dict[str, int]) -> bool:
+    """当日増分または累計比率が閾値を超えたか(増分ゼロなら常に False)。"""
+    if stats["today"] <= 0:
+        return False
+    if stats["today"] >= _QUARANTINE_MASS_COUNT:
+        return True
+    total_theses = stats["theses_total"]
+    return bool(
+        total_theses and stats["total"] / total_theses >= _QUARANTINE_MASS_RATIO
+    )
+
+
+def _quarantine_field(stats: dict[str, int]) -> dict[str, Any]:
+    """実行サマリの「検疫」フィールド(増分ゼロでも必ず出す)。"""
+    mark = "⚠️" if stats["today"] > 0 else "✅"
+    value = (
+        f"{mark} 当日増分 {stats['today']} 件 / 累計 {stats['total']} 件"
+        f"(全提案 {stats['theses_total']} 件)"
+    )
+    if _is_mass_quarantine(stats):
+        value = f"🚨 mass-quarantine — {value}"
+    return {"name": "検疫(FM 提案)", "value": value[:1024], "inline": False}
+
+
+def _build_quarantine_alert(stats: dict[str, int], *, as_of: datetime) -> dict[str, Any]:
+    """mass-quarantine の警告 embed(#運営)。照合ブレイクと同じ扱いで別途投入する。"""
+    jst_str = as_of.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
+    return {
+        "title": f"🚨 FM 提案の大量検疫 {jst_str}",
+        "description": (
+            f"当日 {stats['today']} 件を検疫(累計 {stats['total']} / "
+            f"全提案 {stats['theses_total']})。検疫は**解除できない**ため、"
+            "判断履歴と建玉根拠がプロンプトから恒久的に外れる。登録経路(手動 SQL・"
+            "quarantine_thesis)の実施者と理由を確認すること。"
+        ),
+        "color": COLOR_FLASH,
+        "author": org.author_for_role("audit"),
+        "footer": {"text": DISCLAIMER},
+    }
+
+
 def _build_ops_embed(
-    stages: list[StageResult], *, kill_switch: bool, posted: bool, as_of: datetime, dry_run: bool
+    stages: list[StageResult],
+    *,
+    kill_switch: bool,
+    posted: bool,
+    as_of: datetime,
+    dry_run: bool,
+    quarantine: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """実行サマリ(#運営)の embed を組む。"""
     jst_str = as_of.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
@@ -349,6 +408,8 @@ def _build_ops_embed(
     fields.append(
         {"name": "Kill Switch", "value": ("⛔ 有効" if kill_switch else "✅ 通常"), "inline": True}
     )
+    if quarantine is not None:
+        fields.append(_quarantine_field(quarantine))
     title = "日次サイクル(dry-run)" if dry_run else "日次サイクル"
     return {
         "title": f"{title} {jst_str}",
@@ -429,36 +490,42 @@ def run_daily(
     stages.append(_run_stage(conn, "analysis", _analysis))
 
     # ── 4. FM(戦略): Jim 日次 + Ben 週次 → ゲート → 注文案 — T-017 ────────────
-    def _fm() -> dict[str, Any]:
+    # **FM ごとに別段(別 savepoint)**にする(独立役員審査 T-017 C-5)。1段にまとめると
+    # Ben(LLM・週次)の例外で同じ段の Jim(決定論・日次)の提案・注文まで巻き戻り、
+    # 日次の決定論シグナルが週次の LLM 障害に巻き込まれる。段の失敗許容は FM 単位で効かせる。
+    def _fm_jim() -> dict[str, Any]:
         if is_engaged(conn):
             # Kill Switch 中は提案を作らない(ゲートも block するが、通らない案は作らない)。
             return {"skipped": "kill_switch"}
         fm_ips, fm_mandates = load_and_validate()
-        detail: dict[str, Any] = {
-            "jim": _fm_summary(
-                run_jim(
-                    conn, run, book_id=DEMO_BOOK, as_of=as_of,
-                    ips=fm_ips, mandates=fm_mandates,
-                )
+        return _fm_summary(
+            run_jim(
+                conn, run, book_id=DEMO_BOOK, as_of=as_of,
+                ips=fm_ips, mandates=fm_mandates,
             )
-        }
+        )
+
+    stages.append(_run_stage(conn, "fm.jim", _fm_jim))
+
+    def _fm_ben() -> dict[str, Any]:
+        if is_engaged(conn):
+            return {"skipped": "kill_switch"}
         ben_cfg = BenConfig.load()
         weekday = as_of.astimezone(JST).isoweekday()
         if fm_llm is None:
-            detail["ben"] = {"skipped": "LLM 未注入"}
-        elif weekday != ben_cfg.weekday:
-            detail["ben"] = {"skipped": f"週次(実行曜日={ben_cfg.weekday} 当日={weekday})"}
-        else:
-            detail["ben"] = _fm_summary(
-                run_ben(
-                    conn, run, fm_llm, model=config.model_for(ben_cfg.model_tier),
-                    book_id=DEMO_BOOK, as_of=as_of, cfg=ben_cfg,
-                    ips=fm_ips, mandates=fm_mandates,
-                )
+            return {"skipped": "LLM 未注入"}
+        if weekday != ben_cfg.weekday:
+            return {"skipped": f"週次(実行曜日={ben_cfg.weekday} 当日={weekday})"}
+        fm_ips, fm_mandates = load_and_validate()
+        return _fm_summary(
+            run_ben(
+                conn, run, fm_llm, model=config.model_for(ben_cfg.model_tier),
+                book_id=DEMO_BOOK, as_of=as_of, cfg=ben_cfg,
+                ips=fm_ips, mandates=fm_mandates,
             )
-        return detail
+        )
 
-    stages.append(_run_stage(conn, "fm", _fm))
+    stages.append(_run_stage(conn, "fm.ben", _fm_ben))
 
     # ── 5. 執行(デモ)→ 締め(照合 → NAV 確定)— T-016 ──────────────────────
     def _execution() -> dict[str, Any]:
@@ -525,13 +592,20 @@ def run_daily(
 
     # ── 8. 実行サマリを #運営 へ ──────────────────────────────────────────────
     def _ops_summary() -> dict[str, Any]:
+        # 検疫の件数は毎日必ず出す(解除できない封じ込めの検知可能化 — 審査 C-10)。
+        stats = quarantine_stats(conn, as_of=as_of)
         embed = _build_ops_embed(
             stages, kill_switch=state["kill_switch"], posted=state["posted"],
-            as_of=as_of, dry_run=dry_run,
+            as_of=as_of, dry_run=dry_run, quarantine=stats,
         )
         oid = enqueue(conn, channel_ops, embed, run.run_id)
         state["ops_outbox_id"] = oid
-        return {"ops_outbox_id": oid}
+        detail = {"ops_outbox_id": oid, "quarantine_today": stats["today"]}
+        if _is_mass_quarantine(stats):
+            detail["quarantine_alert_outbox_id"] = enqueue(
+                conn, channel_ops, _build_quarantine_alert(stats, as_of=as_of), run.run_id
+            )
+        return detail
 
     stages.append(_run_stage(conn, "ops_summary", _ops_summary))
 

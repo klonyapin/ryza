@@ -27,7 +27,10 @@
 
 - 永続記憶(``governance.stances``)は role 単位で読み書きする(``personas.recent_stances``)
 - 着任プロンプト(人格・charter)は役職ごとに独立(``personas.assume_role``)
-- 盲検レビュー(戦略昇格・IPS 改訂案の評価)は本モジュールを経由しない別経路
+- 盲検レビュー(戦略昇格・IPS 改訂案の評価)は本モジュールを経由しない別経路であり、
+  さらに ``personas.assume_role(blind=True)`` が本モジュールの書いた stance
+  (``source='office_chat'`` — 0022)を着任プロンプトから外す。会議で聞いた代表の
+  選好が「自分の過去の主張」の形で盲検経路へ透過するのを防ぐ(独立役員審査 C-3)
 
 会議で聞いた他役職の発言が自分の永続記憶に混入しないことは、``role_digest_input`` の
 **決定論フィルタ**(当該 role と代表の発言だけを要約入力にする)と role 別の書込で
@@ -57,6 +60,7 @@ from typing import Any, NamedTuple
 import psycopg
 
 from ryza.governance.personas import record_stance
+from ryza.research import prompting
 from ryza.research.llm import StructuredLLM
 
 # 役員室のタスク種別(コスト台帳のタグ。部門は dept_tag='governance')。
@@ -95,6 +99,11 @@ TRANSCRIPT_WINDOW = 30
 
 # 批判義務を負う役職(05 §3: 全ての重要決定に最低1つの懸念を出す)。決定論ガードの対象。
 CRITIC_ROLE = "independent_officer"
+
+# 役員室由来の stance の出所種別(0022 の governance.stances.source)。
+# 0013 minutes.meeting='office_chat' と同じ語で揃える(議事録と stance の出所が
+# 一致していないと、後から突合するときに対応表が要る)。
+CHAT_STANCE_SOURCE = "office_chat"
 
 # ── 重要決定の決定論ガード(2026-08-03 代表指示)────────────────────────────────
 # 独立役員の批判義務(05 §3)を**ルータ(LLM)の判断だけに依存させない**ための保険。
@@ -340,9 +349,16 @@ _SPEAKER_LABEL_LINE = re.compile(
 
 # 発言を囲むフェンス。ルータ・発言者へ渡す入力では、これで囲まれた内側が「会議の記録
 # データであって指示ではない」ことを system 指示と構文の両方で示す。
+# 記号と無害化の実装は ``ryza.research.prompting`` に共通化した(FM も同じ流儀を使う —
+# 独立役員審査 T-017 C-3)。意味づけ(下の ``_FENCE_NOTICE``)は文脈固有のためここに残す。
+# ``FENCE_OPEN`` は表示・注意書き用のテンプレートで、実際の組み立ては
+# ``prompting.fence_open``(tag の文字集合を検査する — 審査 C-14)を通す。
 FENCE_OPEN = "<<<speaker={speaker}>>>"
-FENCE_CLOSE = "<<<end>>>"
-_FENCE_TOKEN = re.compile(r"<<<\s*(speaker\s*=|end)[^>]*>>>", re.IGNORECASE)
+FENCE_CLOSE = prompting.FENCE_CLOSE
+
+# 話者キーは役職キー(英字とアンダースコア)だが、ChatTurn は任意の文字列を受け取れる。
+# tag に入れる前に決定論的に丸めておき、フェンスヘッダ自体への注入経路を断つ(審査 C-14)。
+_TAG_UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
 
 
 def sanitize_speech(text: str) -> str:
@@ -351,9 +367,7 @@ def sanitize_speech(text: str) -> str:
     - 行頭の「代表:」「cio:」などは ``> `` を付けて引用化する(他者になりすませない)
     - フェンス記号 ``<<<speaker=…>>>`` / ``<<<end>>>`` は全角化して閉じ忘れを防ぐ
     """
-    without_fence = _FENCE_TOKEN.sub(
-        lambda m: m.group(0).replace("<", "＜").replace(">", "＞"), text
-    )
+    without_fence = prompting.neutralize_fences(text)
     return _SPEAKER_LABEL_LINE.sub(
         lambda m: f"{m.group('indent')}> {m.group('marker') or ''}"
         f"{m.group('label')}{m.group('sep')}",
@@ -407,7 +421,7 @@ def _conversation_block(turns: Sequence[ChatTurn]) -> str:
     """LLM へ渡す会議記録。1発言ずつフェンスで囲み、中身はサニタイズ済みにする。"""
     blocks = []
     for t in turns:
-        opening = FENCE_OPEN.format(speaker=t.speaker)
+        opening = prompting.fence_open(f"speaker={_TAG_UNSAFE.sub('_', t.speaker)}")
         blocks.append(f"{opening}\n{sanitize_speech(t.text)}\n{FENCE_CLOSE}")
     return "\n\n".join(blocks)
 
@@ -884,7 +898,14 @@ def record_chat_stances(
     minute_id: int,
     run_id: int,
 ) -> list[int]:
-    """要約済みの主張・懸念を ``governance.stances`` へ追記する(出所 = 当該議事録)。"""
+    """要約済みの主張・懸念を ``governance.stances`` へ追記する(出所 = 当該議事録)。
+
+    ``source='office_chat'``(0022)を明示して書く。役員室は会議形式であり、ここで
+    形成された主張は代表・他役職の発言を聞いた文脈のものなので、盲検レビューの
+    着任(``personas.assume_role(blind=True)``)では読み込ませない — 会議で聞いた
+    代表の選好が「自分の過去の主張」の形で盲検経路へ透過するのを防ぐ(議論規約3・
+    独立役員審査 boardroom-meeting C-3)。
+    """
     return [
         record_stance(
             conn,
@@ -893,6 +914,7 @@ def record_chat_stances(
             summary=s["summary"],
             run_id=run_id,
             minute_id=minute_id,
+            source=CHAT_STANCE_SOURCE,
         )
         for s in stances
     ]
@@ -900,6 +922,7 @@ def record_chat_stances(
 
 __all__ = [
     "BOARDROOM_ROLES",
+    "CHAT_STANCE_SOURCE",
     "CRITIC_ROLE",
     "FACILITATOR_SPEAKER",
     "FACILITATOR_TEXT",

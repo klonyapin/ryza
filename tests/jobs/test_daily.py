@@ -6,9 +6,12 @@ Kill Switch ゲートを、ローカル DB + ``DryRunProvider``(実 API を呼�
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from ryza.bot import killswitch
+from ryza.fm.config import BenConfig
+from ryza.fm.theses import quarantine_thesis, record_thesis
 from ryza.ingest.jquants import JQuantsAuthError
 from ryza.jobs import daily
 from ryza.jobs.daily import make_default_ingest, run_daily, run_ingest_sources
@@ -44,7 +47,7 @@ def test_daily_end_to_end(conn, run, llm_config, make_daily_llms, insert_enriche
     # fm 段は分析の後・執行の前(FM 提案 → ゲート → 執行 — T-017)。
     # risk 段は会計締め(execution 段)の直後(00 §9・設計リード裁定 2026-08-03)。
     assert [s.name for s in result.stages] == [
-        "ingest", "preprocess", "analysis", "fm", "execution", "risk",
+        "ingest", "preprocess", "analysis", "fm.jim", "fm.ben", "execution", "risk",
         "morning", "ops_summary",
     ]
     assert result.ok
@@ -280,11 +283,11 @@ def test_daily_fm_stage_proposes_and_executes(
 
     result, _ = _run(conn, run, llm_config, make_daily_llms)
 
-    fm = result.stage("fm")
-    assert fm is not None and fm.ok, fm.error
-    assert fm.detail["jim"]["passed"] == 1 and fm.detail["jim"]["blocked"] == 0
+    jim = result.stage("fm.jim")
+    assert jim is not None and jim.ok, jim.error
+    assert jim.detail["passed"] == 1 and jim.detail["blocked"] == 0
     # Ben は LLM 未注入(run_daily に fm_llm を渡していない)のためスキップ。
-    assert "skipped" in fm.detail["ben"]
+    assert "skipped" in result.stage("fm.ben").detail
     # 同日の執行段が約定させ、注文には論拠(thesis_id)が紐づいている。
     assert result.stage("execution").detail["filled"] == 1
     with conn.cursor() as cur:
@@ -308,10 +311,114 @@ def test_daily_fm_stage_skipped_on_kill_switch(
     killswitch.engage(conn, "1", ["1"], reason="test")
 
     result, _ = _run(conn, run, llm_config, make_daily_llms)
-    assert result.stage("fm").detail == {"skipped": "kill_switch"}
+    assert result.stage("fm.jim").detail == {"skipped": "kill_switch"}
+    assert result.stage("fm.ben").detail == {"skipped": "kill_switch"}
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM trading.fm_theses")
         assert cur.fetchone()[0] == 0
+
+
+def test_ben_failure_does_not_roll_back_jim(
+    conn, run, llm_config, make_daily_llms, insert_enriched_doc, monkeypatch
+):
+    """Ben(LLM・週次)の例外で Jim(決定論・日次)の提案・注文が巻き戻らない。
+
+    独立役員審査 T-017 C-5 の是正(fm 段を FM ごとの savepoint に分割)を固定する。
+    Ben を当日実行にするため実行曜日を当日に差し替え、run_ben を例外に置き換える。
+    """
+    _seed(insert_enriched_doc)
+    instrument_id = _seed_jim_universe(conn, run)
+    weekday = datetime.now(UTC).astimezone(daily.JST).isoweekday()
+    base_cfg = BenConfig.load()
+    monkeypatch.setattr(
+        daily.BenConfig, "load",
+        classmethod(lambda cls: replace(base_cfg, weekday=weekday)),
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("ben boom")
+
+    monkeypatch.setattr(daily, "run_ben", _boom)
+
+    result, _ = _run(conn, run, llm_config, make_daily_llms, fm_llm=object())
+
+    ben = result.stage("fm.ben")
+    assert ben is not None and not ben.ok and "ben boom" in (ben.error or "")
+    # Jim の段は成功したまま残り、同日の執行段が約定させる(巻き戻っていない)。
+    jim = result.stage("fm.jim")
+    assert jim.ok and jim.detail["passed"] == 1
+    assert result.stage("execution").detail["filled"] == 1
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM trading.fm_theses WHERE fm = 'jim' AND instrument_id = %s",
+            (instrument_id,),
+        )
+        assert cur.fetchone()[0] == 1
+
+
+# ── 検疫の可視化(独立役員審査 T-017 C-10)────────────────────────────────────
+def _quarantine_theses(conn, run, doc_id, count: int) -> list[int]:
+    """ben の提案を count 件記録し、全て検疫する。"""
+    ids = []
+    for i in range(count):
+        thesis_id = record_thesis(
+            conn, fm="ben", book_id="DEMO_FUND", instrument_id=900 + i,
+            direction="buy", thesis_md="論拠。",
+            evidence_refs=[{"kind": "document", "doc_id": doc_id}],
+            invalidation_md="崩れたら降りる。", producer="test.ben",
+            as_of=datetime.now(UTC), run_id=run.run_id, model="test-mid",
+        )
+        quarantine_thesis(conn, thesis_id, reason="注入", quarantined_by="test")
+        ids.append(thesis_id)
+    return ids
+
+
+def test_ops_summary_always_reports_quarantine_counts(
+    conn, run, llm_config, make_daily_llms, insert_enriched_doc
+):
+    """検疫件数(当日増分/累計)は増分ゼロでも実行サマリに必ず出す。"""
+    _seed(insert_enriched_doc)
+    result, _ = _run(conn, run, llm_config, make_daily_llms)
+    assert result.stage("ops_summary").detail["quarantine_today"] == 0
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT embed_json FROM press.outbox WHERE id = %s",
+            (result.ops_outbox_id,),
+        )
+        embed = cur.fetchone()[0]
+    names = [f["name"] for f in embed["fields"]]
+    assert "検疫(FM 提案)" in names
+
+
+def test_mass_quarantine_raises_alert(
+    conn, run, llm_config, make_daily_llms, insert_enriched_doc
+):
+    """1日の検疫が閾値以上なら #運営 へ別 embed で警告する(silent な抹消を作らない)。"""
+    doc_id = insert_enriched_doc()
+    _quarantine_theses(conn, run, doc_id, daily._QUARANTINE_MASS_COUNT)
+    result, _ = _run(conn, run, llm_config, make_daily_llms)
+
+    detail = result.stage("ops_summary").detail
+    assert detail["quarantine_today"] == daily._QUARANTINE_MASS_COUNT
+    assert "quarantine_alert_outbox_id" in detail
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT embed_json FROM press.outbox WHERE id = %s",
+            (detail["quarantine_alert_outbox_id"],),
+        )
+        embed = cur.fetchone()[0]
+    assert "大量検疫" in embed["title"]
+    assert "解除できない" in embed["description"]
+
+
+def test_mass_quarantine_thresholds():
+    """増分ゼロは警告しない。件数閾値・比率閾値のどちらでも発火する(決定論)。"""
+    assert not daily._is_mass_quarantine({"today": 0, "total": 50, "theses_total": 60})
+    assert daily._is_mass_quarantine(
+        {"today": daily._QUARANTINE_MASS_COUNT, "total": 5, "theses_total": 1000}
+    )
+    assert daily._is_mass_quarantine({"today": 1, "total": 10, "theses_total": 100})
+    assert not daily._is_mass_quarantine({"today": 1, "total": 1, "theses_total": 100})
 
 
 # ── 失敗許容: 一段が落ちても後段は走る ──────────────────────────────────────────

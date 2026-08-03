@@ -4,9 +4,10 @@
 読み取り専用。** アクセス制御は IAP の許可リスト(roles/iap.httpsResourceAccessor)に
 全面委譲し、アプリ内に認証コードは置かない(2026-08-02 の無認証 Cloud Run 公開版とは
 異なり、IAP が Google アカウント認証を強制する。デプロイ: ops/deploy-dashboard.sh)。
-Kill Switch 等の操作系 UI は置かない(Discord Bot の管轄)。唯一の例外が「役員室」
-(Issue #9・05-governance §5)で、議事録・決議マーク・stances の**追記**だけを行う
-(発注・設定変更の経路は持たない)。
+Kill Switch 等の操作系 UI は置かない(Discord Bot の管轄)。例外は追記だけを行う2ページ:
+「役員室」(Issue #9・05-governance §5)が議事録・決議マーク・stances を、「開発室」
+(0024・代表指示 2026-08-03)が設計リードへの連絡(``ops.dev_chat``)を書く。
+いずれも発注・設定変更の経路は持たない。
 
 起動: ``.venv/bin/streamlit run dashboard/app.py``(README 参照)。
 接続先は用途で2本に分かれる(独立役員審査 2026-08-03 重大-2 の是正):
@@ -48,7 +49,7 @@ import queries  # noqa: E402
 import viz  # noqa: E402
 
 from ryza import org  # noqa: E402
-from ryza.governance import boardroom, personas  # noqa: E402
+from ryza.governance import boardroom, devchat, personas  # noqa: E402
 from ryza.provenance.runs import run as run_ctx  # noqa: E402
 from ryza.research.llm import StructuredLLM  # noqa: E402
 from ryza.research.providers import AnthropicProvider, LLMConfig  # noqa: E402
@@ -76,9 +77,20 @@ def _conn():
 # その都度走るため、60 秒 TTL でキャッシュする。TTL を短くしてあるのは日次サイクルの
 # 進行中に古い値を見せないため(監視面としての鮮度 > キャッシュ効率)。
 # ``conn`` はハッシュ不能なので引数に取らず ``_conn()`` を内部で引く。
+# NAV 系列と未反映フローは **1 クエリ・1 キャッシュ**で取る(独立審査 中-6): 別々に
+# キャッシュすると TTL の切れ方次第で「系列は新しいが pending は古い」画面が出うる。
 @st.cache_data(ttl=60)
+def _nav_data() -> dict[str, list[dict[str, Any]]]:
+    return queries.fetch_nav_data(_conn())
+
+
 def _nav_series() -> list[dict[str, Any]]:
-    return queries.fetch_nav_series(_conn())
+    return _nav_data()["series"]
+
+
+def _pending_flows() -> list[dict[str, Any]]:
+    """スナップショット未生成の外部フロー(NAV 系列に載らない — 重要-5)。"""
+    return _nav_data()["pending"]
 
 
 @st.cache_data(ttl=60)
@@ -321,25 +333,45 @@ def page_overview(conn) -> None:
 
 
 # ── 成績 ──────────────────────────────────────────────────────────────────────
-def _render_flow_notice(series: list[dict[str, Any]]) -> None:
-    """外部フロー発生日の注記(独立役員審査 2026-08-03 重要-6)。
+def _render_flow_notice(
+    series: list[dict[str, Any]], pending: list[dict[str, Any]] | None = None
+) -> None:
+    """外部フロー発生日の注記(独立役員審査 2026-08-03 重要-6・重要-5)。
 
     underwater 図は NAV そのものを見る図なので、出資で NAV が跳ねた日・払戻で NAV が
     落ちた日は「回復/下落」に見える。払戻を −30% の損失と読み違えないよう、フローの
     あった日を図の直下で名指しする(期間リターンの方は TWR で調整済み)。
+
+    フローの帰属日は仕訳日ではなく「その日以降の最初のスナップショット日」である
+    (``ryza.risk.navflow``)。スナップショットがまだ無いフロー(``pending``)は系列の
+    どの点にも載らないため、別行で明示する — 次の締めで NAV が跳ねる原因になる。
+
+    先頭点は除く: 系列の起点より前の出資(設定時の払込など)はすべて先頭点に寄るが、
+    前の点が無い以上そこに段差は生じない(起点 NAV が既にそれを含む)。段差の説明という
+    この注記の用途に対しては誤誘導になるため出さない。金額は明細表の net_flow に残る。
     """
-    flows = [r for r in series if float(r.get("net_flow") or 0) != 0]
-    if not flows:
-        return
-    items = " / ".join(
-        f"{r['day']} {'出資' if float(r['net_flow']) > 0 else '払戻'}"
-        f" {viz.fmt_jpy(abs(float(r['net_flow'])))}"
-        for r in flows[-8:]
-    )
-    st.caption(
-        f":orange[外部フロー発生日({len(flows)} 日・図は未調整)]: {items}"
-        " — 上の図の段差はこの出資・払戻によるもので、損益ではない。"
-    )
+    flows = [r for r in series[1:] if float(r.get("net_flow") or 0) != 0]
+    if flows:
+        items = " / ".join(
+            f"{r['day']} {'出資' if float(r['net_flow']) > 0 else '払戻'}"
+            f" {viz.fmt_jpy(abs(float(r['net_flow'])))}"
+            for r in flows[-8:]
+        )
+        st.caption(
+            f":orange[外部フロー発生日({len(flows)} 日・図は未調整)]: {items}"
+            " — 上の図の段差はこの出資・払戻によるもので、損益ではない"
+            "(仕訳日が休日の場合は直後のスナップショット日に寄せてある)。"
+        )
+    if pending:
+        items = " / ".join(
+            f"{r['day']} {'出資' if float(r['amount']) > 0 else '払戻'}"
+            f" {viz.fmt_jpy(abs(float(r['amount'])))}"
+            for r in pending[-8:]
+        )
+        st.caption(
+            f":red[スナップショット未生成の外部フロー({len(pending)} 件)]: {items}"
+            " — まだ NAV 系列にもリターン測定にも入っていない(次の会計締めで反映)。"
+        )
 
 
 def page_performance(conn) -> None:
@@ -361,7 +393,7 @@ def page_performance(conn) -> None:
         "(IPS §3.1)で、外部フロー調整は入れない NAV そのものの水没度合い。"
         "リミット判定に使う測定値はリスクエンジンの出力(「リスク」ページ)。"
     )
-    _render_flow_notice(series)
+    _render_flow_notice(series, _pending_flows())
 
     st.subheader("期間別リターン(外部フロー調整済み TWR)")
     rows = [
@@ -395,9 +427,22 @@ def page_performance(conn) -> None:
 
     st.subheader("NAV スナップショット(明細)")
     st.dataframe(
-        _df([{k: r[k] for k in ("day", "nav", "status", "net_flow")} for r in series[::-1]]),
+        _df(
+            [
+                {k: r[k] for k in ("day", "nav", "status", "net_flow", "flow_bop", "flow_eop")}
+                for r in series[::-1]
+            ]
+        ),
         use_container_width=True,
         hide_index=True,
+    )
+    st.caption(
+        "net_flow はその測定日に帰属した外部フローで、内訳は flow_bop(前の測定日より後・"
+        "当日より前 = 締めが走らなかった日の分)と flow_eop(当日仕訳)。リターンは "
+        "`(nav − flow_eop) / (前日 nav + flow_bop) − 1` で測る(期中に入った資金は"
+        "その区間の運用元本のため分母に入れる)。**最古の行の net_flow だけは「設定来の"
+        "累計」**である — 系列の起点より前の出資はすべて先頭点に寄る(起点 NAV が既に"
+        "それを含むため、この値はリターン計算には使われない)。"
     )
 
 
@@ -1036,17 +1081,22 @@ def page_approvals(conn) -> None:
         st.markdown(f":red[{line}]" if oldest >= 48 else line)
         st.caption("48h 超過はみなし承認の期限(定款第3条)に触れる可能性がある。")
 
-    st.subheader("承認・決定の履歴(governance.decisions)")
+    st.subheader("承認・決定の現状(governance.current_decisions)")
     decisions = queries.fetch_decisions(conn, limit=50)
     if not decisions:
         st.info("決定記録はまだない(Discord 承認 UI・みなし承認が書く)")
     else:
         df = _df(decisions)
-        df.insert(0, "区分", df["decision"].map(lambda d: "みなし" if d == "deemed" else "明示"))
+        # 「否認済み」を先頭列に出す: 代表が否認した承認を承認済みのまま見せないため
+        # (独立役員審査 0021 C-5)。区分はみなし/明示の別(deemed_ratio の前提)。
+        df.insert(0, "状態", df["is_vetoed"].map(lambda v: "否認済み" if v else "有効"))
+        df.insert(1, "区分", df["decision"].map(lambda d: "みなし" if d == "deemed" else "明示"))
+        vetoed = int(df["is_vetoed"].sum())
         st.caption(
             f"直近 {len(df)} 件(みなし {int((df['区分'] == 'みなし').sum())} / "
-            f"明示 {int((df['区分'] == '明示').sum())})— "
-            "みなし承認は通知と同時発効・代表はいつでも否認可(定款第3条 v0.4)"
+            f"明示 {int((df['区分'] == '明示').sum())}・うち否認済み {vetoed})— "
+            "みなし承認は通知と同時発効・代表はいつでも否認可(定款第3条 v0.4)。"
+            "否認は取消(revert_commit)と派生効果の #運営 報告を伴う"
         )
         st.dataframe(df, use_container_width=True, hide_index=True)
 
@@ -1648,6 +1698,138 @@ def page_boardroom() -> None:
             st.caption(f"決議 {res['seq']}: {res['title']}(#{res['resolution_id']}{ref})")
 
 
+# ── 開発室(代表 ⇄ 設計リード — 代表指示 2026-08-03)────────────────────────────
+# 役員室が「経営レベルの審議」の場なのに対し、ここは**開発の連絡窓口**である。
+# 代表の発言は ``ops.dev_chat``(0024・追記オンリー)に入り、Bot が Discord の #dev へ
+# 中継する。設計リード(Claude Code セッション)は
+# ``python -m ryza.governance.devchat --reply`` で同じスレッドへ返す。
+# 書込は役員室と同じ最小権限ロール ``ryza_boardroom``(``_boardroom_conn``)で行い、
+# 操作者=代表とみなせる根拠も役員室と同じ(IAP 許可リストが代表1名 — app.py 冒頭)。
+_DEV_CHAT_LIMIT = 200
+_DEV_CHAT_REFRESH_SECONDS = 10
+
+#: 設計リードの役職キー(``config/org.yaml`` の persona=personas/dev-lead)。
+_DEV_LEAD_ROLE = "dev_lead"
+
+#: この秒数を超えて未中継の発言は「滞留」として警告する(独立役員審査 中-7)。
+#: 正常時の中継は Bot の 5 秒ループで数秒以内に終わるため、2 分は十分に余裕がある。
+#: 中継が全滅しても UI が「中継待ち」と表示し続けて障害が沈黙する経路を塞ぐ。
+_DEV_CHAT_STALE_SECONDS = 120
+
+
+def _dev_relay_caption(msg: devchat.DevChatMessage) -> str:
+    """発言の時刻と中継状態(独立役員審査 中-7 の滞留表示を含む)。
+
+    中継状態を必ず添える。中継前は相手の目にまだ触れていないため、「送ったのに反応が
+    無い」を「まだ届いていない」と区別できないと、同じ連絡を二度書くことになる。
+    """
+    when = f"{msg.created_at:%m-%d %H:%M}"
+    if msg.relayed:
+        return f"{when} / Discord へ中継済み"
+    age = (datetime.now(UTC) - msg.created_at).total_seconds()
+    if age > _DEV_CHAT_STALE_SECONDS:
+        return f"{when} / :red[**中継されていない**({viz.fmt_hours(age / 3600)}経過)]"
+    return f"{when} / 中継待ち(数秒)"
+
+
+def _render_dev_turn(msg: devchat.DevChatMessage) -> None:
+    """1 発言を吹き出し表示する(代表は user 側、設計リードはキャラクター付き)。"""
+    if msg.sender == devchat.REPRESENTATIVE:
+        with st.chat_message("user"):
+            st.markdown(msg.body)
+            st.caption(_dev_relay_caption(msg))
+        return
+    member = _role_member(_DEV_LEAD_ROLE)
+    with st.chat_message("assistant", avatar=_role_avatar(_DEV_LEAD_ROLE)):
+        st.markdown(
+            f'<span style="color:{member.color if member else "inherit"};font-weight:600">'
+            f"{_role_display(_DEV_LEAD_ROLE)}</span>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(msg.body)
+        st.caption(_dev_relay_caption(msg))
+
+
+def _dev_chat_stale_warning(conn) -> None:
+    """中継が滞留していることを画面で名指しする(独立役員審査 中-7)。
+
+    Bot が落ちる・DB 権限が欠ける等で中継が全滅しても、個々の吹き出しが「中継待ち」と
+    出るだけでは異常に見えない。**滞留件数と最古の経過時間**を警告として最上部に出す。
+    """
+    stale = devchat.stale_unrelayed(conn, older_than_seconds=_DEV_CHAT_STALE_SECONDS)
+    if not stale:
+        return
+    oldest = (datetime.now(UTC) - stale[0].created_at).total_seconds() / 3600
+    st.warning(
+        f"**{len(stale)} 件が Discord へ中継されていない**(最古 {viz.fmt_hours(oldest)} 前)。"
+        "Bot の配送ループ(bot.devchat.relay)が止まっているか、中継が失敗し続けている。"
+        "「ジョブ」ページで直近の bot.devchat.relay の status を確認すること。"
+    )
+
+
+@st.fragment(run_every=_DEV_CHAT_REFRESH_SECONDS)
+def _dev_chat_thread(conn) -> None:
+    """スレッド表示。**fragment なのでページ全体を再実行せずに自動更新する**。
+
+    設計リードの返信は数十秒〜数分後に別プロセス(CLI)から入るため、代表が画面を
+    手動で更新しなければ届いたことに気付けない。``run_every`` はこの fragment だけを
+    再実行するので、LLM を呼ぶ他ページと違い再取得のコストは SELECT 2 本に収まる。
+
+    **例外は必ず捕まえる**(独立役員審査 軽-9)。``@st.cache_resource`` が保持する接続は
+    DB の再起動やアイドル切断で死ぬことがあり、fragment の中で例外が出ると自動更新が
+    その場で止まって「返信が来ない」ように見える。接続キャッシュを捨てて次の周期で
+    開き直させる。
+    """
+    try:
+        _dev_chat_stale_warning(conn)
+        messages = devchat.fetch_thread(conn, limit=_DEV_CHAT_LIMIT)
+    except Exception as exc:  # noqa: BLE001 - 自動更新を止めない(次周期で再接続)
+        _boardroom_conn.clear()
+        st.error(f"スレッドを取得できなかった(次の自動更新で再接続する): {exc}")
+        return
+    if not messages:
+        st.info("まだ連絡はない。下の入力欄から設計リードへ送る。")
+    for msg in messages:
+        _render_dev_turn(msg)
+    st.caption(
+        f"直近 {len(messages)} 件(上限 {_DEV_CHAT_LIMIT})/ "
+        f"{_DEV_CHAT_REFRESH_SECONDS} 秒ごとに自動更新"
+    )
+
+
+def page_dev_chat() -> None:
+    st.header("開発室")
+    viz.page_question(
+        "設計リードへ何を伝え、設計リードから何が返ってきたか(開発の連絡と進捗)"
+    )
+    st.caption(
+        "設計リードへの連絡窓口。応答は非同期(数十秒〜数分)。"
+        "実装・PR・デプロイの実働はセッション側で行われる。"
+    )
+    try:
+        conn = _boardroom_conn()
+    except Exception as exc:  # noqa: BLE001 - DB 停止時も UI は説明を出して生かす
+        st.error(f"DB に接続できない: {exc}")
+        return
+    st.caption(
+        f"投稿は ops.dev_chat(追記オンリー・0024)に残り、Bot が Discord の #dev へ"
+        f"「{devchat.RELAY_PREFIX}…」の形で中継する。設計リードの返信は "
+        "`python -m ryza.governance.devchat --reply` で同じスレッドへ入り、"
+        "**双方向とも Discord に出る**(外出中は Discord をミラーとして読める)。"
+        "**ここでの連絡は指示であって承認ではない** — 保護領域の変更には"
+        "従来どおり承認記録が要る(定款第5条)。"
+    )
+    _dev_chat_thread(conn)
+    text = st.chat_input("設計リードへの連絡(あなたは代表として書く)")
+    if text:
+        try:
+            devchat.post_representative(conn, text)
+        except Exception as exc:  # noqa: BLE001 - 権限不足等も画面に出す
+            st.error(f"投稿に失敗: {exc}")
+            return
+        st.rerun()  # 追記した発言を即座にスレッドへ出す
+
+
 # ── エントリポイント ──────────────────────────────────────────────────────────
 def main() -> None:
     st.sidebar.title("Ryza 運用ダッシュボード")
@@ -1672,6 +1854,7 @@ def main() -> None:
             "組織",
             "規則",
             "役員室",
+            "開発室",
             "開発ステータス",
         ],
     )
@@ -1680,6 +1863,9 @@ def main() -> None:
         return
     if page == "役員室":
         page_boardroom()  # 書込可の専用接続を自前で持つ(READ ONLY 接続は使わない)
+        return
+    if page == "開発室":
+        page_dev_chat()  # 役員室と同じ書込可の専用接続(ops.dev_chat への INSERT)
         return
     if page == "組織":
         # 台帳(config/org.yaml)が主。アイコンの上書き(0020)の読取にだけ DB を使うため、

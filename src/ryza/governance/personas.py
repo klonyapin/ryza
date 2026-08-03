@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,21 @@ _PERSONA_ROOT = Path(__file__).resolve().parents[3] / "personas"
 OFFICER_ROLES = ("cio", "independent_officer", "audit")
 
 _KIND_LABELS = {"claim": "主張", "concern": "懸念", "dissent": "反対意見", "retraction": "撤回"}
+
+# stance の出所種別(0022 の governance.stances.source。CHECK と同じ語彙)。
+SOURCES = ("direct", "office_chat", "committee")
+
+# 盲検着任(``assume_role(blind=True)``)で読み込む出所の **allowlist**
+# (独立役員審査 0021 C-6)。会議では代表が指示・選好を述べ、役員はそれに応答する形で
+# 主張を形成するため、会議由来の stance は「自分の過去の主張」の形をとった代表の選好に
+# なりうる(独立役員審査 boardroom-meeting C-3)。
+#
+# denylist(会議由来を除外する)ではなく allowlist にするのは、語彙に新しい出所を
+# 足した者・``source`` の指定を忘れた書き手の双方が、denylist では既定で
+# 「盲検に載る」側へ倒れる(fail-open)ためである。盲検の穴は静かに開いて気付かれない
+# ので、未知の出所は載せない側へ倒す。新しい出所を盲検に載せたいなら、ここへ明示的に
+# 足す判断を経る必要がある。
+BLIND_INCLUDED_SOURCES = ("direct",)
 
 
 def _dir_name(role: str) -> str:
@@ -61,6 +77,7 @@ class Stance:
     kind: str  # claim | concern | dissent
     summary: str
     stated_at: datetime
+    source: str = "direct"  # direct | office_chat | committee(0022)
 
 
 def load_persona_assets(role: str, persona_root: Path = _PERSONA_ROOT) -> PersonaAssets:
@@ -94,13 +111,30 @@ def record_stance(
     run_id: int,
     minute_id: int | None = None,
     retracts: int | None = None,
+    source: str = "direct",
 ) -> int:
     """主張・懸念の要約を ``governance.stances`` に追記する(05 §4)。
 
     テーブルは追記オンリー(UPDATE/DELETE 禁止トリガ)。訂正は
     ``kind='retraction'`` + ``retracts=<対象 stance_id>`` の行を追記する。
     撤回は自 role の行に対してのみ許す(他 role の記憶を消させない)。
+
+    ``source`` は出所種別(0022)。既定 ``'direct'`` は「他役職・代表の発言を
+    聞いていない文脈での記録」を意味する。会議由来の書込は必ず出所を明示する
+    こと(``boardroom.record_chat_stances`` は ``'office_chat'``)。
+
+    ``source`` は INSERT 前に検証する(``decisions.record_deemed_approval`` の
+    3専決検証と同型 — 独立役員審査 0021 C-6)。DB の CHECK が一次統制であることは
+    変わらないが、``CheckViolation`` はどの制約に触れたか呼び出し側に伝わりにくく、
+    かつトランザクションを中断させるため、同一トランザクションで議事録を書いている
+    役員室の書込を巻き添えにする。
     """
+    if source not in SOURCES:
+        raise ValueError(
+            f"未知の stance 出所: {source}(既知: {', '.join(SOURCES)})。"
+            "新しい出所を足すときは migrations の CHECK・SOURCES・"
+            "BLIND_INCLUDED_SOURCES の3箇所を同時に見直すこと"
+        )
     if retracts is not None:
         with conn.cursor() as cur:
             cur.execute(
@@ -116,40 +150,60 @@ def record_stance(
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO governance.stances (role, kind, summary, minute_id, retracts, run_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO governance.stances
+                (role, kind, summary, minute_id, retracts, run_id, source)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING stance_id
             """,
-            (_db_role(role), kind, summary, minute_id, retracts, run_id),
+            (_db_role(role), kind, summary, minute_id, retracts, run_id, source),
         )
         return cur.fetchone()[0]
 
 
 def recent_stances(
-    conn: psycopg.Connection, role: str, *, limit: int = 10
+    conn: psycopg.Connection,
+    role: str,
+    *,
+    limit: int = 10,
+    include_sources: Sequence[str] | None = None,
 ) -> list[Stance]:
     """当該 role の直近 N 件の主張・懸念(新しい順)。
 
     単一 role のみを読む(他 role の記憶は返さない — docstring 冒頭の注意どおり
     これは API 慣習であり DB レベルの強制ではない)。撤回された行と撤回行自体は
     着任プロンプトに載せないため除外する。
+
+    ``include_sources`` は読み込む出所(0022 の ``source``)の **allowlist**。
+    ``None``(既定)は全出所。盲検着任は ``BLIND_INCLUDED_SOURCES`` を渡す。
+    許可制なので、語彙に後から足された未知の出所は自動的に読まれない
+    (独立役員審査 0021 C-6)。**撤回の判定は allowlist の影響を受けない** —
+    撤回行が会議で述べられたものでも、撤回された事実は消えない。
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT s.stance_id, s.role, s.kind, s.summary, s.stated_at
+            SELECT s.stance_id, s.role, s.kind, s.summary, s.stated_at, s.source
             FROM governance.stances s
             WHERE s.role = %s
               AND s.kind <> 'retraction'
+              AND (%s::text[] IS NULL OR s.source = ANY(%s::text[]))
               AND NOT EXISTS (SELECT 1 FROM governance.stances r
                               WHERE r.retracts = s.stance_id)
             ORDER BY s.stated_at DESC, s.stance_id DESC
             LIMIT %s
             """,
-            (_db_role(role), limit),
+            (
+                _db_role(role),
+                None if include_sources is None else list(include_sources),
+                None if include_sources is None else list(include_sources),
+                limit,
+            ),
         )
         return [
-            Stance(stance_id=r[0], role=r[1], kind=r[2], summary=r[3], stated_at=r[4])
+            Stance(
+                stance_id=r[0], role=r[1], kind=r[2], summary=r[3],
+                stated_at=r[4], source=r[5],
+            )
             for r in cur.fetchall()
         ]
 
@@ -183,15 +237,30 @@ def assume_role(
     *,
     limit: int = 10,
     persona_root: Path = _PERSONA_ROOT,
+    blind: bool = False,
 ) -> str:
-    """役職資産+直近 stances を読み、着任プロンプトを返す(上記関数の合成)。"""
+    """役職資産+直近 stances を読み、着任プロンプトを返す(上記関数の合成)。
+
+    ``blind=True``(盲検モード)は ``BLIND_INCLUDED_SOURCES`` に列挙された出所の
+    stance **だけ**を着任プロンプトに載せる(allowlist)。戦略昇格・IPS 改訂案の
+    評価で独立役員が着任する経路はこれを使う(議論規約3・独立役員審査
+    boardroom-meeting C-3): 会議で聞いた代表の選好が「自分の過去の主張」の形で
+    盲検レビューに透過するのを防ぐ。既定は ``False`` = 従来挙動(全出所を読む)。
+    """
     assets = load_persona_assets(role, persona_root=persona_root)
-    stances = recent_stances(conn, role, limit=limit)
+    stances = recent_stances(
+        conn,
+        role,
+        limit=limit,
+        include_sources=BLIND_INCLUDED_SOURCES if blind else None,
+    )
     return build_onboarding_prompt(assets, stances)
 
 
 __all__ = [
+    "BLIND_INCLUDED_SOURCES",
     "OFFICER_ROLES",
+    "SOURCES",
     "PersonaAssets",
     "Stance",
     "assume_role",
