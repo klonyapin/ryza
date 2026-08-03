@@ -76,15 +76,20 @@ def _conn():
 # その都度走るため、60 秒 TTL でキャッシュする。TTL を短くしてあるのは日次サイクルの
 # 進行中に古い値を見せないため(監視面としての鮮度 > キャッシュ効率)。
 # ``conn`` はハッシュ不能なので引数に取らず ``_conn()`` を内部で引く。
+# NAV 系列と未反映フローは **1 クエリ・1 キャッシュ**で取る(独立審査 中-6): 別々に
+# キャッシュすると TTL の切れ方次第で「系列は新しいが pending は古い」画面が出うる。
 @st.cache_data(ttl=60)
+def _nav_data() -> dict[str, list[dict[str, Any]]]:
+    return queries.fetch_nav_data(_conn())
+
+
 def _nav_series() -> list[dict[str, Any]]:
-    return queries.fetch_nav_series(_conn())
+    return _nav_data()["series"]
 
 
-@st.cache_data(ttl=60)
 def _pending_flows() -> list[dict[str, Any]]:
     """スナップショット未生成の外部フロー(NAV 系列に載らない — 重要-5)。"""
-    return queries.fetch_pending_flows(_conn())
+    return _nav_data()["pending"]
 
 
 @st.cache_data(ttl=60)
@@ -421,9 +426,22 @@ def page_performance(conn) -> None:
 
     st.subheader("NAV スナップショット(明細)")
     st.dataframe(
-        _df([{k: r[k] for k in ("day", "nav", "status", "net_flow")} for r in series[::-1]]),
+        _df(
+            [
+                {k: r[k] for k in ("day", "nav", "status", "net_flow", "flow_bop", "flow_eop")}
+                for r in series[::-1]
+            ]
+        ),
         use_container_width=True,
         hide_index=True,
+    )
+    st.caption(
+        "net_flow はその測定日に帰属した外部フローで、内訳は flow_bop(前の測定日より後・"
+        "当日より前 = 締めが走らなかった日の分)と flow_eop(当日仕訳)。リターンは "
+        "`(nav − flow_eop) / (前日 nav + flow_bop) − 1` で測る(期中に入った資金は"
+        "その区間の運用元本のため分母に入れる)。**最古の行の net_flow だけは「設定来の"
+        "累計」**である — 系列の起点より前の出資はすべて先頭点に寄る(起点 NAV が既に"
+        "それを含むため、この値はリターン計算には使われない)。"
     )
 
 

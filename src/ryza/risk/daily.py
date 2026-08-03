@@ -17,9 +17,10 @@ snap_date ごとに upsert する系列をそのまま使う(provisional も測�
 外部フロー調整: 出資・払戻は ``ledger.accounts.category='equity'`` かつ
 ``account_id <> 'retained'``(拠出資本勘定)への仕訳から日次合算する。損益の
 振替(retained)はフローに含めない。**フローの帰属日は「その日以降の最初の
-snap_date」**(``ryza.risk.navflow`` — 休日に付いたフローの取りこぼしを防ぐ。
-独立審査 T-018 重要-5)。まだスナップショットの無いフローは
-``NavSeries.pending_flows`` として返し、レポートに注記する(黙って落とさない)。
+snap_date」で、当日仕訳(EOP)と区間内仕訳(BOP)に分ける**(``ryza.risk.navflow``
+— 休日に付いたフローの取りこぼしと、期末仮定によるリターン増幅の是正。独立審査
+T-018 重要-5・重要-1)。まだスナップショットの無いフローは ``NavSeries.pending_flows``
+として返し、レポートに独立フィールドで注記する(黙って落とさない)。
 
 CLI: ``python -m ryza.risk.daily``(冪等 — 同日再実行は limits_state を同値上書きし、
 イベント台帳とレポートが 1 件ずつ増えるのみ)。
@@ -44,7 +45,12 @@ from ryza.ips import IPSConfig
 from ryza.provenance import Run, start_run
 from ryza.risk import engine
 from ryza.risk.classify import classify_current_instruments
-from ryza.risk.navflow import PendingFlow, load_external_flows, pending_flows_note
+from ryza.risk.navflow import (
+    PendingFlow,
+    load_nav_flow_data,
+    pending_flows_note,
+    urgent_pending,
+)
 from ryza.risk.state import upsert_limits_state
 
 _JST = ZoneInfo("Asia/Tokyo")
@@ -73,26 +79,19 @@ class NavSeries:
 def load_nav_series(conn: psycopg.Connection, book_id: str) -> NavSeries:
     """帳簿の NAV 系列(日付昇順)+外部フロー(拠出資本勘定の日次純額)。
 
-    フローは ``ryza.risk.navflow`` の規約で「その日以降の最初の snap_date」へ寄せる
-    (休日フローの取りこぼし修正 — 重要-5)。系列最終日より後のフローは点にできない
-    ため ``pending_flows`` として別に返す。
+    フローは ``ryza.risk.navflow`` の規約で「その日以降の最初の snap_date」へ寄せ、
+    当日仕訳を ``flow_eop``・区間内仕訳を ``flow_bop`` に分ける(重要-5・重要-1)。
+    系列最終日より後のフローは点にできないため ``pending_flows`` として別に返す。
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT snap_date, nav FROM ledger.nav_snapshots
-            WHERE book_id = %s ORDER BY snap_date
-            """,
-            (book_id,),
-        )
-        navs = cur.fetchall()
-    flows = load_external_flows(conn, book_id)
+    data = load_nav_flow_data(conn, book_id)
     return NavSeries(
         points=[
-            engine.NavPoint(day=d, nav=Decimal(n), net_flow=flows.net_flow(d))
-            for d, n in navs
+            engine.NavPoint(
+                day=p.day, nav=p.nav, flow_eop=p.flow_eop, flow_bop=p.flow_bop
+            )
+            for p in data.points
         ],
-        pending_flows=flows.pending,
+        pending_flows=data.pending,
     )
 
 
@@ -224,8 +223,14 @@ def build_risk_embed(
     ips: IPSConfig,
     *,
     as_of: datetime,
+    pending_note: str | None = None,
 ) -> dict[str, Any]:
-    """日次リスクレポートの embed(00 §9「リスクレポート」— #運営 へ 1 通)。"""
+    """日次リスクレポートの embed(00 §9「リスクレポート」— #運営 へ 1 通)。
+
+    未反映フローの注記(``pending_note``)は**独立フィールド**にする。注記欄は
+    1024 字で切り詰めるため、注記が多い日に「urgent だけ立って理由が消える」ことが
+    起きうる(独立審査 重要-4)。測定に入っていない入出金の存在は切ってはならない。
+    """
     hl = ips.hard_limits
     flagged = [name for name, on in effective.items() if on]
     fields: list[dict[str, Any]] = [
@@ -272,6 +277,10 @@ def build_risk_embed(
             "inline": False,
         }
     )
+    if pending_note:
+        fields.append(
+            {"name": "未反映フロー", "value": f"【要確認】{pending_note}"[:1024], "inline": False}
+        )
     if state.notes:
         fields.append(
             {"name": "注記", "value": "\n".join(state.notes)[:1024], "inline": False}
@@ -303,19 +312,28 @@ def run_risk_daily(
     主張しない — T-014 判断11 と同じ姿勢。ゲートは行欠落を fail-closed で block)。
     レポートにはその旨を明記する。
 
-    スナップショット未生成の外部フローがある帳簿は、注記を載せたうえで urgent で
-    上げる(測定に入っていない入出金の存在を当日中に見せる — 重要-5 の裁定)。
+    スナップショット未生成の外部フローがある帳簿は、レポートに独立フィールドで必ず
+    注記する。urgent にするのは材料性のあるもの(締めを跨いだ/NAV 比 0.5% 以上)に
+    限る — ``navflow.urgent_pending``(重要-4・中-5 の裁定)。
     """
     ips = ips or IPSConfig.load()
     as_of = as_of or datetime.now(UTC)
     detail: dict[str, Any] = {
         "classification": classify_current_instruments(conn, run_id=run.run_id)
     }
+    as_of_day = as_of.astimezone(_JST).date()
     for book_id in ips.books:
         loaded = load_nav_series(conn, book_id)
         series = loaded.points
         # 未反映フロー(スナップショット未生成)は測定に入らない。黙って落とさず注記する。
         pending_note = pending_flows_note(loaded.pending_flows)
+        pending_urgent, pending_reason = urgent_pending(
+            loaded.pending_flows,
+            series[-1].nav if series else None,
+            as_of_day=as_of_day,
+        )
+        if pending_note and pending_reason:
+            pending_note = f"{pending_note}。urgent 理由: {pending_reason}"
         if not series:
             embed = {
                 "title": (
@@ -324,7 +342,7 @@ def run_risk_daily(
                 "description": (
                     "NAV 系列なし(会計締め未実行)。リスク状態は未測定のため "
                     "risk.limits_state は作成しない(fail-closed — 発注はゲートが block)。"
-                    + (f"\n{pending_note}" if pending_note else "")
+                    + (f"\n【要確認】{pending_note}" if pending_note else "")
                 ),
                 "color": COLOR_FLASH,
                 "fields": [],
@@ -342,24 +360,30 @@ def run_risk_daily(
             conn, [p.instrument_id for p in positions], as_of=as_of
         )
         if pending_note:
-            notes.append(pending_note)
+            # 先頭に挿す(重要-4): notes は 1024 字で切られるため、測定に入っていない
+            # 入出金の存在が末尾で消えないようにする。embed 側は独立フィールドで二重化。
+            notes.insert(0, f"【要確認】{pending_note}")
         state = engine.evaluate(series, positions, returns, ips, extra_notes=notes)
         effective = upsert_limits_state(conn, book_id, state, as_of=as_of, run_id=run.run_id)
         usage = engine.guardrail_usage(
             positions, state.nav, _load_cash(conn, book_id), ips
         )
-        embed = build_risk_embed(book_id, state, effective, usage, ips, as_of=as_of)
-        # urgent: フラグ到達に加え、保有ありの ES 測定空白(判定保留)も要確認として上げる。
+        embed = build_risk_embed(
+            book_id, state, effective, usage, ips, as_of=as_of, pending_note=pending_note
+        )
+        # urgent: フラグ到達に加え、保有ありの ES 測定空白(判定保留)と、材料性のある
+        # 未反映フロー(navflow.urgent_pending)も要確認として上げる。
         oid = enqueue(
             conn,
             channel_ops,
             embed,
             run.run_id,
-            urgent=any(effective.values()) or state.es95.deferred or bool(pending_note),
+            urgent=any(effective.values()) or state.es95.deferred or pending_urgent,
         )
         detail[book_id] = {
             "status": "measured",
             "pending_flows": len(loaded.pending_flows),
+            "pending_urgent": pending_urgent,
             "drawdown": str(state.drawdown),
             "ewma_vol": state.ewma_vol_annual,
             "es95": state.es95.adopted,

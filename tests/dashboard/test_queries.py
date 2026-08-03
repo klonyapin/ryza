@@ -260,11 +260,10 @@ def test_fetch_nav_series_joins_external_flows(conn, run):
     series = queries.fetch_nav_series(conn)
     assert [r["day"] for r in series] == [date(2026, 7, 1), date(2026, 7, 2)]
     assert float(series[0]["net_flow"]) == 0.0
-    assert float(series[1]["net_flow"]) == 500_000.0
+    assert float(series[1]["flow_eop"]) == 500_000.0  # 当日仕訳 → EOP(分子から引く)
+    assert float(series[1]["flow_bop"]) == 0.0
     # 出資を除けばリターンは 0(NAV は 100万 → 150万 だが中身は増えていない)。
-    prev, cur = series
-    ret = (float(cur["nav"]) - float(cur["net_flow"]) - float(prev["nav"])) / float(prev["nav"])
-    assert ret == pytest.approx(0.0)
+    assert [r for _, r in viz.flow_adjusted_returns(series)] == pytest.approx([0.0])
 
 
 def _post_capital(conn, run, *, day: date, amount: int, book_id: str = "DEMO_FUND") -> None:
@@ -303,10 +302,18 @@ def test_fetch_nav_series_rolls_forward_holiday_flow(conn, run):
     _post_capital(conn, run, day=date(2030, 1, 3), amount=500_000)
     series = [r for r in queries.fetch_nav_series(conn) if r["day"].year == 2030]
     assert [r["day"] for r in series] == [date(2030, 1, 2), date(2030, 1, 5)]
-    assert float(series[1]["net_flow"]) == 500_000.0
-    prev, cur = series
-    ret = (float(cur["nav"]) - float(cur["net_flow"]) - float(prev["nav"])) / float(prev["nav"])
-    assert ret == pytest.approx(0.0)
+    assert float(series[1]["flow_bop"]) == 500_000.0  # 区間内仕訳 → BOP(分母に足す)
+    assert float(series[1]["flow_eop"]) == 0.0
+    assert [r for _, r in viz.flow_adjusted_returns(series)] == pytest.approx([0.0])
+
+
+def test_fetch_nav_series_bop_inflow_matches_true_return(conn, run):
+    """審査シナリオ B: V₀=100万・期中 +50万・市場 +5% → +5.0%(期末仮定なら +7.5%)。"""
+    _insert_nav(conn, day=date(2030, 1, 2), nav=1_000_000)
+    _insert_nav(conn, day=date(2030, 1, 5), nav=1_575_000)
+    _post_capital(conn, run, day=date(2030, 1, 3), amount=500_000)
+    series = [r for r in queries.fetch_nav_series(conn) if r["day"].year == 2030]
+    assert [r for _, r in viz.flow_adjusted_returns(series)] == pytest.approx([0.05])
 
 
 def test_fetch_pending_flows_after_last_snapshot(conn, run):
@@ -333,14 +340,17 @@ def test_nav_series_matches_risk_engine(conn, run):
     _post_capital(conn, run, day=date(2030, 1, 4), amount=-100_000)  # 同じ点に寄る払戻
     _post_capital(conn, run, day=date(2030, 1, 8), amount=400_000)  # 測定日当日
 
-    rows = queries.fetch_nav_series(conn)
+    data = queries.fetch_nav_data(conn)
+    rows = data["series"]
     points = load_nav_series(conn, "DEMO_FUND").points
     assert [r["day"] for r in rows] == [p.day for p in points]
-    assert [Decimal(str(r["net_flow"])) for r in rows] == [p.net_flow for p in points]
+    assert [Decimal(str(r["flow_bop"])) for r in rows] == [p.flow_bop for p in points]
+    assert [Decimal(str(r["flow_eop"])) for r in rows] == [p.flow_eop for p in points]
     dash = [r for _, r in viz.flow_adjusted_returns(rows)]
     assert dash == pytest.approx(book_returns(points))
-    # 期待値: 1/5 は純増 40 万で運用損益 0%、1/7 は +10%、1/8 は 40 万出資で 0%。
+    # 期待値: 1/5 は BOP 純増 40 万で運用損益 0%、1/7 は +10%、1/8 は当日出資 40 万で 0%。
     assert dash == pytest.approx([0.0, 0.1, 0.0])
+    assert data["pending"] == []  # すべてスナップショットに載っている
 
 
 def test_fetch_nav_series_filters_by_book(conn, run):

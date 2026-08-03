@@ -185,10 +185,10 @@ def fetch_outbox_pending(conn: psycopg.Connection) -> list[dict[str, Any]]:
 DEFAULT_BOOK_ID = "DEMO_FUND"
 
 
-def fetch_nav_series(
+def fetch_nav_data(
     conn: psycopg.Connection, *, book_id: str = DEFAULT_BOOK_ID
-) -> list[dict[str, Any]]:
-    """帳簿の日次 NAV 系列(日付昇順)と、その点に帰属する外部フロー純額。
+) -> dict[str, list[dict[str, Any]]]:
+    """NAV 系列と未反映フローを**1 クエリ**で返す(``{"series", "pending"}``)。
 
     NAV の正は ``ledger.nav_snapshots``(``ryza.risk.daily.load_nav_series`` と同じ選択。
     ``risk.nav_daily`` は執行照合を重ねた risk 用ビューであり、正ではない)。
@@ -196,26 +196,35 @@ def fetch_nav_series(
     外部フロー(出資・払戻)の突合は ``ryza.risk.navflow`` に**一本化**してある
     (独立審査 T-018 重要-5: 同じ定義を 2 箇所に持ったことが、休日フローの取りこぼしを
     片方だけ直せば済むように見せていた)。フローは entry_date 完全一致ではなく
-    「その日以降の最初の snap_date」へ寄せる — 締めの走らない日に付いた出資を
-    リターンに数えてしまう(実測 +50%)のを防ぐため。
-    まだスナップショットの無いフローは系列に載らないので
-    :func:`fetch_pending_flows` で別に取り、UI 側で注記する。
+    「その日以降の最初の snap_date」へ寄せ、当日仕訳を ``flow_eop``・区間内仕訳を
+    ``flow_bop`` に分ける(重要-1 — リターンは分母 ``nav_{t−1} + flow_bop`` で測る)。
+
+    系列と未反映フローを 1 回で返すのは、別々に取ると両者が別時点の DB を映しうる
+    ため(独立審査 中-6)。表示用に ``net_flow = flow_eop + flow_bop`` も付ける。
+    **系列先頭点の ``net_flow`` は「設定来の累計」**である — 系列の起点より前の
+    出資はすべて先頭点に寄る(起点 NAV が既にそれを含むため測定には使われない)。
     """
-    flows = navflow.load_external_flows(conn, book_id)
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT snap_date AS day, nav, status
-            FROM ledger.nav_snapshots
-            WHERE book_id = %(book)s
-            ORDER BY snap_date
-            """,
-            {"book": book_id},
-        )
-        rows = _rows(cur)
-    for row in rows:
-        row["net_flow"] = flows.net_flow(row["day"])
-    return rows
+    data = navflow.load_nav_flow_data(conn, book_id)
+    series = [
+        {
+            "day": p.day,
+            "nav": p.nav,
+            "status": p.status,
+            "flow_eop": p.flow_eop,
+            "flow_bop": p.flow_bop,
+            "net_flow": p.net_flow,
+        }
+        for p in data.points
+    ]
+    pending = [{"day": p.entry_date, "amount": p.amount} for p in data.pending]
+    return {"series": series, "pending": pending}
+
+
+def fetch_nav_series(
+    conn: psycopg.Connection, *, book_id: str = DEFAULT_BOOK_ID
+) -> list[dict[str, Any]]:
+    """帳簿の日次 NAV 系列(日付昇順・フロー帰属済み)。:func:`fetch_nav_data` の一部。"""
+    return fetch_nav_data(conn, book_id=book_id)["series"]
 
 
 def fetch_pending_flows(
@@ -226,10 +235,7 @@ def fetch_pending_flows(
     系列最終日より後の出資・払戻は NAV 系列のどの点にも載らない。黙って落とすと
     「次の締めで NAV が跳ねる理由」が画面から消えるため、別枠で返して UI が注記する。
     """
-    return [
-        {"day": p.entry_date, "amount": p.amount}
-        for p in navflow.load_external_flows(conn, book_id).pending
-    ]
+    return fetch_nav_data(conn, book_id=book_id)["pending"]
 
 
 # ── リスク ────────────────────────────────────────────────────────────────────
