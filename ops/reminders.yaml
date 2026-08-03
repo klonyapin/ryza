@@ -628,7 +628,20 @@ reminders:
       title: "ledger: qty==0 の銘柄も評価替えを打つ(全売却後の securities 残渣で NAV が恒久過大)"
       labels: [impl, ledger, risk]
       body: "建玉を全売却した銘柄の `securities` 勘定に前日 MTM の残渣が残り、NAV が**恒久的に過大**になる。`ledger.closing.run_daily_close`(`closing.py` の held_instruments ループ)も `ledger.closing._reapply_mtm` も、`qty == 0` を評価替えの**前**にスキップするため、建玉ゼロの銘柄が時価ゼロへ洗い替えられないからである。売却時の `post_fill` は取得原価ぶん(`cost_released`)しか `securities` を取り崩さないので、評価益ぶんが資産に残る。**独立審査の実測(origin/main でも同一 — 本 PR の回帰ではない)**: 1000株@1000 買い → 終値 1200 で評価替え → 翌日 1200 で全売り → `securities` 残高 200,000・数量 0、NAV 10,200,000→10,400,000、`book_returns` は `[+0.0196, 0.0]`(真値 `[0.0, 0.0]`)。これは新-3 と構造的に同一の恒久的偽リターンであり、`ewma_vol` 経由で誤 `vol_exceeded` の経路に乗る。**本 PR(mtm-replay)固有の害**: 遅延全売り日の再締めが `mtm_reapplied=True` と『その日の終値で評価替えして NAV に反映した』注記を付けながら 1 銘柄も評価替えしない(`positions={}` で残渣は資産に残る)。是正: `qty == 0` でも評価替えを打つ(delta = 0 − 帳簿価額)。**run_daily_close と _reapply_mtm の両呼び出し口を同時に**直すこと(片方だけだと当日と再締めで NAV が食い違う)。売り約定の残渣そのものを post_fill 側で消す設計(時価で取り崩す)も代替として検討し、移動平均法の実現損益計算への影響を評価すること。**src/ryza/ledger/ は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。別 PR とする。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md MTM リプレイ審査記録 新-10。"
-    status: pending
+    # 2026-08-04 実装: run_daily_close と _reapply_mtm の両方で qty==0 の銘柄も評価替えの
+    # 対象にし、残渣(= 売却で取り崩されない評価益ぶんの帳簿価額)をゼロへ洗い替える。
+    # 数量ゼロの時価は価格に依らずゼロなので終値は引かない(post_mark_to_market の
+    # price=None 経路 — 建玉ゼロの銘柄の終値を要求すると上場廃止・バー欠測で締めごと
+    # 落ちる)。証憑は price=null + zero_qty_writeoff で「終値 0 円で評価した」と書かない。
+    # **審査の処方(delta = 0 − 帳簿価額)はそのままでは危険**: replay_position は
+    # broker_fill しか再生しないため現物拠出・資産振替の securities も数量ゼロに見え、
+    # 総額を消すと実在の資産が消える(実測: 現物拠出 1,000,000 の日の NAV が丸ごと戻り
+    # tests/execution/test_close.py の 2 本が落ちた)。そこで _util.mtm_book_value を
+    # 新設し、**評価替え(price_snapshot 証憑)が作った残高だけ**を洗い替える。
+    # 代替案(post_fill 側で時価取り崩し)は不採用: 実現損益が『時価 − 時価 = 0』になり
+    # 移動平均法の実現/未実現の切り分けが壊れるため(残渣の所在が変わるだけ)。
+    # 実測(修正後): d1 NAV 10,400,000 → 10,200,000、securities 残高 0、returns [0.0, 0.0]。
+    status: done
 
   - id: close-stage-failure-visibility
     what: "締め段が落ちた日にリスク日次が未再締めの系列を黙って測る問題(再々審査 起草者留意点(a)の独立評価 — 中)"

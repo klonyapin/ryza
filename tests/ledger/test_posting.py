@@ -118,6 +118,44 @@ def test_moving_average_realized_and_unrealized(conn, run_id):
     assert _balance(conn, "DEMO_FUND", "securities", instrument_id=iid) == D(37200)
 
 
+def test_mark_to_market_writes_off_residue_without_a_price(conn, run_id):
+    """``price=None`` は数量ゼロ専用の洗い替え経路(独立審査 新-10)。
+
+    全売却後の securities には評価益ぶんの残渣が残る(売りは取得原価ぶんしか取り崩さない)。
+    時価は価格に依らずゼロなので終値を引かずに戻せる — 建玉の無い銘柄の終値を要求すると
+    上場廃止・バー欠測で締めごと落ちるため、この経路が必要になる。
+    """
+    iid = 1003
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                      qty=100, price=500, entry_date=DAY, run_id=run_id)
+    posting.post_mark_to_market(conn, book_id="DEMO_FUND", instrument_id=iid,
+                                price=600, entry_date=DAY, run_id=run_id)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="sell",
+                      qty=100, price=600, entry_date=DAY, run_id=run_id)
+    # 売却直後: 取得原価 50,000 だけが取り崩され、評価益 10,000 が残渣として残る。
+    assert _balance(conn, "DEMO_FUND", "securities", instrument_id=iid) == D(10000)
+
+    entry_id = posting.post_mark_to_market(conn, book_id="DEMO_FUND", instrument_id=iid,
+                                           price=None, entry_date=DAY, run_id=run_id)
+    assert entry_id is not None
+    assert _balance(conn, "DEMO_FUND", "securities", instrument_id=iid) == D(0)
+    assert _balance(conn, "DEMO_FUND", "unrealized_pnl") == D(0)  # 未実現は全額戻る
+    assert _balance(conn, "DEMO_FUND", "realized_pnl") == D(-10000)  # 実現益だけが残る
+    # 残渣が無くなれば何も書かない(冪等)。
+    assert posting.post_mark_to_market(conn, book_id="DEMO_FUND", instrument_id=iid,
+                                       price=None, entry_date=DAY, run_id=run_id) is None
+
+
+def test_mark_to_market_rejects_missing_price_while_holding(conn, run_id):
+    """数量が残っている銘柄に ``price=None`` を渡すのは呼び出し側の誤り(黙って 0 評価しない)。"""
+    iid = 1004
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                      qty=10, price=100, entry_date=DAY, run_id=run_id)
+    with pytest.raises(ValueError, match="数量ゼロ"):
+        posting.post_mark_to_market(conn, book_id="DEMO_FUND", instrument_id=iid,
+                                    price=None, entry_date=DAY, run_id=run_id)
+
+
 def test_oversell_raises(conn, run_id):
     iid = 1002
     posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",

@@ -2,7 +2,8 @@
 
 run_daily_close:
   1. 未記帳の約定を検出して記帳(冪等: 記帳済み fill はスキップ)
-  2. 全ポジションを終値で評価替え(price_snapshot を evidence 化)
+  2. 全ポジションを終値で評価替え(price_snapshot を evidence 化)。全売却済みの銘柄も
+     対象にして前日 MTM の残渣をゼロへ落とす(独立審査 新-10)
   3. アクルーアル(当面は手数料のみ。金利は TODO)
   4. NAV 算出 → nav_snapshots に provisional で保存
   5. recon の照合結果が全件 matched なら confirmed に更新、不一致なら provisional のまま
@@ -176,12 +177,16 @@ def run_daily_close(
     # 2. 全ポジションを終値で評価替え(ファンド帳簿のみ)
     marked: list[int] = []
     positions_detail: dict[str, Any] = {}
+    writeoffs: dict[str, Any] = {}
     if bt == "fund":
         for iid in _util.held_instruments(conn, book_id):
             qty, _cost = _util.replay_position(conn, book_id, iid)
-            if qty == 0:
-                continue
-            price = _util.to_decimal(_price_of(price_source, iid))
+            # 全売却済みの銘柄も評価替えの対象にする(独立審査 新-10)。売りは取得原価
+            # ぶんしか securities を取り崩さないため、評価替えで積んだ「時価 − 取得原価」が
+            # 残渣として資産に残り、NAV が**恒久的に過大**になる(審査実測: 残高 200,000 /
+            # 数量 0、returns [+0.0196, 0.0] ← 真値 [0, 0])。数量ゼロの時価は価格に依らず
+            # ゼロなので終値は引かない(建玉の無い銘柄の終値を要求すると締めごと落ちる)。
+            price = None if qty == 0 else _util.to_decimal(_price_of(price_source, iid))
             entry_id = posting.post_mark_to_market(
                 conn,
                 book_id=book_id,
@@ -193,6 +198,11 @@ def run_daily_close(
             )
             if entry_id is not None:
                 marked.append(entry_id)
+            if price is None:
+                # 残渣が無ければ仕訳は立たない(entry_id None)= 記録することも無い。
+                if entry_id is not None:
+                    writeoffs[str(iid)] = {"entry_id": entry_id, "market_value": "0"}
+                continue
             positions_detail[str(iid)] = {
                 "qty": str(qty),
                 "price": str(price),
@@ -212,6 +222,9 @@ def run_daily_close(
         "positions": positions_detail,
         "priced_at": date.isoformat(),
     }
+    # 全売却後の残渣を洗い替えた銘柄(数量ゼロなので positions とは語彙を分ける)。
+    if writeoffs:
+        detail["zero_qty_writeoffs"] = writeoffs
     _upsert_nav(conn, book_id, date, nav, "provisional", detail, run_id)
 
     # 5. ブローカー照合。全件 matched なら confirmed に更新。
@@ -411,28 +424,47 @@ def _reapply_mtm(
     差分 ``時価 − 帳簿価額`` は ``post_mark_to_market`` がその日に打ったはずの delta と
     一致する(NAV = 資産 − 負債 なので、その delta をそのまま NAV に足せばよい)。
 
-    戻り値 ``{"delta", "positions", "priced_at"}``。**1 銘柄でもその日のバーが無い日は
-    None**(部分適用は「原価でも時価でもない NAV」を作るため、その日は再適用しない —
-    呼び出し側が前回値の引き継ぎか ``mtm_not_reapplied`` を選ぶ)。
+    **数量ゼロの銘柄も対象**(独立審査 新-10): その日までに全売却された銘柄は、売りが
+    取得原価ぶんしか securities を取り崩さないため前日 MTM の残渣を持つ。時価は価格に
+    依らずゼロなので**終値は引かず**(バーの有無も問わない — 建玉ゼロの銘柄の欠測で
+    その日の再適用を諦めるのは過剰)、``delta = 0 − mtm_book_value`` を足して残渣を消す。
+    消すのは**評価替えが作った残高だけ**であり securities の総額ではない(``replay_position``
+    は broker_fill しか再生しないため、現物拠出など約定外の建玉が数量ゼロに見える)。
+    ``run_daily_close`` の当日経路と同じ定義であり、片方だけ直すと当日と再締めで NAV が
+    食い違う。
+
+    戻り値 ``{"delta", "positions", "priced_at"}``。**建玉のある銘柄で 1 つでもその日の
+    バーが無い日は None**(部分適用は「原価でも時価でもない NAV」を作るため、その日は
+    再適用しない — 呼び出し側が前回値の引き継ぎか ``mtm_not_reapplied`` を選ぶ)。
     """
     positions: dict[str, Any] = {}
     delta = Decimal(0)
     for iid in _util.held_instruments(conn, book_id):
         qty, _cost = _util.replay_position(conn, book_id, iid, as_of=snap_date)
         if qty == 0:
-            continue
-        raw = price_source(iid, snap_date)
-        if raw is None:
-            return None
-        price = _util.to_decimal(raw)
-        market_value = qty * price
-        book_value = _util.securities_book_value(conn, book_id, iid, as_of=snap_date)
+            # 消すのは評価替えが作った残高だけ(約定外の securities には触れない)。
+            book_value = _util.mtm_book_value(conn, book_id, iid, as_of=snap_date)
+            if book_value == 0:
+                continue  # その日は未保有かつ残渣なし
+            price = None
+            market_value = Decimal(0)
+        else:
+            raw = price_source(iid, snap_date)
+            if raw is None:
+                return None
+            price = _util.to_decimal(raw)
+            market_value = qty * price
+            book_value = _util.securities_book_value(conn, book_id, iid, as_of=snap_date)
         delta += market_value - book_value
         positions[str(iid)] = {
             "qty": str(qty),
-            "price": str(price),
+            # 数量ゼロは終値を引いていないので価格は null(存在しない価格を書かない)。
+            "price": None if price is None else str(price),
             "market_value": str(market_value),
+            # 数量ゼロ行の book_value は「評価替えが作った残高」= 洗い替える額であり、
+            # securities の総額ではない(zero_qty_writeoff がその目印)。
             "book_value": str(book_value),
+            **({"zero_qty_writeoff": True} if price is None else {}),
         }
     return {"delta": delta, "positions": positions, "priced_at": snap_date.isoformat()}
 

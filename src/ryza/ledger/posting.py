@@ -300,7 +300,7 @@ def post_mark_to_market(
     *,
     book_id: str,
     instrument_id: int,
-    price: Any,
+    price: Any | None,
     entry_date: _date,
     run_id: int,
     currency: str = "JPY",
@@ -311,12 +311,41 @@ def post_mark_to_market(
     delta = 時価総額(保有数量×price) − 現在の securities 帳簿価額。
     delta>0: Dr securities / Cr unrealized_pnl、delta<0: 逆。
     差分計上のため unrealized_pnl の累計は常に (時価 − 取得原価) に一致する(洗い替えと等価)。
-    delta=0(または保有ゼロで時価ゼロ)なら記帳せず None を返す。
+    delta=0(または保有ゼロで帳簿価額もゼロ)なら記帳せず None を返す。
+
+    **``price=None`` は「数量ゼロの銘柄」専用の経路**(独立審査 新-10)。全売却した銘柄の
+    時価は価格に依らずゼロなので、終値を引かずに残渣(= 売却時に取り崩されなかった評価益
+    ぶんの帳簿価額)をゼロへ洗い替えられる。建玉が無い銘柄の終値を要求すると、上場廃止や
+    バー欠測で締めそのものが落ちる(``execution.close._make_price_source`` は終値が無ければ
+    例外)。数量が残っている銘柄に ``None`` を渡すのは呼び出し側の誤りなので ValueError。
+
+    なぜ残渣が出るか: ``post_fill`` の売りは **取得原価ぶん**(移動平均法の
+    ``cost_released``)しか securities を取り崩さず、差額を realized_pnl に振る。評価替えで
+    積んだ「時価 − 取得原価」は securities に残ったままなので、ここでゼロへ落として
+    unrealized_pnl を戻さないと NAV が恒久的に過大になる(残った未実現益が消えない)。
+
+    **数量ゼロで消すのは ``mtm_book_value``(評価替えが作った残高)だけ**で、securities の
+    総額ではない。``replay_position`` は broker_fill しか再生しないので、約定を経ずに建った
+    securities(現物拠出・資産振替)は数量ゼロに見える。総額を消すと実在の資産を帳簿から
+    消してしまう(実測: 現物拠出 1,000,000 の日の NAV が丸ごと戻る)。
     """
     qty, _cost = _util.replay_position(conn, book_id, instrument_id)
-    p = _util.to_decimal(price)
-    market_value = qty * p
-    book_value = _util.securities_book_value(conn, book_id, instrument_id, as_of=entry_date)
+    if price is None:
+        if qty != 0:
+            raise ValueError(
+                f"price=None は数量ゼロの銘柄のみ(全売却後の残渣の洗い替え): "
+                f"銘柄{instrument_id} qty={qty}"
+            )
+        p = None
+        market_value = Decimal(0)
+        # 評価替えが作った残高 = 消すべき残渣。約定外の securities には触れない。
+        book_value = _util.mtm_book_value(conn, book_id, instrument_id, as_of=entry_date)
+    else:
+        p = _util.to_decimal(price)
+        market_value = qty * p
+        book_value = _util.securities_book_value(
+            conn, book_id, instrument_id, as_of=entry_date
+        )
     delta = market_value - book_value
     if delta == 0:
         return None
@@ -326,10 +355,15 @@ def post_mark_to_market(
         kind="price_snapshot",
         payload={
             "instrument_id": int(instrument_id),
-            "price": str(p),
+            # 数量ゼロの洗い替えは終値を引いていない。存在しない価格を "0" と書くと
+            # 「終値 0 円で評価した」証憑になるため、null + 理由を明示する(新-6 の教訓)。
+            "price": None if p is None else str(p),
             "qty": str(qty),
             "market_value": str(market_value),
             "as_of": entry_date.isoformat(),
+            # 数量ゼロのときの book_value は「評価替えが作った残高」= 洗い替える額。
+            **({"zero_qty_writeoff": True, "mtm_book_value": str(book_value)}
+               if p is None else {}),
         },
         source="price_source",
     )
@@ -347,11 +381,14 @@ def post_mark_to_market(
              "instrument_id": int(instrument_id)},
         ]
 
+    desc = f"評価替え 銘柄{instrument_id} 時価{market_value}"
+    if p is None:
+        desc += "(建玉ゼロ — 全売却後の残渣を洗い替え)"
     return post_entry(
         conn,
         book_id=book_id,
         entry_date=entry_date,
-        description=f"評価替え 銘柄{instrument_id} 時価{market_value}",
+        description=desc,
         lines=lines,
         evidence=evidence,
         run_id=run_id,

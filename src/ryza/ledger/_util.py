@@ -315,3 +315,47 @@ def securities_book_value(
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return to_decimal(cur.fetchone()[0])
+
+
+def mtm_book_value(
+    conn: psycopg.Connection,
+    book_id: str,
+    instrument_id: int,
+    *,
+    as_of: _date | None = None,
+) -> Decimal:
+    """securities 帳簿価額のうち**評価替え(price_snapshot 証憑)が作ったぶん**を返す。
+
+    全売却後の「残渣」を消す量はこれであって、``securities_book_value`` の総額ではない
+    (独立審査 新-10 の是正を実装する過程で判明した危険): ``replay_position`` は
+    ``broker_fill`` 証憑しか再生しないため、**約定を経ずに建った securities**(現物拠出:
+    Dr securities / Cr capital、資産振替など)は数量ゼロに見える。総額を消しに行くと実在の
+    資産を帳簿から消してしまう(実測: 現物拠出 1,000,000 の日の NAV が丸ごと戻り、
+    ``restated`` が False になる = 訂正が消える)。
+
+    評価替えが作った残高だけを見れば、約定でネットゼロになった銘柄の残渣(= 売りが
+    取り崩さなかった未実現益ぶん)を過不足なく特定でき、約定外の建玉には触れない。
+
+    逆仕訳の扱いは ``replay_position`` と同じ(逆仕訳された評価替えは両方落とす)。
+    ``reverse_entry`` が作る逆仕訳の証憑は kind='decision' なので、原仕訳だけを残すと
+    既に取り消された評価替えを二重に消してしまう。
+    """
+    sql = """
+        SELECT COALESCE(sum(jl.debit - jl.credit), 0)
+        FROM ledger.journal_lines jl
+        JOIN ledger.journal_entries je ON je.entry_id = jl.entry_id
+        JOIN ledger.evidence e ON e.evidence_id = je.evidence_id
+        WHERE jl.book_id = %s AND jl.account_id = 'securities'
+          AND jl.instrument_id = %s
+          AND e.kind = 'price_snapshot'
+          AND je.reversal_of IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM ledger.journal_entries r
+              WHERE r.reversal_of = je.entry_id
+                AND (%s::date IS NULL OR r.entry_date <= %s)
+          )
+          AND (%s::date IS NULL OR je.entry_date <= %s)
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, (book_id, instrument_id, as_of, as_of, as_of, as_of))
+        return to_decimal(cur.fetchone()[0])

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -522,6 +523,209 @@ def test_replay_position_as_of_cuts_reversals_on_the_same_boundary(conn, run_id)
     # d1 時点: 両方が消える(片側だけ消えると評価替えの差分が壊れる)
     assert _util.replay_position(conn, "DEMO_FUND", 1001, as_of=d1) == (D(0), D(0))
     assert book_value(conn, "DEMO_FUND", 1001, as_of=d1) == D(0)
+
+
+# ── 全売却後の評価残渣(独立審査 新-10)────────────────────────────────────────
+def _full_sell_scenario(conn, run_id) -> tuple[date, date]:
+    """審査 新-10 の実測ケース: 1000株@1000 買い → 終値 1200 で評価替え → 翌日 1200 で全売り。
+
+    d0 の締めで securities は時価 1,200,000 になるが、売りは**取得原価ぶん**(1,000,000)
+    しか取り崩さない。d1 の締めが数量ゼロを理由に評価替えをスキップすると、評価益
+    200,000 が資産に残り NAV が恒久的に過大になる(修正前の実測: d1 NAV 10,400,000 /
+    securities 残高 200,000 / 数量 0 → returns [+0.0196, 0.0]、真値 [0.0, 0.0])。
+    """
+    d0, d1 = DAY, DAY + timedelta(days=1)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=1001, side="buy",
+                      qty=1000, price=1000, entry_date=d0, run_id=run_id)
+    closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d0, price_source={1001: 1200}, run_id=run_id
+    )
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=1001, side="sell",
+                      qty=1000, price=1200, entry_date=d1, run_id=run_id)
+    return d0, d1
+
+
+def test_close_writes_off_the_residue_of_a_fully_sold_position(conn, run_id):
+    """全売却した銘柄の残渣を締めがゼロへ洗い替える(偽リターン +1.96% が消える)。"""
+    d0, d1 = _full_sell_scenario(conn, run_id)
+
+    # 価格ソースは 1001 を**持たない**: 建玉ゼロの銘柄の終値は引かない(引く設計だと
+    # 上場廃止・バー欠測で締めそのものが落ちる)。
+    result = closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d1, price_source={}, run_id=run_id
+    )
+
+    assert _util.replay_position(conn, "DEMO_FUND", 1001) == (D(0), D(0))
+    assert _util.securities_book_value(conn, "DEMO_FUND", 1001, as_of=d1) == D(0)
+
+    nav_d0, nav_d1 = _snapshot(conn, d0)[0], _snapshot(conn, d1)[0]
+    assert (nav_d0, nav_d1) == (D(10_200_000), D(10_200_000))  # 修正前は d1 が 10,400,000
+    assert nav_d1 / nav_d0 - 1 == D(0)  # 修正前 +0.0196 の恒久的な偽リターン
+    assert result["nav"] == D(10_200_000)
+
+    # 純損益は実現益 200,000 のみ(未実現は洗い替えで戻る)。試算表もゼロバランス。
+    t = statements.book_totals(conn, "DEMO_FUND", d1)
+    assert t["net_income"] == D(200_000)
+    assert t["assets"] == t["liabilities"] + t["equity"] + t["net_income"]
+    tb = statements.trial_balance(conn, "DEMO_FUND", d1)
+    assert tb[tb["account_id"] == "_TOTAL"].iloc[0]["balance"] == D(0)
+
+    # 洗い替えは positions と語彙を分けて証憑に残す(数量ゼロなので建玉明細ではない)。
+    detail = _snapshot(conn, d1)[2]
+    assert detail["positions"] == {}
+    assert detail["zero_qty_writeoffs"]["1001"]["entry_id"] == result["marked"][0]
+
+    # 価格を引いていないので証憑の price は null(「終値 0 円で評価した」と書かない)。
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT e.payload_ref FROM ledger.journal_entries je
+               JOIN ledger.evidence e ON e.evidence_id = je.evidence_id
+               WHERE je.entry_id = %s""",
+            (result["marked"][0],),
+        )
+        payload = json.loads(cur.fetchone()[0])
+    assert payload["price"] is None and payload["zero_qty_writeoff"] is True
+    assert payload["qty"] == "0" and payload["market_value"] == "0"
+
+    # 冪等: 残渣が無い日は仕訳を書かない。
+    again = closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d1, price_source={}, run_id=run_id
+    )
+    assert again["marked"] == [] and "zero_qty_writeoffs" not in _snapshot(conn, d1)[2]
+
+
+def test_close_keeps_marking_partially_sold_positions(conn, run_id):
+    """一部売却(qty>0)の評価替えは従来どおり — 残数量の時価に一致する(不変の確認)。"""
+    d0, d1 = DAY, DAY + timedelta(days=1)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=1001, side="buy",
+                      qty=1000, price=1000, entry_date=d0, run_id=run_id)
+    closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d0, price_source={1001: 1200}, run_id=run_id
+    )
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=1001, side="sell",
+                      qty=400, price=1200, entry_date=d1, run_id=run_id)
+
+    closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d1, price_source={1001: 1300}, run_id=run_id
+    )
+    assert _util.securities_book_value(conn, "DEMO_FUND", 1001, as_of=d1) == D(780_000)
+    detail = _snapshot(conn, d1)[2]
+    assert detail["positions"]["1001"] == {
+        "qty": "600", "price": "1300", "market_value": "780000"
+    }
+    assert "zero_qty_writeoffs" not in detail
+    # 現金 9,480,000 + 建玉 780,000。実現益 80,000 + 未実現 180,000。
+    assert _snapshot(conn, d1)[0] == D(10_260_000)
+
+
+def test_close_remarks_after_repurchase(conn, run_id):
+    """全売却 → 洗い替え → 買い直しのサイクルで評価替えが正しく再開する。"""
+    d0, d1 = _full_sell_scenario(conn, run_id)
+    d2 = d1 + timedelta(days=1)
+    closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d1, price_source={}, run_id=run_id
+    )
+    # 修正前は残渣 200,000 が d1 に残り(NAV 10,400,000)、買い直した d2 の評価替えで
+    # 相殺されて消える = 日次リターンに +1.96% → −1.4% の偽の往復が立つ。
+    assert _snapshot(conn, d1)[0] == D(10_200_000)
+
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=1001, side="buy",
+                      qty=500, price=1400, entry_date=d2, run_id=run_id)
+    closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d2, price_source={1001: 1500}, run_id=run_id
+    )
+
+    assert _util.securities_book_value(conn, "DEMO_FUND", 1001, as_of=d2) == D(750_000)
+    detail = _snapshot(conn, d2)[2]
+    assert detail["positions"]["1001"]["qty"] == "500"
+    assert "zero_qty_writeoffs" not in detail  # 建玉が戻ったので洗い替えは無い
+    # 現金 9,500,000 + 建玉 750,000(実現益 200,000 + 未実現 50,000)。
+    assert _snapshot(conn, d2)[0] == D(10_250_000)
+
+
+def _post_in_kind(conn, run_id, day: date, instrument_id: int, amount: Decimal) -> int:
+    """現物拠出(Dr securities / Cr capital)。約定を経ないので replay_position は数量ゼロ。"""
+    return posting.post_entry(
+        conn,
+        book_id="DEMO_FUND",
+        entry_date=day,
+        description="現物拠出(テスト)",
+        lines=[
+            {"account_id": "securities", "debit": amount, "currency": "JPY",
+             "instrument_id": instrument_id},
+            {"account_id": "capital", "credit": amount, "currency": "JPY"},
+        ],
+        evidence={"kind": "decision", "payload": {"test": "in_kind"}, "source": "test"},
+        run_id=run_id,
+        posted_by="test.ledger",
+    )
+
+
+def test_close_does_not_write_off_positions_built_outside_fills(conn, run_id):
+    """洗い替えの対象は**評価替えが作った残高**だけ — 現物拠出を消してはならない。
+
+    ``replay_position`` は broker_fill 証憑しか再生しないため、約定を経ずに建った
+    securities(現物拠出・資産振替)は数量ゼロに見える。総額を洗い替える実装にすると
+    実在の資産を帳簿から消す(この是正の過程で実測: 現物拠出 1,000,000 の日の NAV が
+    丸ごと戻り、再締めの ``restated`` まで False になった)。
+    """
+    _post_in_kind(conn, run_id, DAY, 1005, D(1_000_000))
+
+    result = closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=DAY, price_source={}, run_id=run_id
+    )
+    assert result["marked"] == []
+    assert _util.securities_book_value(conn, "DEMO_FUND", 1005, as_of=DAY) == D(1_000_000)
+    assert _snapshot(conn, DAY)[0] == D(11_000_000)
+    assert "zero_qty_writeoffs" not in _snapshot(conn, DAY)[2]
+
+
+def test_close_writes_off_only_the_mtm_share_when_both_coexist(conn, run_id):
+    """同じ銘柄に現物拠出と全売却済みの約定が同居しても、消すのは評価替えぶんだけ。"""
+    d0, d1 = _full_sell_scenario(conn, run_id)  # 1001: 残渣 200,000 を作る
+    _post_in_kind(conn, run_id, d1, 1001, D(300_000))  # 約定外の建玉が同じ銘柄に乗る
+
+    closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d1, price_source={}, run_id=run_id
+    )
+    # 200,000(評価替えぶん)だけが消え、現物拠出の 300,000 は残る。
+    assert _util.securities_book_value(conn, "DEMO_FUND", 1001, as_of=d1) == D(300_000)
+    assert _util.mtm_book_value(conn, "DEMO_FUND", 1001, as_of=d1) == D(0)
+
+
+def test_reclose_writes_off_the_residue_of_a_late_full_sell(conn, run_id):
+    """再締めも数量ゼロの残渣を消す — 当日経路と定義を揃える(片方だけだと NAV が食い違う)。
+
+    価格ソースは終値を返さない(``no_price``)。建玉ゼロの銘柄の時価は価格に依らずゼロ
+    なので、バーが無くてもその日の再適用を諦めない。
+    """
+    d0, d1 = DAY, DAY + timedelta(days=1)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=1001, side="buy",
+                      qty=1000, price=1000, entry_date=d0, run_id=run_id)
+    closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d0, price_source={1001: 1200}, run_id=run_id
+    )
+    assert _snapshot(conn, d0)[0] == D(10_200_000)
+
+    # d0 の締めの**後**に d0 付けで全売りが記帳される(遅延約定)。
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=1001, side="sell",
+                      qty=1000, price=1200, entry_date=d0, run_id=run_id)
+    before = _max_entry_id(conn)
+
+    changed = _reclose(conn, run_id, d1, price_source=closing.no_price)
+    item = next(c for c in changed if c["date"] == d0)
+    assert item["mtm_reapplied"] is True and item["mtm_pending"] is False
+
+    detail = _snapshot(conn, d0)[2]
+    assert detail["mtm_reapplied"]["delta"] == "-200000"
+    assert detail["mtm_reapplied"]["positions"]["1001"] == {
+        "qty": "0", "price": None, "market_value": "0", "book_value": "200000",
+        "zero_qty_writeoff": True,
+    }
+    # 仕訳集計そのままの NAV(残渣込み 10,400,000)+ delta = 真の NAV(新-9 の不変式)。
+    assert D(detail["nav_from_journals"]) == D(10_400_000)
+    assert _snapshot(conn, d0)[0] == D(10_200_000)
+    assert _max_entry_id(conn) == before  # 再締めは仕訳を書かない
 
 
 def _mk_evidence(cur) -> int:
