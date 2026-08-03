@@ -1,0 +1,37 @@
+# config/llm.yaml — LLM 階層 → モデル ID・単価表(T-013)。
+#
+# 00-system-design §2(LLM 境界)・§5(ユニットエコノミクス台帳)に準拠。決定論コード
+# (jobs/daily・分析エージェント・報道部)がここから階層別モデル ID を引き、AnthropicProvider に渡す。
+# LLM はこの表に一切触れない(モデル選定・単価は経営管理部/設計リードの管轄)。
+#
+# **モデル階層**(CLAUDE.md 不変原則7):
+#   light = 軽量(トリアージ・一次判定)/ mid = 中位(本分析・執筆)/ fable = 研究設計・論文・重要レビュー
+#
+# **単価**(price_per_1k・¥/1k tokens・入出力ブレンド概算)は初期値。経営管理部が meta.runs.cost の
+# 実測トークンから実効単価を算出して更新する前提(§5)。入力/出力で単価が異なるモデルのため、
+# ここでは保守的なブレンド概算を置き、正確な原価は実測トークン×API 公示単価で別途集計する。
+
+version: "1"
+
+# 既定の Anthropic API バージョン(x-api-key REST・T-006 bot と同じ stdlib 方式)。
+api_version: "2023-06-01"
+
+# 出力トークン上限(構造化出力 JSON は短いので控えめ。研究設計時のみ tier 側で上書き可)。
+max_tokens: 4096
+
+tiers:
+  light:
+    # 軽量: 速報の報道価値一次判定・トリアージ。
+    model: "claude-haiku-4-5-20251001"
+    price_per_1k: 0.05
+    max_tokens: 2048
+  mid:
+    # 中位: 本分析(macro/micro/sentiment/editor)・朝刊執筆。
+    model: "claude-sonnet-5"
+    price_per_1k: 0.60
+    max_tokens: 4096
+  fable:
+    # 最上位: 研究設計・論文執筆・重要レビュー(論文ノルマ 1 日 1 本)。日次サイクルでは常用しない。
+    model: "claude-fable-5"
+    price_per_1k: 9.00
+    max_tokens: 8192
