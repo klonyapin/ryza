@@ -476,9 +476,88 @@ def _member_card_html(m: dict[str, Any]) -> str:
     )
 
 
-def page_org() -> None:
+def _icon_editor(members: list[dict[str, Any]], overrides: dict[str, str]) -> None:
+    """アイコン編集 UI(代表指示 2026-08-03)。上書きは ``ops.org_icon_overrides``(0020)。
+
+    **認可**: 追加の認証は置かない。このダッシュボードは IAP の許可リスト
+    (roles/iap.httpsResourceAccessor)で**代表1名**に限定されており、到達できる時点で
+    代表であることが保証される(役員室の追記 UI と同じ根拠 — app.py 冒頭・
+    ops/deploy-dashboard.sh)。したがって ``updated_by`` は固定で 'representative'。
+    書込は読取接続ではなく役員室と同じ最小権限ロール ``ryza_boardroom``
+    (``queries.connect_boardroom``)で行う。
+    """
+    st.subheader("アイコンの変更(代表のみ・DB 上書き)")
+    st.caption(
+        "台帳(config/org.yaml)の値を DB 側で上書きする(0020)。保存すると Discord の"
+        "投稿(webhook の avatar)にも次の配送から反映される。「初期値に戻す」で上書きを"
+        "削除すると台帳の値へ戻る。"
+    )
+    for m in members:
+        member_id = str(m.get("id", ""))
+        label = f"{m.get('name', '')}({m.get('title', '')})"
+        overridden = member_id in overrides
+        with st.expander(f"{label}{' — 上書き中' if overridden else ''}"):
+            current = overrides.get(member_id) or m.get("icon_url") or ""
+            cols = st.columns([1, 3])
+            with cols[0]:
+                if current:
+                    st.image(current, width=96)
+                else:
+                    st.caption("(アイコン未設定)")
+            with cols[1]:
+                with st.form(f"icon_form_{member_id}"):
+                    url = st.text_input(
+                        "画像 URL(https の直リンク)", value=current, key=f"icon_url_{member_id}"
+                    )
+                    save = st.form_submit_button("保存")
+                    reset = st.form_submit_button("初期値に戻す", disabled=not overridden)
+                if save or reset:
+                    _apply_icon_change(member_id, url, save=bool(save))
+
+
+def _apply_icon_change(member_id: str, url: str, *, save: bool) -> None:
+    """保存/リセットを実行し、結果を表示して再描画する(失敗時は保存しない)。
+
+    接続は役員室と同じ ``_boardroom_conn()``(``@st.cache_resource``)を**再利用**する
+    (独立役員審査 0020 C-9)。保存のたびに新規接続を開くと、Streamlit の再実行ごとに
+    close されない接続が積み上がる。
+    """
+    try:
+        wconn = _boardroom_conn()
+    except Exception as exc:  # noqa: BLE001 - DB 停止時も UI は説明を出して生かす
+        st.error(f"DB に接続できない: {exc}")
+        return
+    try:
+        if save:
+            org.update_icon(wconn, member_id, url, "representative")
+            st.success("アイコンを更新した")
+        elif org.clear_icon_override(wconn, member_id, "representative"):
+            st.success("上書きを削除し台帳の初期値へ戻した")
+        else:
+            st.info("上書きは無い(既に台帳の初期値)")
+    except org.IconUrlError as exc:
+        st.error(f"保存しなかった(URL 検証に失敗): {exc}")
+        return
+    except KeyError as exc:
+        st.error(f"保存しなかった: {exc}")
+        return
+    except Exception as exc:  # noqa: BLE001 - 権限不足等も画面に出す(黙って失敗しない)
+        st.error(f"保存に失敗: {exc}")
+        return
+    st.rerun()  # プレビュー・カードを即時更新する
+
+
+def page_org(conn=None) -> None:
     st.header("組織")
-    org = queries.load_org()
+    org_yaml = queries.load_org()
+    # アイコンの DB 上書き(0020)を台帳より優先。DB に繋がらない場合も台帳だけで表示を続ける。
+    overrides: dict[str, str] = {}
+    db_error: str | None = None
+    if conn is not None:
+        try:
+            overrides = org.icon_overrides(conn)
+        except Exception as exc:  # noqa: BLE001 - 表示は台帳へフォールバック
+            db_error = str(exc)
 
     st.subheader("組織図(00-system-design §3・14部門+開発部門)")
     st.markdown(_org_chart_html(), unsafe_allow_html=True)
@@ -487,8 +566,8 @@ def page_org() -> None:
         "投資委員会へ直接報告する。"
     )
 
-    st.subheader("メンバー(config/org.yaml が正)")
-    rep = org.get("representative", {})
+    st.subheader("メンバー(config/org.yaml が正・アイコンは DB 上書きを優先)")
+    rep = org_yaml.get("representative", {})
     rep_card = (
         "<div class='oc-card' style='--mc:#64748b'>"
         "<div class='oc-avatar oc-fallback' style='background:#64748b'>代</div>"
@@ -497,12 +576,23 @@ def page_org() -> None:
         "<div><span class='oc-chip'>人間</span>"
         "<span class='oc-chip'>投資委員会</span></div></div></div>"
     )
-    cards = rep_card + "".join(_member_card_html(m) for m in org.get("members", []))
+    members = [dict(m) for m in org_yaml.get("members", [])]
+    for m in members:
+        override = overrides.get(str(m.get("id", "")))
+        if override:
+            m["icon_url"] = override
+    cards = rep_card + "".join(_member_card_html(m) for m in members)
     st.markdown(_ORG_CSS + f"<div class='oc-members'>{cards}</div>", unsafe_allow_html=True)
     st.caption(
         "モデル階層は「まず非LLM → 軽量 → 中位 → Fable」の原則(CLAUDE.md)。"
-        "アイコン未設定のメンバーはカラーの頭文字で代替表示(icon_url 設定タスクは別途)。"
+        "アイコン未設定のメンバーはカラーの頭文字で代替表示。"
     )
+    if db_error is not None:
+        st.warning(f"アイコン上書き(DB)を読めなかったため台帳の値で表示している: {db_error}")
+    if conn is None:
+        st.info("DB に接続できないため、アイコンの変更 UI は表示していない(表示は台帳の値)。")
+        return
+    _icon_editor(members, overrides)
 
 
 # ── 承認・通知(組織サイト化)──────────────────────────────────────────────────
@@ -880,6 +970,19 @@ def _role_member(role: str) -> org.Member | None:
         return None
 
 
+@st.cache_data(ttl=10)
+def _icon_overrides() -> dict[str, str]:
+    """代表が設定したアイコン上書き(0020・``ops.org_icon_overrides``)。
+
+    DB に繋がらない場合は空(台帳のアイコンで表示を続ける — 組織ページと同じ方針)。
+    発言ごとに引くため 10 秒だけキャッシュする(組織ページの即時反映は別経路)。
+    """
+    try:
+        return org.icon_overrides(_boardroom_conn())
+    except Exception:  # noqa: BLE001 - 表示は台帳へフォールバック
+        return {}
+
+
 def _role_display(role: str) -> str:
     """役職の表示は「名前(役職)」(代表指示 2026-08-03)。例:「エミリア(CIO)」。
 
@@ -895,11 +998,17 @@ def _role_display(role: str) -> str:
 
 
 def _role_avatar(role: str) -> str | None:
-    """チャット吹き出しのアバター。ローカル SVG(Streamlit は表示可)→ 台帳の
-    icon_url(リモート)→ 既定アイコンの順でフォールバックする。"""
+    """チャット吹き出しのアバター。
+
+    代表が設定したアイコン上書き(0020・``ops.org_icon_overrides``)を最優先し、
+    無ければリポジトリ内の SVG(Streamlit は表示可)→ 台帳の icon_url の順に落とす。
+    """
     member = _role_member(role)
     if member is None:
         return None
+    override = _icon_overrides().get(member.id)
+    if override:
+        return override
     path = member.icon_repo_path
     if path.exists():
         return str(path)
@@ -1129,7 +1238,13 @@ def main() -> None:
         page_boardroom()  # 書込可の専用接続を自前で持つ(READ ONLY 接続は使わない)
         return
     if page == "組織":
-        page_org()  # config/org.yaml のみ(DB 不要)
+        # 台帳(config/org.yaml)が主。アイコンの上書き(0020)の読取にだけ DB を使うため、
+        # 接続できなくても台帳だけでページを出す(編集 UI は隠す)。
+        try:
+            org_conn = _conn()
+        except Exception:  # noqa: BLE001 - DB 停止時も組織ページは表示する
+            org_conn = None
+        page_org(org_conn)
         return
     if page == "規則":
         page_rules()  # config/governance.yaml のみ(DB 不要)
