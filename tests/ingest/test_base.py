@@ -92,10 +92,12 @@ def test_write_bar_idempotent(conn, run):
     assert base.write_bar(conn, run, **kw) is True
     assert base.write_bar(conn, run, **kw) is False  # 同一 PK は無視
 
+    # 共有 dev DB に実データが残っていても壊れないよう、自 run の書込分に絞って数える。
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT count(*) FROM market.bars WHERE instrument_id=%s AND source='jquants'",
-            (instrument_id,),
+            "SELECT count(*) FROM market.bars "
+            "WHERE instrument_id=%s AND source='jquants' AND run_id=%s",
+            (instrument_id, run.run_id),
         )
         assert cur.fetchone()[0] == 1
 
