@@ -132,9 +132,10 @@ protected_areas:
     area: audit
   - path: ops/deploy-a18.sh # 監査ジョブのデプロイ経路(PR #40)
     area: deploy_path
-  # risk_limits: リスクエンジン実装時に src パスを追記すること(C-2。それまで機械可読側は config/ips.yaml の
-  #   hard_limits が実体であり、その保護は area: ips でカバー済み)
-  # audit: 監査部門コードは実装時にパスを追記すること(A-18 が「宣言のみ」として警告する)
+  - path: src/ryza/risk/** # リスクエンジン(リミット判定+測定値の定義。navflow 審査 重要-8 で登録 — 測定定義の変更も第5条の対象。C-2 の宿題消化)
+    area: risk_limits
+  - path: src/ryza/gate/** # コンプラゲート実装(T-014。参照実装 src/ryza/ips.py と同じ area の棚卸し)
+    area: compliance_gate
 
 # 承認記録の様式(定款第5条・C-5): 保護領域の変更コミットは本文末尾に
 #   Approved: <GitHub Issue URL または governance.decisions の ID>
