@@ -1,6 +1,6 @@
 """A-13 規則⇔実装トレーサビリティ監査(定款第6条・config/governance.yaml controls)。
 
-3つの検査を実行し、構造化 dict を返す:
+4つの検査を実行し、構造化 dict を返す:
 
   A-13-1 保護領域突合   … `protected_areas` の glob に触れた発効日以後のコミットを列挙し、
                           (a) ``Approved:`` トレーラ (b) GitHub マージ PR 経由(Merge pull request
@@ -9,6 +9,11 @@
                           のバージョン文字列一致を検査する
   A-13-3 宣言棚卸し     … controls のうち ``enforcement: declaration`` を列挙する(検査ではなく
                           可視化 — 四半期ごとの執行点実装可否の再評価対象)
+  A-13-4 全変更 PR 化   … 基準コミット(``PR_RULE_BASELINE_COMMIT``)以降の first-parent 履歴で、
+                          (a) マージコミットでないコミット(= main への直 push)
+                          (b) 件名が PR マージ形式(``Merge pull request``)でないマージコミット
+                          を保護領域か否かにかかわらず違反として列挙する。例外なし
+                          (``Approved:`` トレーラ付き直 push も違反 — 2026-08-03 代表指示)
 
 **read-only 原則**: 本モジュールは検査と警告(``press.outbox`` の ops チャンネルへの embed 投入)
 のみを行い、修正・巻き戻し・コミットは一切行わない。
@@ -56,6 +61,13 @@ log = logging.getLogger("ryza.audit.a13")
 # 定款批准コミット(2026-08-03 発効・Merge pull request #32)。これ以前は監査対象外。
 RATIFICATION_COMMIT = "c7af81ef85cc9f45bb7881ffc45769abfbc771dc"
 
+# 全変更 PR 化ルール(2026-08-03 代表指示: 保護領域に限らずリポジトリへの全変更を PR 経由と
+# する)の基準コミット = ルール採用日(A-13-4 実装時点)の origin/main HEAD。
+#   4c7f6e9 "docs(tasks): T-017 FM エージェント第一陣(Ben・Jim)の実装指示書"
+# これ以前の直 push は対象外(遡及しない)。GitHub 無料プラン(私有リポ)ではブランチ保護が
+# 使えないため、本監査(A-13-4)がこのルールの執行点になる。
+PR_RULE_BASELINE_COMMIT = "4c7f6e9daded18a3e9e903a80c87feba3576b52c"
+
 GOVERNANCE_PATH = "config/governance.yaml"
 
 # 既知の限界の常時開示(独立役員審査条件)。報告 embed の notes に毎回載せる。
@@ -64,6 +76,8 @@ STANDARD_DISCLOSURES: tuple[str, ...] = (
     "Approved トレーラの参照先(Issue / governance.decisions)の実在は未照合",
     "マージのコンフリクト解消差分(evil merge)は --cc で検査し、保護パスに触れる場合は"
     "マージ自身の Approved トレーラを要求",
+    "A-13-4 のマージ判定は親数+PR 件名(A-13-1 と同一の検査)— 件名は自己申告で"
+    "GitHub API 未照合の限界を共有する",
 )
 
 # 文書⇔config のバージョン突合ペア(A-13-2)。(文書, config, config 内の version キー)
@@ -329,6 +343,54 @@ def _staleness_note(repo_path: str | Path) -> list[str]:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# A-13-4 全変更 PR 化(直 push 検査)
+# ────────────────────────────────────────────────────────────────────────────
+def check_direct_pushes(
+    repo_path: str | Path,
+    *,
+    since_commit: str | None = PR_RULE_BASELINE_COMMIT,
+) -> tuple[list[dict[str, Any]], int]:
+    """A-13-4: main への直 push・非 PR マージの一覧と、検査した first-parent コミット数を返す。
+
+    基準コミット(全変更 PR 化ルール採用日の main HEAD)以降の first-parent 履歴で、
+    (a) マージコミットでないコミット = 直 push、(b) 件名が PR マージ形式
+    (``_PR_MERGE_RE``、A-13-1 と同一の検査)でないマージコミット = 非 PR マージ、
+    を違反とする。保護領域か否かは問わず、例外も設けない(``Approved:`` トレーラ付き
+    直 push も違反 — 全 PR 化ルールに例外なし)。基準コミット以前は
+    ``rev-list since..HEAD`` により対象外。
+    """
+    repo = str(repo_path)
+    if since_commit and not _git_ok(repo, "cat-file", "-e", f"{since_commit}^{{commit}}"):
+        raise ValueError(f"全変更 PR 化の基準コミットがリポジトリに存在しない: {since_commit}")
+
+    fp_commits = _rev_list(repo, since_commit, "--first-parent")
+    violations: list[dict[str, Any]] = []
+    for sha in fp_commits:
+        parents = _git(repo, "log", "-1", "--format=%P", sha).split()
+        if len(parents) > 1:
+            if _PR_MERGE_RE.match(_git(repo, "log", "-1", "--format=%s", sha)):
+                continue  # PR マージコミット(件名は自己申告 — 開示のとおり API 未照合)
+            reason = "main への非 PR マージ(全変更 PR 化ルール違反 — 例外なし)"
+            # マージが main に持ち込んだ内容 = first parent との差分を列挙する。
+            diff_args = (
+                "diff-tree", "--no-commit-id", "--name-only", "-r", "-m", "--first-parent", sha
+            )
+        else:
+            reason = "main への直 push(全変更 PR 化ルール違反 — 例外なし)"
+            diff_args = ("diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha)
+        files = [ln for ln in _git(repo, *diff_args).splitlines() if ln]
+        violations.append(
+            {
+                "commit": sha[:12],
+                "subject": _git(repo, "log", "-1", "--format=%s", sha).strip(),
+                "files": files,
+                "reason": reason,
+            }
+        )
+    return violations, len(fp_commits)
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # 本体・報告
 # ────────────────────────────────────────────────────────────────────────────
 def run_a13(
@@ -336,11 +398,13 @@ def run_a13(
     *,
     governance_path: str = GOVERNANCE_PATH,
     since_commit: str | None = RATIFICATION_COMMIT,
+    pr_since_commit: str | None = PR_RULE_BASELINE_COMMIT,
     version_pairs: tuple[tuple[str, str], ...] = VERSION_PAIRS,
 ) -> dict[str, Any]:
-    """A-13 の3検査を実行して構造化 dict を返す(DB・Discord に依存しない純検査)。"""
+    """A-13 の4検査を実行して構造化 dict を返す(DB・Discord に依存しない純検査)。"""
     gov = load_governance(repo_path, governance_path)
     violations, checked = check_protected_commits(repo_path, gov, since_commit=since_commit)
+    direct_pushes, fp_checked = check_direct_pushes(repo_path, since_commit=pr_since_commit)
     return {
         "as_of": datetime.now(UTC).isoformat(),
         "since_commit": since_commit,
@@ -348,6 +412,9 @@ def run_a13(
         "violations": violations,
         "mismatches": check_versions(repo_path, version_pairs),
         "declarations": list_declarations(gov),
+        "pr_since_commit": pr_since_commit,
+        "checked_first_parent": fp_checked,
+        "direct_pushes": direct_pushes,
         # 既知の限界は毎回開示する(独立役員審査条件)+ 個別の注記(登録漏れ・鮮度)。
         "notes": [
             *_coverage_notes(gov),
@@ -359,7 +426,7 @@ def run_a13(
 
 def has_findings(result: dict[str, Any]) -> bool:
     """警告(embed 投入)を要する所見があるか。"""
-    return bool(result["violations"] or result["mismatches"])
+    return bool(result["violations"] or result["mismatches"] or result["direct_pushes"])
 
 
 def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
@@ -412,6 +479,29 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
             "inline": False,
         }
     )
+
+    if result["direct_pushes"]:
+        lines = [
+            f"- `{v['commit']}` {v['subject']}({', '.join(v['files'])})"
+            for v in result["direct_pushes"]
+        ]
+        fields.append(
+            {
+                "name": "⚠️ A-13-4 全変更 PR 化違反(直 push・非 PR マージ)",
+                "value": "\n".join(lines)[:1024],
+                "inline": False,
+            }
+        )
+    else:
+        fields.append(
+            {
+                "name": "A-13-4 全変更 PR 化",
+                "value": (
+                    f"✅ 直 push・非 PR マージなし(検査 {result['checked_first_parent']} コミット)"
+                ),
+                "inline": False,
+            }
+        )
     if result["notes"]:
         notes_value = "\n".join(f"- {n}" for n in result["notes"])[:1024]
         fields.append({"name": "注記", "value": notes_value, "inline": False})
@@ -430,9 +520,8 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
 
 def enqueue_alert(conn: Any, result: dict[str, Any], run_id: int, *, channel: str = "ops") -> int:
     """検査結果 embed を ``press.outbox`` の ops チャンネルへ投入する(違反時は urgent)。"""
-    return enqueue(
-        conn, channel, build_alert_embed(result), run_id, urgent=bool(result["violations"])
-    )
+    urgent = bool(result["violations"] or result["direct_pushes"])
+    return enqueue(conn, channel, build_alert_embed(result), run_id, urgent=urgent)
 
 
 def run_and_report(
@@ -441,17 +530,20 @@ def run_and_report(
     dry_run: bool = False,
     always_report: bool = False,
     since_commit: str | None = RATIFICATION_COMMIT,
+    pr_since_commit: str | None = PR_RULE_BASELINE_COMMIT,
 ) -> dict[str, Any]:
     """A-13 を実行し、所見があれば(または ``always_report``)#運営 へ enqueue する。
 
     ops-weekly など他ジョブからの呼び出し口。``dry_run`` では DB に接続せずログのみ。
     """
-    result = run_a13(repo_path, since_commit=since_commit)
+    result = run_a13(repo_path, since_commit=since_commit, pr_since_commit=pr_since_commit)
     report = has_findings(result) or always_report
     if dry_run:
         log.info(
-            "[DRY_RUN] A-13 結果: violations=%d mismatches=%d declarations=%d(enqueue %s)",
+            "[DRY_RUN] A-13 結果: violations=%d mismatches=%d declarations=%d "
+            "direct_pushes=%d(enqueue %s)",
             len(result["violations"]), len(result["mismatches"]), len(result["declarations"]),
+            len(result["direct_pushes"]),
             "対象" if report else "不要",
         )
         return result
@@ -497,9 +589,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
     for m in result["mismatches"]:
         print(f"[不整合] {m['doc']} v{m['doc_version']} ⇔ {m['config']} v{m['config_version']}",
               file=sys.stderr)
+    for d in result["direct_pushes"]:
+        print(f"[直push] {d['commit']} {d['subject']}: {d['files']}", file=sys.stderr)
     print(
         f"A-13 完了(検査 {result['checked_commits']} コミット, 違反 {len(result['violations'])}, "
-        f"不整合 {len(result['mismatches'])}, 宣言 {len(result['declarations'])})",
+        f"不整合 {len(result['mismatches'])}, 宣言 {len(result['declarations'])}, "
+        f"直push {len(result['direct_pushes'])})",
         file=sys.stderr,
     )
     return 1 if has_findings(result) else 0
