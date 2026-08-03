@@ -53,12 +53,17 @@ A-18 は既に(1)監査専用 clone ``/opt/ryza-audit`` から走り、(2)``--al
 
 **既知の限界(独立役員審査 2026-08-03 指摘により報告 notes へ毎回開示する)**:
 
-- PR 件名(``Merge pull request #N``)とトレーラの PR URL は GitHub API(``repos/<slug>/pulls/N``)
-  で実在+マージ済みを照合する(:class:`PRVerifier`)。**API に到達できない実行では従来どおり
-  件名を信用する(fail-open)**— 週次監査を API 障害で止めないため。fail-open した件数と
-  理由は必ず notes に開示する。私有リポジトリに未認証でアクセスすると存在する PR も 404 に
-  なるため、``repos/<slug>`` の到達性を先に確認し、到達できない場合は 404 を「不在」と
-  解釈しない(認証不備で違反を大量生成しないための fail-open)
+- PR 件名(``Merge pull request #N``)は GitHub API(``repos/<slug>/pulls/N``)で
+  **実在+マージ済み+``merge_commit_sha`` が当該マージと一致**することまで照合する
+  (:class:`PRVerifier`)。SHA 帰属を欠く照合は偽造コストを「番号を捏造する」から
+  「実在番号をコピーする」へ下げるだけで有害である(独立役員審査 2026-08-04 重大-1)。
+  トレーラの PR URL は**自リポジトリのもののみ**実在+マージ済みまで照合する
+  (コミット単位の帰属は主張しない。他リポジトリ URL は権限外のため照合せず件数を開示)。
+  **API に到達できない実行では従来どおり件名を信用する(fail-open)**— 週次監査を API
+  障害で止めないため。ただし縮退した週は :func:`has_findings` で**所見あつかい**にし、
+  embed に「照合不能 N 件(要手動確認)」を出す(緑は全照合が成立した週に限る — 重要-4)。
+  私有リポジトリに未認証でアクセスすると存在する PR も 404 になるため、``repos/<slug>`` の
+  到達性を先に確認し、到達できない場合は 404 を「不在」と解釈しない
 - ``Approved:`` トレーラの参照は、DB 接続がある実行に限り ``governance.current_decisions`` と
   突合する(``decision:<id>`` は ID 一致、それ以外は ``proposal_ref`` 一致 — PR URL の承認記録が
   この経路で解決される)。否認済み(``effective_decision='vetoed'``)・却下・不在は承認として
@@ -76,16 +81,20 @@ A-18 は既に(1)監査専用 clone ``/opt/ryza-audit`` から走り、(2)``--al
 ``reviewed=`` は任意拡張であり、**付いていれば承継の範囲を「``reviewed`` の祖先」に限定**する
 (:func:`reviewed_shas`)。独立審査・``#承認`` 通知の後にブランチへ積んだコミットは
 ``reviewed`` の祖先にならないため承継されず、従来どおり違反として列挙される(重大-2 の
-「審査後 push の吸収」の封鎖)。``reviewed`` が 40 桁 hex でない・リポジトリに実在しない
-場合は**様式不備として承継の起点にしない**(fail-safe — 不備を「制限なし」に読み替えない)。
+「審査後 push の吸収」の封鎖)。以下はいずれも**様式不備として承継の起点にしない**
+(fail-safe — 不備を「制限なし」に読み替えない): 40 桁 hex でない / リポジトリに実在しない /
+**当該マージの第2親(= その PR のブランチ)の祖先でない**(他ブランチの SHA を書いて
+「reviewed 限定」の表示だけを得る偽装の排除 — 独立役員審査 2026-08-04 重要-3)/
+同一行に ``reviewed`` が複数ある(低-7)。
 v1(``reviewed`` 無し)のトレーラは移行期の経過措置として従来どおり有効だが、それによる
 承継の件数を notes に「reviewed 無しの承継 N 件」として開示する。
 
-**v2 の限界(意図的な非目標)**: ``reviewed`` はトレーラの書き手の申告であり、「独立審査が
-実際にその SHA を見た」ことを A-18 は独立には確認できない(承認記録 ``governance.decisions``
-に審査対象 SHA を持たせない限り照合先が無い)。v2 が閉じるのは**トレーラを書いた後にブランチへ
-積んだ変更が自動的に承認へ吸い込まれる**経路であって、書き手自身の虚偽申告ではない。後者は
-「トレーラを書くのは承認手続を通した者」という手続前提と、PR 実在照合・否認照合が担う。
+**v2 の限界(既知・後継はリマインダー登録済み)**: ``reviewed`` はトレーラの書き手の申告で
+あり、「独立審査が実際にその SHA を見た」ことを A-18 は独立には確認できない(承認記録
+``governance.decisions`` に審査対象 SHA を持たせない限り照合先が無い)。第2親の祖先であること
+までは機械検査するが、``reviewed=<マージ直前のブランチ head>`` と書けば v1 と同じ被覆になる。
+恒久対策は ``ops/reminders.yaml`` の ``decision-reviewed-sha``(承認記録側に審査対象 SHA を
+持たせて突合する)。v1 経過措置の打ち切りは ``trailer-v1-sunset``。
 
 **PR 承継(2026-08-04 設計リード裁定)**: first-parent 上のマージ M が有効な ``Approved:``
 トレーラを持つとき、M が main に持ち込んだコミット群(M の配下でまだ main に無かったもの)は
@@ -155,15 +164,16 @@ GOVERNANCE_PATH = "config/governance.yaml"
 
 # 既知の限界の常時開示(独立役員審査条件)。報告 embed の notes に毎回載せる。
 STANDARD_DISCLOSURES: tuple[str, ...] = (
-    "PR 件名(Merge pull request #N)とトレーラの PR URL は GitHub API で実在+マージ済みを"
-    "照合する。API に到達できない実行では従来どおり件名を信用する(fail-open)— "
-    "fail-open の件数と理由は本注記に併記する",
+    "PR 件名(Merge pull request #N)は GitHub API で実在+マージ済み+merge_commit_sha が"
+    "当該マージと一致することまで照合する。トレーラの自リポジトリ PR URL は実在+マージ済みまで"
+    "(コミット単位の帰属は主張しない)。API 不達は fail-open し、件数を所見として報告する",
     "Approved トレーラは current_decisions と突合(decision:<id> は ID 一致・それ以外は "
     "proposal_ref 一致。否認済み・却下・不在は受理しない)。裸の数字と DB 外の承認記録"
     "(Issue 決議)は照合対象外",
     "マージのコンフリクト解消差分(evil merge)は --cc で検査し、保護パスに触れる場合は"
     "マージ自身の Approved トレーラを要求",
-    "A-18-4 のマージ判定は親数+PR 件名+PR 実在照合(A-18-1 と同一の検査)",
+    "A-18-4 のマージ判定は親2限定+PR 件名+PR 実在照合(A-18-1 と同一の検査)— "
+    "octopus マージは PR マージと見なさず違反にする",
     "Approved トレーラの reviewed=<sha40> は任意拡張。付いていれば承継は reviewed の祖先に"
     "限定され、無ければ PR マージ時点のブランチ全体に及ぶ(v1 経過措置 — 件数を開示する)",
 )
@@ -182,6 +192,10 @@ _TRAILER_ATTR_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*)=(\S+)$")
 
 # トレーラ様式 v2 の審査対象コミット(承継の上限)。
 _REVIEWED_KEY = "reviewed"
+
+# 解釈するキー / 「書いてもよいが解釈しない」キー(記入者の誤認を notes で正す — 低-10)。
+_KNOWN_TRAILER_KEYS: frozenset[str] = frozenset({_REVIEWED_KEY})
+_IGNORED_TRAILER_KEYS: frozenset[str] = frozenset({"mode", "notified"})
 
 # GitHub PR の URL(トレーラ参照の実在照合に使う)。
 _PR_URL_RE = re.compile(
@@ -333,6 +347,12 @@ class PRVerifier:
     ``repos/<slug>`` の到達性を確認し、到達できないときは 404 を「不在」と読まない。
     この防御が無いと、トークンを失った週に全 PR が「実在しない」と判定され、
     監査が違反を大量生成して信用を失う。
+
+    **SHA 帰属(独立役員審査 2026-08-04 重大-1)**: 「PR が実在する」は「この変更が承認された」
+    ではない。番号だけを見る照合は偽造コストを「番号を捏造する」から「実在番号をコピーする」へ
+    下げるだけで、緑をより信頼できるものに見せる分むしろ有害である。マージコミットを検査する
+    経路では ``expected_merge_sha`` を渡し、API の ``merge_commit_sha`` との一致を必須にする
+    (実在 PR 番号を件名に流用した自作マージを封じる)。
     """
 
     repo_path: str | Path | None = None
@@ -340,8 +360,11 @@ class PRVerifier:
     #: API 呼び出し(テストは差し替えてネットワークに触れない)。None なら実 API。
     api_get: Callable[[str], tuple[str, Any]] | None = None
     enabled: bool = True
-    _cache: dict[int, tuple[str, str | None]] = field(default_factory=dict, repr=False)
+    #: 番号 → API 取得結果(``("ok", payload)`` / ``("not_found", None)`` / ``("error", 理由)``)。
+    #: エラーもキャッシュする(レート制限時に同一番号へ再問い合わせしない — 審査 低-9)。
+    _cache: dict[int, tuple[str, Any]] = field(default_factory=dict, repr=False)
     _unavailable: dict[str, int] = field(default_factory=dict, repr=False)
+    _foreign: dict[str, int] = field(default_factory=dict, repr=False)
     _verified: int = field(default=0, repr=False)
     _reachable: bool | None = field(default=None, repr=False)
     _reach_reason: str | None = field(default=None, repr=False)
@@ -372,40 +395,78 @@ class PRVerifier:
             )
         return self._reach_reason
 
+    def _fetch(self, number: int) -> tuple[str, Any]:
+        """PR 1件の API 取得(成否ともキャッシュ)。"""
+        if number not in self._cache:
+            self._cache[number] = self.api_get(f"repos/{self.slug}/pulls/{number}")
+        return self._cache[number]
+
     # ── 照合 ────────────────────────────────────────────────────────────────
-    def check(self, number: int) -> tuple[str, str | None]:
-        """PR 番号1件を照合する。``("ok"|"bad"|"unverifiable", 理由)``。"""
+    def check(self, number: int, expected_merge_sha: str | None = None) -> tuple[str, str | None]:
+        """PR 番号1件を照合する。``("ok"|"bad"|"unverifiable", 理由)``。
+
+        ``expected_merge_sha`` を渡すと、API の ``merge_commit_sha`` がそれと一致することを
+        **必須**にする(実在 PR 番号の流用偽装の封鎖 — 独立役員審査 2026-08-04 重大-1)。
+        """
         if not self.enabled:
             return self._degrade("GitHub PR 実在照合が無効化されている")
         if not self.slug:
             return self._degrade("origin が GitHub リポジトリでないため PR 番号を照合できない")
-        cached = self._cache.get(number)
-        if cached is not None:
-            return cached
         unreachable = self._unreachable_reason()
         if unreachable:
             return self._degrade(unreachable)
-        status, payload = self.api_get(f"repos/{self.slug}/pulls/{number}")
+        status, payload = self._fetch(number)
         if status == "not_found":
-            verdict: tuple[str, str | None] = ("bad", f"PR #{number} が GitHub に存在しない")
-        elif status != "ok":
+            return "bad", f"PR #{number} が GitHub に存在しない"
+        if status != "ok":
             return self._degrade(f"PR #{number} の照合に失敗({payload})")
-        elif not (payload or {}).get("merged_at"):
-            verdict = ("bad", f"PR #{number} は GitHub 上でマージされていない")
-        else:
-            verdict = ("ok", None)
-            self._verified += 1
-        self._cache[number] = verdict
-        return verdict
+        payload = payload or {}
+        if not payload.get("merged_at"):
+            return "bad", f"PR #{number} は GitHub 上でマージされていない"
+        if expected_merge_sha is not None:
+            actual = str(payload.get("merge_commit_sha") or "").lower()
+            if not actual:
+                # SHA を確認できない応答では帰属を主張しない(fail-open して開示)。
+                return self._degrade(f"PR #{number} の merge_commit_sha が API 応答に無い")
+            if actual != expected_merge_sha.lower():
+                return "bad", (
+                    f"PR #{number} のマージコミットは {actual[:12]} であり本コミットではない"
+                    "(実在 PR 番号の流用)"
+                )
+        self._verified += 1
+        return "ok", None
 
     def check_ref(self, ref: str) -> tuple[str, str | None]:
-        """トレーラ参照が**自リポジトリの** PR URL なら照合する。対象外なら ``("skip", None)``。"""
+        """トレーラ参照が**自リポジトリの** PR URL なら照合する。対象外なら ``("skip", None)``。
+
+        他リポジトリの PR URL は照合できない(こちらの権限外)。黙って通すと
+        「架空 URL は違反」という開示が実態と食い違うため、件数を数えて notes に出す
+        (独立役員審査 2026-08-04 中-6)。
+        """
         m = _PR_URL_RE.match(ref)
-        if not m or not self.slug:
+        if not m:
             return "skip", None
-        if f"{m.group(1)}/{m.group(2)}".lower() != self.slug.lower():
-            return "skip", None  # 他リポジトリの PR は照合対象にしない
+        if not self.slug or f"{m.group(1)}/{m.group(2)}".lower() != self.slug.lower():
+            key = f"{m.group(1)}/{m.group(2)}"
+            self._foreign[key] = self._foreign.get(key, 0) + 1
+            return "skip", None
         return self.check(int(m.group(3)))
+
+    # ── 集計 ────────────────────────────────────────────────────────────────
+    @property
+    def verified_count(self) -> int:
+        """実在+マージ済み(帰属確認済みを含む)として通した参照の数。"""
+        return self._verified
+
+    @property
+    def failed_open_count(self) -> int:
+        """照合できず従来挙動へ縮退した参照の数(> 0 なら緑にしない — 重要-4)。"""
+        return sum(self._unavailable.values())
+
+    @property
+    def failed_open_reasons(self) -> dict[str, int]:
+        """縮退の理由 → 件数(報告 embed 用)。"""
+        return dict(self._unavailable)
 
     def disclosures(self) -> list[str]:
         """照合できた件数と fail-open した件数・理由(報告 notes へ)。"""
@@ -413,9 +474,14 @@ class PRVerifier:
             f"GitHub PR 実在照合を実施できず fail-open した参照 {n} 件: {reason}"
             for reason, n in sorted(self._unavailable.items())
         ]
+        out += [
+            f"自リポジトリ外の PR URL {n} 件は照合対象外(権限外のため実在を確認していない): {slug}"
+            for slug, n in sorted(self._foreign.items())
+        ]
         if self._verified:
             out.append(
-                f"GitHub PR 実在照合: {self._verified} 件を実在+マージ済みとして確認"
+                f"GitHub PR 実在照合: {self._verified} 件を実在+マージ済み"
+                "(マージ SHA 帰属を含む)として確認"
             )
         return out
 
@@ -426,19 +492,24 @@ def pr_number_from_subject(subject: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def verified_pr_merge(subject: str, pr_verifier: PRVerifier | None) -> tuple[bool, str | None]:
-    """件名が PR マージ形式で、かつ(照合できるなら)PR が実在しマージ済みか。
+def verified_pr_merge(
+    subject: str, pr_verifier: PRVerifier | None, merge_sha: str | None = None
+) -> tuple[bool, str | None]:
+    """件名が PR マージ形式で、かつ(照合できるなら)**その PR のマージコミット**か。
+
+    ``merge_sha`` を渡すと GitHub の ``merge_commit_sha`` と一致することまで要求する
+    (実在 PR 番号を件名に流用した自作マージの封鎖 — 独立役員審査 2026-08-04 重大-1)。
 
     Returns:
         ``(PR マージとして扱うか, 扱わない理由)``。照合不能(API 不達)は従来どおり
-        件名を信用する(fail-open)。
+        件名を信用する(fail-open。縮退件数は :meth:`PRVerifier.failed_open_count`)。
     """
     number = pr_number_from_subject(subject)
     if number is None:
         return False, None
     if pr_verifier is None:
         return True, None
-    state, detail = pr_verifier.check(number)
+    state, detail = pr_verifier.check(number, merge_sha)
     if state == "bad":
         return False, detail
     return True, None
@@ -507,6 +578,8 @@ class TrailerLine:
     attrs: dict[str, str]
     #: 解釈できなかったトークン(``key=value`` 形式でない余剰語)
     extras: tuple[str, ...] = ()
+    #: 同一行で2回以上現れたキー(後勝ちで不備を握り潰さないため様式不備にする — 低-7)
+    duplicates: tuple[str, ...] = ()
 
 
 def approval_trailers(message: str, trailer: str = "Approved:") -> list[TrailerLine]:
@@ -523,13 +596,24 @@ def approval_trailers(message: str, trailer: str = "Approved:") -> list[TrailerL
             continue
         attrs: dict[str, str] = {}
         extras: list[str] = []
+        duplicates: list[str] = []
         for tok in tokens[1:]:
             attr = _TRAILER_ATTR_RE.match(tok)
             if attr:
-                attrs[attr.group(1).lower()] = attr.group(2)
+                key = attr.group(1).lower()
+                if key in attrs:
+                    duplicates.append(key)
+                attrs[key] = attr.group(2)
             else:
                 extras.append(tok)
-        lines.append(TrailerLine(ref=tokens[0], attrs=attrs, extras=tuple(extras)))
+        lines.append(
+            TrailerLine(
+                ref=tokens[0],
+                attrs=attrs,
+                extras=tuple(extras),
+                duplicates=tuple(duplicates),
+            )
+        )
     return lines
 
 
@@ -553,6 +637,10 @@ def reviewed_shas(message: str, trailer: str = "Approved:") -> tuple[tuple[str, 
     """
     shas: list[str] = []
     for line in approval_trailers(message, trailer):
+        if _REVIEWED_KEY in line.duplicates:
+            # 後勝ちで解釈すると `reviewed=zzz reviewed=<valid>` が不備検出を無言で回避する
+            # (独立役員審査 2026-08-04 低-7)。
+            return (), "同一トレーラ行に reviewed が複数ある(どれが審査対象か確定できない)"
         value = line.attrs.get(_REVIEWED_KEY)
         if value is None:
             continue
@@ -560,6 +648,21 @@ def reviewed_shas(message: str, trailer: str = "Approved:") -> tuple[tuple[str, 
             return (), f"reviewed={value} が 40 桁 hex の完全 SHA でない"
         shas.append(value.lower())
     return tuple(shas), None
+
+
+def trailer_format_warnings(message: str, trailer: str = "Approved:") -> list[str]:
+    """解釈されないキー・語を警告文にする(綴り誤りを黙って v1 扱いにしない — 低-10)。"""
+    warnings: list[str] = []
+    for line in approval_trailers(message, trailer):
+        for key in line.attrs:
+            if key in _IGNORED_TRAILER_KEYS:
+                warnings.append(f"トレーラのキー '{key}=' は A-18 では解釈されない(記載は自由)")
+            elif key not in _KNOWN_TRAILER_KEYS:
+                warnings.append(
+                    f"トレーラの未知キー '{key}='(綴り誤りの可能性 — 解釈されない)"
+                )
+        warnings += [f"トレーラの解釈できない語 '{tok}'" for tok in line.extras]
+    return warnings
 
 
 def has_approval_trailer(message: str, trailer: str = "Approved:") -> bool:
@@ -741,10 +844,12 @@ def _merge_origin(
     """承継の起点候補となるマージコミットを1件評価する(呼び出し側でキャッシュする)。"""
     subject = _git(repo, "log", "-1", "--format=%s", merge).strip()
     message = _git(repo, "log", "-1", "--format=%B", merge)
-    two_parent = len(_git(repo, "log", "-1", "--format=%P", merge).split()) == 2
+    parents = _git(repo, "log", "-1", "--format=%P", merge).split()
+    two_parent = len(parents) == 2
     # octopus マージ(親3以上)は起点にしない。GitHub の PR マージは常に親2であり、octopus に
     # PR 件名を付けると複数ブランチの内容を1つの承認で通せてしまう(審査 2026-08-04 中-3)。
-    pr_ok, not_pr_detail = verified_pr_merge(subject, pr_verifier)
+    # PR の実在に加え **merge_commit_sha == この マージ** まで要求する(番号流用の封鎖 — 重大-1)。
+    pr_ok, not_pr_detail = verified_pr_merge(subject, pr_verifier, merge)
     verdict = trailer_approves(conn, message, trailer, pr_verifier=pr_verifier)
     reviewed, problem = reviewed_shas(message, trailer)
     if problem is None:
@@ -752,6 +857,21 @@ def _merge_origin(
         if missing:
             # 実在しない reviewed は祖先判定ができない。「制限なし」に読み替えず起点から外す。
             problem = f"reviewed={missing[0][:12]} がリポジトリに存在せず審査範囲を確定できない"
+        elif reviewed and two_parent:
+            # reviewed は **この PR のブランチ(第2親)の祖先**でなければならない。他ブランチの
+            # SHA を書けば「reviewed 限定」と表示したまま実際には何も限定しない偽装ができる
+            # (独立役員審査 2026-08-04 重要-3)。
+            outside = [
+                r for r in reviewed
+                if not _git_ok(repo, "merge-base", "--is-ancestor", r, parents[1])
+            ]
+            if outside:
+                problem = (
+                    f"reviewed={outside[0][:12]} が当該 PR のブランチ(第2親 "
+                    f"{parents[1][:12]})の祖先でない"
+                )
+        elif reviewed and not two_parent:
+            problem = "reviewed 付きだが親2のマージでないため審査範囲を確定できない"
     return MergeOrigin(
         sha=merge,
         subject=subject,
@@ -775,6 +895,7 @@ def check_protected_commits(
     since_commit: str | None = RATIFICATION_COMMIT,
     conn: Any | None = None,
     pr_verifier: PRVerifier | None = None,
+    format_notes: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, list[dict[str, Any]]]:
     """A-18-1: ``(違反, PR 承継で承認, 検査コミット数, トレーラ所見)`` を返す。
 
@@ -829,6 +950,11 @@ def check_protected_commits(
             continue
 
         message = _git(repo, "log", "-1", "--format=%B", sha)
+        if format_notes is not None:
+            # 解釈されないキー・語(綴り誤り)は黙って v1 扱いに落とさず注記に出す(低-10)。
+            format_notes += [
+                f"{w}: `{sha[:12]}`" for w in trailer_format_warnings(message, trailer)
+            ]
         # 承認の有効性判定は trailer_approves に集約する。PR 承継のように「別のコミットの
         # トレーラで承認する」規則も必ずこの関数を通す(素の has_approval_trailer で分岐すると
         # その経路だけ否認済み承認を受理する穴になる)。
@@ -1139,11 +1265,19 @@ def check_direct_pushes(
         parents = _git(repo, "log", "-1", "--format=%P", sha).split()
         if len(parents) > 1:
             subject = _git(repo, "log", "-1", "--format=%s", sha)
-            is_pr, not_pr_detail = verified_pr_merge(subject, pr_verifier)
-            if is_pr:
+            # 親3以上(octopus)は GitHub の PR マージではありえない。件名だけで通すと
+            # 実在 PR 件名を付けた octopus が A-18-4 を素通りする(審査 2026-08-04 中-5)。
+            is_two_parent = len(parents) == 2
+            is_pr, not_pr_detail = verified_pr_merge(subject, pr_verifier, sha)
+            if is_pr and is_two_parent:
                 continue  # PR マージコミット(API 不達なら件名を信用する fail-open)
             reason = "main への非 PR マージ(全変更 PR 化ルール違反 — 例外なし)"
-            if not_pr_detail is not None:
+            if not is_two_parent:
+                reason = (
+                    f"octopus マージ(親{len(parents)})は PR マージではない"
+                    "(全変更 PR 化ルール違反)"
+                )
+            elif not_pr_detail is not None:
                 reason = f"PR マージ件名だが GitHub と一致しない: {not_pr_detail}"
             # マージが main に持ち込んだ内容 = first parent との差分を列挙する。
             diff_args = (
@@ -1293,7 +1427,7 @@ def run_a18(
     verify_prs: bool = True,
     pr_verifier: PRVerifier | None = None,
 ) -> dict[str, Any]:
-    """A-18 の4検査を実行して構造化 dict を返す(git と設定ファイルのみの検査)。
+    """A-18 の6検査を実行して構造化 dict を返す(A-18-5/6 は ``conn`` のある実行のみ)。
 
     ``conn`` を渡すと A-18-1 が ``Approved:`` トレーラの参照先(``governance.decisions``
     の ID 形式)を ``governance.current_decisions`` と突合する(read-only)。渡さない
@@ -1306,8 +1440,14 @@ def run_a18(
     if pr_verifier is None and verify_prs:
         pr_verifier = PRVerifier(repo_path=repo_path)
     gov = load_governance(repo_path, governance_path)
+    format_notes: list[str] = []
     found, inherited, checked, trailer_findings = check_protected_commits(
-        repo_path, gov, since_commit=since_commit, conn=conn, pr_verifier=pr_verifier
+        repo_path,
+        gov,
+        since_commit=since_commit,
+        conn=conn,
+        pr_verifier=pr_verifier,
+        format_notes=format_notes,
     )
     # 既知違反の受容: violations からは外すが捨てない(報告で必ず別枠表示する)。
     violations, acknowledged, ack_notes = partition_acknowledged(found, gov)
@@ -1334,6 +1474,13 @@ def run_a18(
         "direct_pushes": direct_pushes,
         "decision_refs_verified": conn is not None,
         "prs_verified": pr_verifier is not None,
+        # PR 照合の成立/縮退の件数。縮退 > 0 の週は緑にしない(独立役員審査 重要-4:
+        # 攻撃者が GIT_TOKEN を消すだけで偽 PR が「所見なし」で通る経路を塞ぐ)。
+        "pr_verification": {
+            "verified": pr_verifier.verified_count if pr_verifier else 0,
+            "failed_open": pr_verifier.failed_open_count if pr_verifier else 0,
+            "reasons": pr_verifier.failed_open_reasons if pr_verifier else {},
+        },
         "trailer_findings": trailer_findings,
         "unnotified_deemed": unnotified,
         "resolution_bypass": resolution_bypass,
@@ -1344,6 +1491,7 @@ def run_a18(
             *ack_notes,
             *_unverified_inheritance_notes(inherited),
             *_v1_inheritance_notes(inherited),
+            *sorted(set(format_notes)),
             *(pr_verifier.disclosures() if pr_verifier is not None else [
                 "GitHub PR 実在照合は無効化されている(verify_prs=False)— 件名は自己申告のまま"
             ]),
@@ -1401,12 +1549,25 @@ def vetoed_trailer_findings(result: dict[str, Any]) -> list[dict[str, Any]]:
     return [f for f in result.get("trailer_findings", []) if f.get("problems")]
 
 
+def pr_verification_degraded(result: dict[str, Any]) -> bool:
+    """PR 実在照合が成立しなかった(縮退・無効化)実行か。
+
+    **緑は全照合が成立した週に限る**(独立役員審査 2026-08-04 重要-4・反対意見書③)。
+    ``repos/<slug>`` へ到達できなければ全照合が fail-open するため、``GIT_TOKEN`` を消すだけで
+    偽 PR 件名が「所見なし」を通る。縮退した週を所見扱いにすると、この経路は静かでなくなる。
+    """
+    if result.get("prs_verified") is False:
+        return True  # 明示的な無効化(--no-pr-verify)も緑にはしない
+    return bool((result.get("pr_verification") or {}).get("failed_open"))
+
+
 def has_findings(result: dict[str, Any]) -> bool:
     """警告(embed 投入)を要する所見があるか。
 
     照合できない参照(裸の数字)だけの所見は notes への開示にとどめ、報告の要否は
     変えない。様式の不備であって統制違反ではないため、これで ⚠️ を点けると
-    「毎回 ⚠️」になり本物の違反が埋もれる。
+    「毎回 ⚠️」になり本物の違反が埋もれる。**PR 照合の縮退は別**で、これは
+    「検査が働かなかった」ことの表明なので所見にする(重要-4)。
 
     A-18-6(決議の批判経由)は閾値に達したときだけ数える。件数が 0 でない程度では
     鳴らさないのは同じ理由で、閾値の定義は ``boardroom`` 側(走査窓・連続・累積)に一本化
@@ -1419,7 +1580,28 @@ def has_findings(result: dict[str, Any]) -> bool:
         or result.get("unnotified_deemed")
         or (result.get("resolution_bypass") or {}).get("alert")
         or vetoed_trailer_findings(result)
+        or pr_verification_degraded(result)
     )
+
+
+def _chunk_notes(notes: list[str], limit: int = 1024) -> list[str]:
+    """注記行を Discord の field 上限に収まる塊へ分割する(切り捨てない)。"""
+    chunks: list[str] = []
+    current = ""
+    for note in notes:
+        line = f"- {note}"
+        if len(line) > limit:  # 単独で超える行だけは切る(それ以外は必ず全部出す)
+            line = line[: limit - 1] + "…"
+        if not current:
+            current = line
+        elif len(current) + 1 + len(line) <= limit:
+            current = f"{current}\n{line}"
+        else:
+            chunks.append(current)
+            current = line
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
@@ -1581,6 +1763,31 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
+    # PR 実在照合の成立/縮退は必ず1行出す(緑の意味を「照合が働いた」に限定する — 重要-4)。
+    prv = result.get("pr_verification") or {}
+    if pr_verification_degraded(result):
+        if result.get("prs_verified") is False:
+            value = "❗ 照合が無効化された実行(--no-pr-verify)— PR 件名は自己申告のまま"
+        else:
+            reasons = "\n".join(
+                f"  - {r}: {n} 件" for r, n in sorted(prv.get("reasons", {}).items())
+            )
+            value = (
+                f"❗ 照合不能 {prv.get('failed_open', 0)} 件(**要手動確認** — この週の "
+                f"PR 件名は自己申告のまま通っている)\n{reasons}"
+            )
+        fields.append(
+            {"name": "⚠️ GitHub PR 実在照合が成立していない", "value": value[:1024], "inline": False}
+        )
+    elif prv.get("verified"):
+        fields.append(
+            {
+                "name": "GitHub PR 実在照合",
+                "value": f"✅ {prv['verified']} 件を実在+マージ済み(SHA 帰属含む)として確認",
+                "inline": False,
+            }
+        )
+
     vetoed_refs = vetoed_trailer_findings(result)
     if vetoed_refs:
         lines = [
@@ -1595,9 +1802,12 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    if result["notes"]:
-        notes_value = "\n".join(f"- {n}" for n in result["notes"])[:1024]
-        fields.append({"name": "注記", "value": notes_value, "inline": False})
+    # 注記は 1024 文字を超えると Discord 側で落ちるため、切り捨てずに複数 field へ分割する。
+    # 末尾を黙って捨てると「開示したつもりの限界」が消える(独立役員審査 2026-08-04 低-8)。
+    for i, chunk in enumerate(_chunk_notes(result["notes"])):
+        fields.append(
+            {"name": "注記" if i == 0 else f"注記(続き {i + 1})", "value": chunk, "inline": False}
+        )
 
     alert = has_findings(result)
     return {

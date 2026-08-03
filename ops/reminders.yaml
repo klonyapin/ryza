@@ -171,6 +171,30 @@ reminders:
     #   ⑤ PR 実在照合を統合(a18-github-pr-verification を done に)
     status: done # 2026-08-04 実装(様式 v2 + PR 実在照合)
 
+  - id: trailer-v1-sunset
+    what: "Approved トレーラ v1(reviewed 無し)承継の打ち切り — v2 必須化(定款 C-5 改訂 = L1)。期限の無い経過措置は恒久仕様である(独立審査 2026-08-04 重大-2)"
+    conditions:
+      - type: date_after
+        date: "2026-09-01"
+    action:
+      type: issue_create
+      title: "Approved トレーラ v1 の承継を打ち切り、reviewed=<sha40> を必須にする"
+      labels: [governance]
+      body: "2026-08-04 の様式 v2 導入時、既存 PR の一斉違反化(05-governance §6-5 の形骸化)を避けるため v1(reviewed 無し)の承継を経過措置として残した。独立役員審査は『期限の無い経過措置は経過措置ではなく恒久仕様』『任意の統制は統制でない(実測採用率 0/4)』と指摘し、期限設定を統合条件とした。本リマインダーの発火時に以下を行う: ①`src/ryza/audit/a18.py` の `_v1_inheritance_notes` を注記から**警告(has_findings 寄与)**へ格上げする、②さらに実弾移行前に v1 承継そのものを廃止(reviewed 無しの PR マージは承継の起点にしない)、③定款第5条 C-5 の様式に reviewed を必須として明記する(L1 手続 = 独立役員審査 → #承認 通知)。判断材料として、発火時点の A-18 報告で v2 採用率(inherited のうち reviewed_scoped の割合)を確認すること。出典: docs/reviews/g-a18-protect-independent-review.md「トレーラ v2 審査記録」重大-2・反対意見書①。"
+    status: pending
+
+  - id: decision-reviewed-sha
+    what: "承認記録(governance.decisions)に審査対象 SHA を持たせ、Approved トレーラの reviewed と突合する — reviewed の自己申告性の解消(独立審査 2026-08-04 重要-3)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "governance.decisions に審査対象 SHA を追加し A-18 の reviewed と突合する"
+      labels: [impl]
+      body: "様式 v2 の `reviewed=<sha40>` はトレーラの書き手の申告であり、『独立審査が実際にその SHA を見た』ことを A-18 は独立に確認できない。現在の機械検査は『reviewed が当該マージの第2親の祖先であること』までで、`reviewed=<マージ直前のブランチ head>` と書けば被覆は v1 と同じになる(独立役員審査 PoC 再現済み)。恒久対策は照合先を作ること: ①`governance.decisions`(または新テーブル)に審査対象コミット SHA 列を追加するマイグレーション(保護領域 — schema)、②独立審査エージェント/承認フロー(`src/ryza/governance/notices.py`・`src/ryza/bot/approvals.py`)が審査対象 SHA を記録する、③A-18-1 が `reviewed` と承認記録の SHA を突合し、不一致は承継の起点にしない(fail-safe)。②の記録主体が人間の手作業のままなら申告性は解消されないため、審査エージェントの出力から機械的に埋まる経路にすること。出典: docs/reviews/g-a18-protect-independent-review.md「トレーラ v2 審査記録」重要-3。"
+    status: pending
+
   - id: risk-limits-state-freshness-gate
     what: "ゲート G-10 の limits_state 鮮度検査(as_of が2営業日超なら fail-closed)or risk 段失敗時の urgent 化 — T-017(執行層)前に必須(独立役員審査 2026-08-03 T-015 条件)"
     conditions:

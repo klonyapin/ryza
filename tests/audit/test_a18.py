@@ -499,6 +499,58 @@ def test_reviewed_shas_rejects_short_sha():
     assert a18.reviewed_shas("docs: x\n\nApproved: https://x/1\n") == ((), None)
 
 
+def test_duplicate_reviewed_is_a_format_problem():
+    """**低-7**: 同一行の reviewed 重複は後勝ちにせず様式不備にする。
+
+    後勝ちだと `reviewed=zzz reviewed=<valid>` が不備検出を無言で回避できる。
+    """
+    msg = f"docs: x\n\nApproved: https://x/1 reviewed=zzz reviewed={'a' * 40}\n"
+    shas, problem = a18.reviewed_shas(msg)
+    assert shas == () and "複数" in problem
+
+
+def test_unknown_and_ignored_trailer_keys_are_warned():
+    """**低-10**: 綴り誤り・解釈されないキーは黙って v1 扱いにせず警告する。"""
+    warnings = a18.trailer_format_warnings(
+        f"docs: x\n\nApproved: https://x/1 reviewd={'a' * 40} mode=deemed おまけ\n"
+    )
+    assert any("未知キー 'reviewd='" in w for w in warnings)
+    assert any("'mode=' は A-18 では解釈されない" in w for w in warnings)
+    assert any("解釈できない語 'おまけ'" in w for w in warnings)
+    clean = f"docs: x\n\nApproved: https://x/1 reviewed={'a' * 40}\n"
+    assert a18.trailer_format_warnings(clean) == []
+
+
+def test_trailer_format_warnings_reach_notes(repo):
+    """様式警告は報告 notes に出る(コミット SHA 付き)。"""
+    r, since = repo
+    sha = _commit(
+        r, "docs/protected.md", "v2\n",
+        f"docs: 変更\n\nApproved: https://x/1 reviewd={'a' * 40}",
+    )
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since, verify_prs=False)
+    assert any("未知キー 'reviewd='" in n and sha[:12] in n for n in result["notes"])
+
+
+def test_reviewed_from_another_branch_is_a_format_problem(repo):
+    """**重要-3 PoC**: reviewed が当該 PR のブランチ(第2親)の祖先でなければ起点にしない。
+
+    他ブランチの SHA を書くと「reviewed 限定」と表示したまま実際には何も限定しない偽装に
+    なる。帰属を確認できない reviewed は様式不備として fail-safe で扱う。
+    """
+    r, since = repo
+    _git(r, "checkout", "-q", "-b", "other")
+    outside = _commit(r, "README.md", "other\n", "docs: 無関係ブランチのコミット")
+    _git(r, "checkout", "-q", "main")
+    evil, _merge = _merge_pr_with_evil_merge(
+        r, f"Merge pull request #9 from k/prfeature\n\n{APPROVED} reviewed={outside}"
+    )
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
+    assert inherited == []
+    assert evil[:12] in [v["commit"] for v in violations]
+    assert all("第2親" in v["reason"] for v in violations)
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # GitHub PR 実在照合(独立役員審査 2026-08-04 重大-1)
 #
@@ -508,6 +560,11 @@ def test_reviewed_shas_rejects_short_sha():
 # ────────────────────────────────────────────────────────────────────────────
 SLUG = "k/y"
 MERGED_PR = {"merged_at": "2026-08-04T00:00:00Z"}
+
+
+def _merged(merge_sha: str) -> dict:
+    """マージ済み PR の API 応答(``merge_commit_sha`` = 当該マージ)。"""
+    return {"merged_at": "2026-08-04T00:00:00Z", "merge_commit_sha": merge_sha}
 
 
 def _fake_api(prs: dict[int, dict], *, repo_ok: bool = True, error: str | None = None):
@@ -547,15 +604,48 @@ def test_nonexistent_pr_cannot_be_an_inheritance_origin(repo):
 
 
 def test_existing_pr_still_inherits(repo):
-    """実在しマージ済みの PR は従来どおり承継の起点になる(照合が正常系を壊さない)。"""
+    """実在しマージ済みで **merge_commit_sha が一致する** PR は従来どおり承継の起点になる。"""
+    r, since = repo
+    evil, merge = _merge_pr_with_evil_merge(
+        r,
+        f"Merge pull request #9 from k/prfeature\n\nApproved: https://github.com/{SLUG}/pull/9",
+    )
+    verifier = _verifier({9: _merged(merge)})
+    violations, inherited, _checked, _findings = _run_a181_pr(r, since, verifier)
+    assert violations == []
+    assert [i["commit"] for i in inherited] == [evil[:12]]
+    assert verifier.verified_count >= 1 and verifier.failed_open_count == 0
+
+
+def test_borrowed_pr_number_cannot_be_an_inheritance_origin(repo):
+    """**重大-1 PoC(番号流用)**: 実在しマージ済みの PR 番号を件名に流用した自作マージは
+    起点にならない。GitHub の merge_commit_sha は別のコミットを指すため帰属が破れる。
+    """
     r, since = repo
     evil, _merge = _merge_pr_with_evil_merge(
         r,
         f"Merge pull request #9 from k/prfeature\n\nApproved: https://github.com/{SLUG}/pull/9",
     )
-    violations, inherited, _checked, _findings = _run_a181_pr(r, since, _verifier({9: MERGED_PR}))
-    assert violations == []
-    assert [i["commit"] for i in inherited] == [evil[:12]]
+    # PR #9 は実在しマージ済みだが、そのマージコミットは別物(= 番号を借りただけ)。
+    verifier = _verifier({9: _merged("f" * 40)})
+    violations, inherited, _checked, _findings = _run_a181_pr(r, since, verifier)
+    assert inherited == []
+    assert evil[:12] in [v["commit"] for v in violations]
+    assert any("流用" in v["reason"] for v in violations)
+
+
+def test_missing_merge_commit_sha_fails_open(repo):
+    """API 応答に merge_commit_sha が無い場合は帰属を主張せず fail-open + 開示。"""
+    r, since = repo
+    _evil, _merge = _merge_pr_with_evil_merge(
+        r,
+        f"Merge pull request #9 from k/prfeature\n\nApproved: https://github.com/{SLUG}/pull/9",
+    )
+    verifier = _verifier({9: MERGED_PR})  # merged_at のみ
+    violations, inherited, _checked, _findings = _run_a181_pr(r, since, verifier)
+    assert violations == [] and len(inherited) == 1
+    assert verifier.failed_open_count >= 1
+    assert any("merge_commit_sha" in d for d in verifier.disclosures())
 
 
 def test_unmerged_pr_is_not_an_inheritance_origin(repo):
@@ -594,6 +684,13 @@ def test_api_error_fails_open_and_is_disclosed(repo):
     assert result["violations"] == []
     assert [i["commit"] for i in result["inherited"]] == [evil[:12]]
     assert any("fail-open した参照" in n for n in result["notes"])
+    # **重要-4**: 縮退した週は緑にしない。embed に「照合不能 N 件(要手動確認)」を出す。
+    assert result["pr_verification"]["failed_open"] >= 1
+    assert a18.has_findings(result)
+    embed = a18.build_alert_embed(result)
+    field = next(f for f in embed["fields"] if "PR 実在照合が成立していない" in f["name"])
+    assert "要手動確認" in field["value"]
+    assert "要対応" in embed["title"]
 
 
 def test_unreachable_repo_does_not_turn_404_into_violations(repo):
@@ -621,16 +718,43 @@ def test_a18_4_fake_pr_merge_subject_is_violation(repo):
     _commit(r, "README.md", "a\n", "feat: ブランチ作業")
     _git(r, "checkout", "-q", "main")
     _git(r, "merge", "--no-ff", "-q", "f1", "-m", "Merge pull request #999999 from k/f1")
+    merge = _git(r, "rev-parse", "HEAD").strip()
     violations, checked = a18.check_direct_pushes(
         r, since_commit=since, pr_verifier=_verifier({})
     )
     assert checked == 1 and len(violations) == 1
     assert "存在しない" in violations[0]["reason"]
-    # 実在すれば従来どおり違反にしない。
+    # 実在しマージ SHA も一致すれば従来どおり違反にしない。
     ok, _checked = a18.check_direct_pushes(
-        r, since_commit=since, pr_verifier=_verifier({999999: MERGED_PR})
+        r, since_commit=since, pr_verifier=_verifier({999999: _merged(merge)})
     )
     assert ok == []
+    # 番号を流用しただけ(merge_commit_sha が別)なら違反として出る。
+    borrowed, _checked = a18.check_direct_pushes(
+        r, since_commit=since, pr_verifier=_verifier({999999: _merged("e" * 40)})
+    )
+    assert len(borrowed) == 1 and "流用" in borrowed[0]["reason"]
+
+
+def test_a18_4_octopus_merge_is_violation(repo):
+    """**中-5**: 実在 PR 件名を付けた octopus マージ(親3)は A-18-4 でも違反。
+
+    GitHub の PR マージは常に親2。件名だけで通すと、複数ブランチの内容を1つの PR 番号で
+    main へ入れる経路が全変更 PR 化ルールを素通りする。
+    """
+    r, since = repo
+    _git(r, "checkout", "-q", "-b", "o1")
+    _commit(r, "docs/a.md", "a\n", "feat: o1")
+    _git(r, "checkout", "-q", "main")
+    _git(r, "checkout", "-q", "-b", "o2")
+    _commit(r, "docs/b.md", "b\n", "feat: o2")
+    _git(r, "checkout", "-q", "main")
+    _git(r, "merge", "--no-ff", "-q", "o1", "o2", "-m", "Merge pull request #9 from k/octopus")
+    merge = _git(r, "rev-parse", "HEAD").strip()
+    violations, _checked = a18.check_direct_pushes(
+        r, since_commit=since, pr_verifier=_verifier({9: _merged(merge)})
+    )
+    assert len(violations) == 1 and "octopus" in violations[0]["reason"]
 
 
 def test_pr_verifier_caches_and_counts():
@@ -639,21 +763,34 @@ def test_pr_verifier_caches_and_counts():
 
     def api_get(path: str) -> tuple[str, object]:
         calls.append(path)
-        return ("ok", MERGED_PR) if "/pulls/" in path else ("ok", {"full_name": SLUG})
+        return ("ok", _merged("a" * 40)) if "/pulls/" in path else ("ok", {"full_name": SLUG})
 
     verifier = a18.PRVerifier(slug=SLUG, api_get=api_get)
     assert verifier.check(9) == ("ok", None)
-    assert verifier.check(9) == ("ok", None)
+    assert verifier.check(9, "A" * 40) == ("ok", None)  # SHA 帰属は大文字小文字を問わない
     assert calls == [f"repos/{SLUG}", f"repos/{SLUG}/pulls/9"]
-    assert any("1 件を実在+マージ済み" in d for d in verifier.disclosures())
+    assert any("実在+マージ済み" in d for d in verifier.disclosures())
+    # エラーもキャッシュする(レート制限時に同じ番号を叩き直さない — 低-9)。
+    err_calls: list[str] = []
+
+    def failing(path: str) -> tuple[str, object]:
+        err_calls.append(path)
+        return ("ok", {"full_name": SLUG}) if "/pulls/" not in path else ("error", "HTTP 429")
+
+    v2 = a18.PRVerifier(slug=SLUG, api_get=failing)
+    assert v2.check(9)[0] == "unverifiable" and v2.check(9)[0] == "unverifiable"
+    assert err_calls.count(f"repos/{SLUG}/pulls/9") == 1
 
 
 def test_pr_verifier_scope_and_disabled_states():
     """他リポジトリの URL・PR でない URL は照合対象外。無効化時は unverifiable。"""
-    verifier = _verifier({9: MERGED_PR})
+    verifier = _verifier({9: _merged("a" * 40)})
     assert verifier.check_ref("https://github.com/other/repo/pull/9") == ("skip", None)
     assert verifier.check_ref("https://github.com/k/y/issues/9") == ("skip", None)
     assert verifier.check_ref(f"https://github.com/{SLUG}/pull/9") == ("ok", None)
+    # **中-6**: 自リポジトリ外の PR URL は「照合していない」ことを開示する(黙って通さない)。
+    assert any("自リポジトリ外の PR URL" in d for d in verifier.disclosures())
+    assert any("other/repo" in d for d in verifier.disclosures())
     disabled = a18.PRVerifier(slug=SLUG, api_get=_fake_api({}), enabled=False)
     assert disabled.check(9)[0] == "unverifiable"
     # slug が取れない(origin が GitHub でない)ときも fail-open。
@@ -687,11 +824,30 @@ def test_pr_verification_is_enabled_by_default():
 
 
 def test_run_a18_without_pr_verification_is_disclosed(repo):
-    """照合を止めた実行は「無効化されている」ことを notes に必ず出す(沈黙を作らない)。"""
+    """照合を止めた実行は「無効化されている」ことを notes に必ず出し、緑にもしない。"""
     r, since = repo
     result = a18.run_a18(r, since_commit=since, pr_since_commit=since, verify_prs=False)
     assert result["prs_verified"] is False
     assert any("GitHub PR 実在照合は無効化されている" in n for n in result["notes"])
+    # 緑は「全照合が成立した週」に限る(重要-4・反対意見書③)。
+    assert a18.pr_verification_degraded(result) and a18.has_findings(result)
+    embed = a18.build_alert_embed(result)
+    assert any("PR 実在照合が成立していない" in f["name"] for f in embed["fields"])
+
+
+def test_notes_are_chunked_not_truncated():
+    """注記は 1024 文字上限で切り捨てず複数 field に分割する(開示の無言消失を防ぐ — 低-8)。"""
+    notes = [f"注記その{i}: " + "あ" * 80 for i in range(20)]
+    chunks = a18._chunk_notes(notes)
+    assert len(chunks) > 1
+    assert all(len(c) <= 1024 for c in chunks)
+    for note in notes:
+        assert any(note in c for c in chunks)
+    result = _result([], [])
+    result["notes"] = notes
+    fields = a18.build_alert_embed(result)["fields"]
+    names = [f["name"] for f in fields if f["name"].startswith("注記")]
+    assert names[0] == "注記" and any("続き" in n for n in names[1:])
 
 
 # ────────────────────────────────────────────────────────────────────────────
