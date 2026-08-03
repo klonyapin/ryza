@@ -54,9 +54,9 @@ phases:
     summary: "コンプラゲート → リスク・執行 → FM 第一陣 → デモ売買開始"
     milestones:
       - { name: "T-014 コンプライアンスゲート", status: done }
-      - { name: "T-015 リスクエンジン", status: doing }
-      - { name: "T-016 デモ執行", status: doing }
-      - { name: "T-017 FM 第一陣(Ben・Jim)", status: todo, note: "指示書済み・未着手" }
+      - { name: "T-015 リスクエンジン", status: done, note: "PR #55" }
+      - { name: "T-016 デモ執行", status: done, note: "PR #56" }
+      - { name: "T-017 FM 第一陣(Ben・Jim)", status: doing, note: "実装済み・独立審査の是正中" }
       - { name: "デモ売買開始", status: todo }
 
   - id: p5
