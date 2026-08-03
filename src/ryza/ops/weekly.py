@@ -8,8 +8,9 @@
 4. 直近7日の commits / Issue 状態を集計し「週次ダイジェスト」Issue にコメント
 5. 冪等: 既発火(status が fired)はスキップ、当週ダイジェストは二重投稿しない
 6. DRY_RUN=1 で書き込みせずログのみ
-7. 形骸化の監査(05-governance §6-5): 確認付き決議(独立役員の批判を経ない決議)の
-   直近件数・連続数をダイジェストに1行載せ、連続が閾値に達したら警告する(opt-in)
+7. 形骸化の監査(決議精緻化審査 2026-08-03 の裁定による新設統制。05-governance §6-5 の
+   趣旨に連なる): 批判を経ない決議の直近件数・連続数をダイジェストに1行載せ、連続または
+   累積が閾値に達したら警告する(opt-in)
 
 条件エバリュエータ(reminders.yaml v2):
   date_after / issue_label_open / task_file_glob / bq_table_missing
@@ -244,7 +245,7 @@ def find_or_create_digest_issue(client: GitHubClient) -> dict[str, Any] | None:
 # A-18 監査の実行状態(未配線時の既定)。ダイジェストに必ず1行載せ、沈黙を多義的にしない。
 A18_STATUS_UNWIRED = "スキップ(A18_REPO_PATH 未配線)"
 
-# 決議の形骸化監査(05-governance §6-5)の実行状態(未配線時の既定)。A-18 と同じく
+# 決議の形骸化監査の実行状態(未配線時の既定)。A-18 と同じく
 # **必ず1行載せる**: 「アラートが無い」と「そもそも見ていない」を沈黙で同一視させない。
 RESOLUTION_STATUS_UNWIRED = "スキップ(BOARDROOM_AUDIT 未配線)"
 
@@ -280,7 +281,7 @@ def build_digest(
     # A-18 監査の実行状態(実行/スキップ(未配線)/失敗)は必ず明記する(独立役員審査条件)。
     lines.append(f"### A-18 監査: {a18_status}")
     lines.append("")
-    # 形骸化の監査(05-governance §6-5): 確認付き決議の直近件数・連続数。
+    # 形骸化の監査: 批判を経ない決議の直近件数・連続数(05 §6-5 の趣旨に連なる新設統制)。
     lines.append(f"### 決議の批判経由: {resolution_status}")
     return "\n".join(lines)
 
@@ -384,12 +385,14 @@ def run_a18_if_configured(*, dry_run: bool) -> str:
 
 
 def resolution_audit_status() -> str:
-    """確認付き決議(批判を経ない決議)の直近件数・連続数を1行で返す(opt-in)。
+    """批判を経ない決議(確認付き+判定不能)の直近件数・連続数を1行で返す(opt-in)。
 
-    05-governance §6-5(形骸化の防止)の監査。1件ごとの摩擦
+    決議精緻化審査(2026-08-03)の裁定による新設統制で、05-governance §6-5(形骸化の
+    防止)が挙げる指標そのものではなくその趣旨に連なる同型の指標である。1件ごとの摩擦
     (``boardroom.CriticAbsentError`` と UI の明示確認)は「毎回チェックを外す」運用には
-    無力なので、**列として**見る。連続が閾値
-    (``boardroom.CONFIRMATION_STREAK_ALERT``)に達した週は行頭が ⚠ になる。
+    無力なので、**列として**見る。連続が ``boardroom.CONFIRMATION_STREAK_ALERT`` 件に
+    達するか、走査窓内の累積が ``boardroom.CONFIRMATION_COUNT_ALERT`` 件に達した週は
+    行頭が ⚠ になる(交互に確認を外す運用は連続数だけでは検出できない)。
 
     DB(``governance.minute_resolutions``)を読むため、DB へ届く実行環境
     (GCE VM 等)で ``BOARDROOM_AUDIT=1`` を設定したときだけ走る。現行の Cloud Run 版

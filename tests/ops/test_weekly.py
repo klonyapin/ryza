@@ -381,7 +381,7 @@ def test_run_a18_if_configured_failure_is_reported(monkeypatch, tmp_path):
     assert status.startswith("失敗:")
 
 
-# ── 決議の形骸化監査(05-governance §6-5)────────────────────────────────────
+# ── 決議の形骸化監査(05-governance §6-5 の趣旨に連なる新設統制)──────────────
 def test_digest_always_contains_resolution_status_line():
     """未配線でも「決議の批判経由」行は必ず載る(見ていない事実も報告する)。"""
     digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
@@ -394,7 +394,10 @@ def test_digest_always_contains_resolution_status_line():
 def test_digest_carries_resolution_alert():
     digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
     client = StubClient(issues=[digest_issue])
-    status = "⚠ 形骸化の疑い: 直近 3 件中 3 件が確認付き(批判を経ない決議)/ 連続 3 件"
+    status = (
+        "⚠ 形骸化の疑い(連続 3 件以上): 直近 3 件中 3 件が批判を経ない決議"
+        "(確認付き 3 / 判定不能 0)/ 連続 3 件"
+    )
     assert weekly.post_digest(client, NOW, fired=[], resolution_status=status) is True
     assert f"### 決議の批判経由: {status}" in client.comments_posted[0][1]
 
