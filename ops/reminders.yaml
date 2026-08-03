@@ -881,8 +881,8 @@ reminders:
       type: issue_create
       title: "ledger.closing: reclose_stale の stale 検出を枝刈りで定数時間に近づける"
       labels: [impl, ledger]
-      body: "`ledger.closing.reclose_stale` の stale 検出(`_STALE_SNAPSHOTS_SQL`)は、スナップショット 1 日ごとに `SELECT max(je.entry_id) ... WHERE book_id = %s AND entry_date <= snap.snap_date` という相関サブクエリを回すため、コストが スナップショット数 × 仕訳数 で伸びる。**索引では直らないことが実測で確定した**(2026-08-04・migrations/0027 の検証): プランナはこのサブクエリを『主キーの逆走査 + フィルタ + LIMIT 1』(見積りコスト 0.43)と評価するので、`(book_id, entry_date)`・`(book_id, entry_date) INCLUDE (entry_id)`・`(book_id, entry_date, entry_id)` のいずれを置いても選ばれず、実行時間が変わらない(規模A = 仕訳 31,413 行 で 778.6 ms → 766.6 ms、規模B = 仕訳 314,013 行・スナップショット 785 日 で 8,371.1 ms → 8,184.6 ms。どちらも誤差で、`pg_stat_user_indexes.idx_scan` は 0)。実測の伸び方も理論どおりで、行数 10 倍で所要 10.7 倍(778.6 ms → 8,371.1 ms)。是正は再々審査 新-5 が併記していた**枝刈り**である: 全スナップショットの `stored_watermark` の最大値より後ろの `entry_id` を持つ最古の `entry_date` を 1 回だけ求め(実測 0.57 ms)、その日以降のスナップショットだけを stale 候補にする。遅延仕訳が無い通常日は候補ゼロになり、検出は事実上ゼロコストになる。**注意点**: `stored_watermark` が NULL のスナップショット(本機能より前に書かれた日)は判定材料が無く現行実装が fail-safe で stale 扱いにしているので、枝刈りでもこの日を落としてはならない。**src/ryza/ledger/ は会計エンジン = 保護領域のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 新-5、`migrations/0027_query_indexes.sql` の **索引2(`ledger.journal_entries (book_id, entry_date)`)の「効かない用途」節**(『入れなかったもの』節ではない — 索引2 自体は別根拠で採用済み)、`docs/reviews/0027-indexes-independent-review.md` 中-3。"
-    status: pending
+      body: "`ledger.closing.reclose_stale` の stale 検出(`_STALE_SNAPSHOTS_SQL`)は、スナップショット 1 日ごとに `SELECT max(je.entry_id) ... WHERE book_id = %s AND entry_date <= snap.snap_date` という相関サブクエリを回すため、コストが スナップショット数 × 仕訳数 で伸びる。**索引では直らないことが実測で確定した**(2026-08-04・migrations/0027 の検証): プランナはこのサブクエリを『主キーの逆走査 + フィルタ + LIMIT 1』(見積りコスト 0.43)と評価するので、`(book_id, entry_date)`・`(book_id, entry_date) INCLUDE (entry_id)`・`(book_id, entry_date, entry_id)` のいずれを置いても選ばれず、実行時間が変わらない(規模A = 仕訳 31,413 行 で 778.6 ms → 766.6 ms、規模B = 仕訳 314,013 行・スナップショット 785 日 で 8,371.1 ms → 8,184.6 ms。どちらも誤差で、`pg_stat_user_indexes.idx_scan` は 0)。実測の伸び方も理論どおりで、行数 10 倍で所要 10.7 倍(778.6 ms → 8,371.1 ms)。是正は再々審査 新-5 が併記していた**枝刈り**である: 全スナップショットの `stored_watermark` の最大値より後ろの `entry_id` を持つ最古の `entry_date` を 1 回だけ求め(実測 0.57 ms)、その日以降のスナップショットだけを stale 候補にする。遅延仕訳が無い通常日は候補ゼロになり、検出は事実上ゼロコストになる。**注意点**: `stored_watermark` が NULL のスナップショット(本機能より前に書かれた日)は判定材料が無く現行実装が fail-safe で stale 扱いにしているので、枝刈りでもこの日を落としてはならない。**src/ryza/ledger/ は会計エンジン = 保護領域のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 新-5、`migrations/0027_query_indexes.sql` の **索引2(`ledger.journal_entries (book_id, entry_date)`)の「効かない用途」節**(『入れなかったもの』節ではない — 索引2 自体は別根拠で採用済み)、`docs/reviews/0027-indexes-independent-review.md` 中-3。 **完了(2026-08-04)**: `_STALE_SNAPSHOTS_SQL` を書き換えた。**ただし本項目が案として挙げた『最大水位より後ろの entry_id を持つ最古の entry_date で枝刈り』は採用していない — 検出漏れを起こすことが反例で確定したためである**。反例: 9/1 の締め(水位 5)の後に 9/1 付けの仕訳(entry_id 50)が立ち、その状態で 9/2 の締めが走る(水位 100)。9/1 は `50 > 5` で stale だが、最大水位 100 より後ろの仕訳は無いので候補が空になり、遅延仕訳を取り込んだ日が**永久に再締めされない**(本機能が存在する理由そのものを壊す)。同じ形で健全にするには閾値を水位の**最小値**にするしかなく、最小値は最古のスナップショットの水位なので枝刈りが効かない。代わりに採ったのは**同値な分解**である: `max(entry_id) WHERE entry_date <= d` を『日ごとの max の running max』に分解し(`entry_day` CTE)、日ごと 1 回の集約に落とす。相関サブクエリはスナップショット数 × 仕訳数 だったが、分解後は 1 パス + 日数×日数 の小さな走査になる。建玉性(`position_changing_late`)は `EXISTS(∃e: date<=d ∧ id>W)` を `max{id} > W` に書き換えたうえで、**stale と判定された日にだけ**必要な範囲を集約する(`pos_day` は `entry_id > min(stale の水位)` かつ `entry_date <= max(stale の日)` で刈る — これは同値性を壊さない下限であり、stale ゼロなら走査自体が起きない)。実測(0027 と同じ合成データ・中央値7回): 規模A 788.0 → 28.9 ms(27x)、規模B 8,558.5 → 46.1 ms(**186x**)。全日が stale の最悪ケースでも 規模A 2,950.7 → 83.6 ms、規模B 53,817.9 → 150.3 ms(358x)。等価性は `tests/ledger/test_stale_query_rewrite.py`(旧 SQL を凍結した対照テスト17件・シード固定のランダム化総当たりを含む)が固定する — 上の反例も対照テストとして残した。"
+    status: done # 2026-08-04 実装: _STALE_SNAPSHOTS_SQL を同値分解で書き換え(規模B 8,558→46 ms)。案の「最大水位で枝刈り」は検出漏れの反例が出たため不採用・反例をテスト化
 
   - id: navflow-equity-flow-query-rewrite
     what: "navflow の出資フロー抽出クエリを書き換える(索引が効かない理由が見積り誤差にあることが実測で確定した)"
@@ -893,7 +893,19 @@ reminders:
       type: issue_create
       title: "risk.navflow: NAV_FLOW_SQL の flow CTE をプランナが絞れる形に書き換える"
       labels: [impl, risk]
-      body: "`ryza.risk.navflow.NAV_FLOW_SQL` の flow CTE は `ledger.journal_lines` を `ledger.accounts` と結合して `category='equity' AND account_id <> 'retained'` の科目に絞るが、**プランナは結合前に『どの account_id が equity か』を知れない**ため、journal_lines 側の行数を平均選択度で見積もる(実測: 真値 13 行に対し見積り 6,107 行)。結果としてどんな索引を置いてもハッシュ結合＋逐次走査が選ばれ、`journal_lines` の全走査が消えない(2026-08-04 の migrations/0027 検証: 規模B で前後とも 58〜61 ms、プラン不変)。結合順を強制すると 2.4x 速い(規模A: 10.5 ms → 4.4 ms、共有バッファ 1,102 → 96)ので、**是正は索引ではなくクエリの書き換えである**。案: 対象科目を先に確定させる(`WITH eq AS (SELECT account_id FROM ledger.accounts WHERE book_id = %(book)s AND category='equity' AND account_id <> 'retained')` を MATERIALIZED にして `jl.account_id IN (SELECT ...)` にする、あるいは LATERAL で科目ごとに journal_lines を引く)。**科目リストを SQL にハードコードしてはならない** — accounts が正であり、二重管理は帳簿の定義がコード側にずれる典型経路である。現状の緩和は dashboard 側の `@st.cache_data(ttl=60)` のみ。**src/ryza/risk/ は保護領域のため独立役員審査+みなし承認の手続を経ること。** 出典: `migrations/0027_query_indexes.sql` の「入れなかったもの」節の **(B) ryza.risk.navflow.NAV_FLOW_SQL 向けの索引**、および `docs/reviews/0027-indexes-independent-review.md`。"
+      body: "`ryza.risk.navflow.NAV_FLOW_SQL` の flow CTE は `ledger.journal_lines` を `ledger.accounts` と結合して `category='equity' AND account_id <> 'retained'` の科目に絞るが、**プランナは結合前に『どの account_id が equity か』を知れない**ため、journal_lines 側の行数を平均選択度で見積もる(実測: 真値 13 行に対し見積り 6,107 行)。結果としてどんな索引を置いてもハッシュ結合＋逐次走査が選ばれ、`journal_lines` の全走査が消えない(2026-08-04 の migrations/0027 検証: 規模B で前後とも 58〜61 ms、プラン不変)。結合順を強制すると 2.4x 速い(規模A: 10.5 ms → 4.4 ms、共有バッファ 1,102 → 96)ので、**是正は索引ではなくクエリの書き換えである**。案: 対象科目を先に確定させる(`WITH eq AS (SELECT account_id FROM ledger.accounts WHERE book_id = %(book)s AND category='equity' AND account_id <> 'retained')` を MATERIALIZED にして `jl.account_id IN (SELECT ...)` にする、あるいは LATERAL で科目ごとに journal_lines を引く)。**科目リストを SQL にハードコードしてはならない** — accounts が正であり、二重管理は帳簿の定義がコード側にずれる典型経路である。現状の緩和は dashboard 側の `@st.cache_data(ttl=60)` のみ。**src/ryza/risk/ は保護領域のため独立役員審査+みなし承認の手続を経ること。** 出典: `migrations/0027_query_indexes.sql` の「入れなかったもの」節の **(B) ryza.risk.navflow.NAV_FLOW_SQL 向けの索引**、および `docs/reviews/0027-indexes-independent-review.md`。 **完了(2026-08-04)**: flow CTE を書き換えた。対象科目を `eq AS MATERIALIZED` で先に確定させ、`CROSS JOIN LATERAL (... OFFSET 0)` で科目ごとに `journal_lines` を引く(`OFFSET 0` は**必須の最適化フェンス** — 外すとプランナが LATERAL を引き上げて旧形と同じハッシュ結合+逐次走査に戻る)。科目リストはハードコードせず `ledger.accounts` が正のまま。実測(0027 と同じ合成データ・中央値7回): **規模A は NAV_FLOW_SQL 全体で 9.1 → 5.3 ms**、flow CTE 単体では実行 11.0 → 3.8 ms・共有バッファ 979 → 341 で、狙いどおり `journal_lines` の全走査が索引走査に変わった。**規模B は 49.7 → 49.7 ms で改善しなかった**(共有バッファは 9,637 → 3,286 に減ったが、残る支配項が `journal_entries` 側のハッシュ結合(314,002 行の build が work_mem 4MB を超えて temp に溢れる)に移っただけだった)。原因は本項目が指摘した見積り誤差そのもので、`l.account_id = eq.account_id` の右辺が実行時まで不明なため `journal_lines` 側が 209,335 行(真値 2 行)と見積もられ、ネストループが選ばれない。ネストループを強制する形(二段 LATERAL + OFFSET 0)は I/O は最適(共有バッファ 13)だが、同じ誤見積りが**総コストを 1.5M に膨らませて JIT を起動する**ため実測は逆に遅い(規模B 57.9 ms。`SET jit = off` なら 0.68 ms)。根治は科目リストを**クエリパラメータで渡す**こと(実測 規模B 0.66 ms = 75x)だが、これは読み出しが 2 文になり navflow の「1 クエリ」設計性質(独立審査 中-6)に触れるため、本 PR では採らず `navflow-equity-account-parameterization` として別項目に登録した。等価性は `tests/risk/test_navflow_query_rewrite.py`(旧 SQL を凍結した対照テスト16件・シード固定のランダム化総当たりを含む)が固定する。"
+    status: done # 2026-08-04 実装: eq CTE + LATERAL(OFFSET 0)で journal_lines の全走査を除去(規模A 9.1→5.3 ms)。規模B は journal_entries 側の誤見積りが残り横ばい — 根治案は navflow-equity-account-parameterization へ
+
+  - id: navflow-equity-account-parameterization
+    what: "navflow の equity 科目リストをクエリパラメータで渡すか決める(規模B の残り — 1 クエリ性質とのトレードオフ)"
+    conditions:
+      - type: date_after
+        date: "2026-09-15"
+    action:
+      type: issue_create
+      title: "risk.navflow: equity 科目をパラメータで渡すか(2 文化)を設計判断する"
+      labels: [design, risk]
+      body: "`navflow-equity-flow-query-rewrite`(2026-08-04 完了)で flow CTE を `eq` CTE + LATERAL に書き換え、`journal_lines` の全走査は消えた(規模A 9.1 → 5.3 ms)。**しかし規模B(仕訳 314,002 行・明細 628,004 行)では 49.7 → 49.7 ms で改善しなかった** — 支配項が `journal_entries` とのハッシュ結合に移り、その build(314,002 行)が work_mem 4MB を超えて temp ファイルへ溢れるためである。根本原因は同じで、`l.account_id = eq.account_id` の右辺が実行時まで不明なので `journal_lines` 側が 209,335 行(真値 2 行)と見積もられ、ネストループ+索引走査が選ばれない。**単一クエリの範囲では上限に達している**: ネストループを強制する形(二段 LATERAL + `OFFSET 0`)は共有バッファ 13 まで落ちるが、同じ誤見積りが総コストを 1.5M に膨らませて JIT(`jit_above_cost=100000`・`jit_inline/optimize_above_cost=500000`、本番 PostgreSQL 17.10 は既定で `jit=on`)を起動し、コンパイルだけで 55 ms 掛かって実測は逆に遅い(`SET jit = off` なら 0.68 ms)。**根治は科目リストをプランナに見せること** — `ledger.accounts` から equity 科目を先に 1 文で読み、`jl.account_id = ANY(%(accounts)s)` として渡すと MCV 統計が効き、規模B で **0.66 ms(75x)**・共有バッファ 8 になる(実測済み)。科目リストの正は `ledger.accounts` のままなのでハードコード禁止には抵触しない。**判断が要るのは 1 クエリ性質**である: navflow は『NAV 点と pending が同一スナップショットから出ること』を 1 クエリで保証している(独立審査 中-6)。科目リストの読み出しを分けても NAV 点と pending は依然 1 クエリで出るためこの保証自体は壊れないが、READ COMMITTED では 2 文の間に `ledger.accounts` が変わりうる(実際には accounts の変更は migration = 保護領域の事象であり実行時には起きない)。**決めること**: (a) パラメータ化して 2 文にする(規模B 75x・`NAV_FLOW_SQL` にパラメータ追加という API 変更を伴う)、(b) 現状維持(規模B は横ばいのまま。dashboard 側は `@st.cache_data(ttl=60)`)、(c) 規模B に達する見込み時期まで先送りする(現行の実データは明細数千行規模)。**src/ryza/risk/ は保護領域のため独立役員審査+みなし承認の手続を経ること。** 出典: 本ファイル `navflow-equity-flow-query-rewrite` の完了注記、`migrations/0027_query_indexes.sql` の「入れなかったもの」(B)、`src/ryza/risk/navflow.py` の `NAV_FLOW_SQL` コメント。"
     status: pending
 
   - id: meta-runs-status-check
@@ -985,7 +997,15 @@ reminders:
       title: "鮮度判定の区間を独立役員の入力窓に揃える(長い会議で決定発言が窓外になる)"
       labels: [governance]
       body: "boardroom.minute_critic_recency は議事録**全体**の話者列で鮮度を判定するが、独立役員が実際に読むのは直近 TRANSCRIPT_WINDOW=30 発言である(speak / route_speakers)。決議精緻化審査 2026-08-03 懸念3 は、43 発言の会議で『鮮度あり』と判定されつつ決定発言(実弾・¥100万 を含む代表発言)が独立役員の入力窓の外にある状況を実測した。すなわち『最後の代表発言より後に独立役員が発言した』ことは、その独立役員が**決定そのものを読んだ**ことを意味しない。対処の選択肢: (a) 鮮度の判定区間を入力窓(直近 N 発言)に揃える、(b) 決議本文または直近の代表発言が mentions_important_decision に当たるとき、窓内での批判を追加で要求する、(c) 長い会議では議事録を分割保存する運用にする。(b) は重要決定にだけ摩擦を集中できる点で筋が良いが、決議本文は代表が書く自由文であり語彙ガードの弱点(言い換え)をそのまま引き継ぐことに注意。いずれを選んでもテストで固定すること。"
-    status: pending
+    # 2026-08-04 実装(branch boardroom-residual): 選択肢 (b) の系として**ガード検出発言の
+    # ピン留め**を採った。判定区間を窓へ揃える (a) は「窓外の決定が批判なしで通る」経路を
+    # 残すため退けた。boardroom.pinned_decision_turns が、決定論ガードと同じ区間(前回の
+    # 独立役員発言以降)の代表発言のうち窓外に落ちたものを最大 MAX_PINNED_TURNS 件、
+    # 「過去の関連発言」として独立役員のプロンプト先頭へ戻す。窓は 30 発言のまま。
+    # 回帰: tests/governance/test_boardroom.py の 43 発言ケース(審査の実測長)。
+    # 2026-08-04 残懸念審査: 上限で本命が押し出されうる点を指摘され、省略件数の明示
+    # (fail-loud)を追加。選択規則の精緻化は boardroom-pinning-selection で後続。
+    status: done
 
   - id: speaker-label-stability
     what: "話者ラベルの改称で過去議事録の鮮度判定が反転する問題を塞ぐ(決議精緻化審査 懸念6)"
@@ -997,6 +1017,39 @@ reminders:
       title: "議事録の話者復元をラベル辞書から切り離す(ラベル凍結または構造化保存)"
       labels: [governance]
       body: "boardroom.parse_speaker_sequence は表示用ラベル辞書 _SPEAKER_LABELS の逆写像で議事録本文から話者を復元する。決議精緻化審査 2026-08-03 懸念6 は、『代表』→『代表取締役』のような表示上の改称だけで、同一の過去本文の判定が『要確認』→『鮮度あり』へ**反転**する(fail-open)ことを実測した。証憑(minutes.body_md)は追記オンリーで書き換えられないのに、その解釈がコード側の可変な辞書に依存している。対処の選択肢: (a) 復元専用のラベル表を凍結し(過去の表記も含む追記オンリーの表として持つ)、表示用辞書と分離した上で回帰テストで固定する、(b) 議事録保存時に話者列を構造化して残す(governance.minutes への列追加 = 保護領域の migration。本文と冗長になるが解釈をコードから外せる)、(c) 本文の話者行に役職キー(英字)を機械可読な形で併記する。(b) が最も堅いが保護領域の手続を要する。いずれの場合も、既存行(旧表記)の解釈が変わらないことをテストで固定すること。"
+    # 2026-08-04 実装(branch boardroom-residual): 選択肢 (c)+(a)。議事録の話者行を
+    # `**[cio]** CIO: …` 形式にし、話者列の復元は**役職キーだけ**で行う(表示ラベルを読まない)。
+    # 旧書式の本文は凍結表 _LEGACY_LABEL_TO_SPEAKER(表示辞書と独立・追記オンリー)で復元し、
+    # どちらでも復元できなければ従来どおり判定不能=NULL の fail-closed。(b) のスキーマ変更は
+    # 保護領域の migration を要するため採らなかった(本文だけで解釈が閉じるなら列は不要)。
+    # 回帰: 表示ラベルを改称したソースを別インスタンスとして読み込み、同一の過去本文の
+    # 判定が反転しないことを実測で固定(審査の実測ケース)。
+    # 2026-08-04 残懸念審査 R-1/R-2 の是正を同ブランチで反映: 新旧書式の混在・構造を
+    # 伴わない新書式行は判定不能(fail-closed)、無害化のキー集合も凍結集合との和にした。
+    status: done
+
+  - id: boardroom-pinning-selection
+    what: "ピン留めの選択規則を精緻化する(残懸念審査 懸念3 の恒久是正)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "boardroom: ピン留めの選択を『新しい順』から検出寄与順へ改める"
+      labels: [governance]
+      body: "boardroom.pinned_decision_turns は窓外の代表発言を **新しい順** に MAX_PINNED_TURNS=5 件まで採る。残懸念審査(2026-08-04)は、決定発言(`実弾…¥100万`)の後に単位付きの雑音(「あとN%上げたい」等)が5件続くと本命がピン留めから落ちることを実測した。連結検出フォールバックはさらに弱く、候補が区間内の窓外代表発言**全件**になるため分割議題も押し出される。暫定是正として省略件数をプロンプトに明示する fail-loud を入れた(独立役員が部分集合と気付ける)が、選択規則そのものは未是正である。案: (a) 検出語・金額表記に**個別に**一致した発言を優先し、連結でしか一致しない発言は後順位にする、(b) 一致した語の種類(3専決キーワード > 保護領域 > 金額)で重み付けする、(c) 件数でなく文字数予算で頭打ちにする。いずれもテストで固定すること。出典: docs/reviews/boardroom-meeting-independent-review.md 残懸念2件審査記録。"
+    status: pending
+
+  - id: boardroom-sanitize-fullwidth
+    what: "sanitize_speech の全角・NBSP 変種のすり抜けと digest 側のフェンス欠如(残懸念審査 R-3)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "boardroom: 全角括弧・NBSP・順序付きリストの詐称行を無害化し、要約入力にもフェンスを付ける"
+      labels: [governance]
+      body: "残懸念審査(2026-08-04)の実測: `**［cio］**`(全角括弧)・全角空白/NBSP インデント・順序付きリスト `1. ` で始まる話者行は sanitize_speech が引用化しない。parse_speaker_sequence は ASCII 厳密一致のため**話者列は汚染されない**(fail-closed)が、role_digest_input はフェンス無しの Markdown を要約 LLM に渡し、_DIGEST_SYSTEM は「`**[役職キー]** 表示名:` で始まる行だけが正」と教えるため、人と LLM の目には全角版が真正の発言に見える(再確認審査 懸念B と同型の残穴)。是正案: (a) 無害化の前に全角括弧・全角空白・NBSP を正規化する(NFKC 相当の限定的な写像。本文そのものは書き換えず判定用にだけ正規化するか、引用化して残すかを決めること)、(b) 行頭マーカーに順序付きリストを加える、(c) role_digest_input の出力も _conversation_block と同じフェンスで囲む。証憑(minutes.body_md)の見た目を変える変更を含むため、既存本文の解釈が変わらないことをテストで固定すること。出典: docs/reviews/boardroom-meeting-independent-review.md 残懸念2件審査記録 R-3。"
     status: pending
 
   - id: mtm-bar-arrival-revisit
@@ -1009,4 +1062,16 @@ reminders:
       title: "MTM 再適用: 当日バーが後から取り込まれた日の自動再訪"
       labels: [impl, ledger]
       body: "MTM リプレイ審査(新-6 裁定)で門を「その日のバー」に限定した結果、当日バー欠測のまま再締めされた日は以後 stale でないため、後からバーが取り込まれても自動では再訪されない(mtm_pending のまま取得原価で恒久)。安全側の縮退だが新-3 の害が当該日に限り残る。是正案: 再締めの stale 検出に「mtm_pending かつ当日バーが現在は存在する日」を加える(水位方式と同型の1クエリ)。ledger は保護領域 — 独立審査手続を要する。"
+    status: pending
+
+  - id: protect-equivalence-tests
+    what: "クエリ書き換えの対照テスト2ファイルを invariant_tests として保護領域登録"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "protected_areas: 等価性対照テスト(stale/navflow)の登録"
+      labels: [governance]
+      body: "クエリ書き換え審査(査-1): tests/ledger/test_stale_query_rewrite.py と tests/risk/test_navflow_query_rewrite.py は会計・リスクの同値性を固定する対照だが protected_areas 外のため、意味変更時に凍結 SQL を審査なしで書き換えて対照を無効化できる。tests/test_ips.py の先例どおり area: invariant_tests で登録する(governance.yaml は L1 — 次回 L1 バッチ)。"
     status: pending

@@ -55,17 +55,54 @@ PENDING_MATERIALITY_NAV = Decimal("0.005")
 #: 外部フローではないため除外する。各フロー日は「その日以降の最初の snap_date」へ
 #: 帰属させ、同日仕訳を flow_eop、それ以前(= 前の snap_date より後)を flow_bop へ
 #: 振り分ける。``kind='pending'`` の行 = 系列最終日より後のフロー(未反映)。
+#:
+#: **形(2026-08-04 の書き換え — reminders navflow-equity-flow-query-rewrite)**。意味は
+#: 変えていない。旧形は ``journal_lines`` を ``accounts`` に結合して
+#: ``category='equity'`` に絞っていたため、プランナは結合前に「どの account_id が equity か」を
+#: 知れず、``journal_lines`` 側の行数を平均選択度で見積もっていた(実測: 真値 13 行に対し
+#: 見積り 6,107 行)。結果としてどんな索引を置いてもハッシュ結合+逐次走査になり、索引では
+#: 直らないことが確定している(``migrations/0027_query_indexes.sql`` の「入れなかったもの」(B))。
+#: 新形は対象科目を ``eq`` CTE で**先に確定**させ、``CROSS JOIN LATERAL`` で科目ごとに
+#: ``journal_lines`` を引く。``ledger.accounts`` の主キーは ``(book_id, account_id)`` なので
+#: 旧形の結合は 1:1 であり、科目ごとの LATERAL に分解しても行の重複も脱落も起きない
+#: (``jl.book_id = %(book)s`` を等値で固定しているため、旧形の結合条件
+#: ``a.book_id = jl.book_id`` は ``a.book_id = %(book)s`` と同値)。
+#: **``OFFSET 0`` は必須の最適化フェンスである** — 外すとプランナが LATERAL を引き上げ、
+#: 旧形と同じ「``journal_lines`` 全走査 + ハッシュ結合」に戻る(実測で確認済み)。
+#: **科目リストはハードコードしない** — ``accounts`` が正であり、二重管理は帳簿の定義が
+#: コード側にずれる典型経路である。新旧の結果一致は
+#: ``tests/risk/test_navflow_query_rewrite.py`` が対照テストで固定している。
+#:
+#: 実測(0027 と同じ合成データ・中央値7回): 規模A は本 SQL 全体で 9.1 → 5.3 ms、
+#: flow CTE 単体で実行 11.0 → 3.8 ms・共有バッファ 979 → 341(狙いどおり全走査が索引走査に
+#: 変わった)。**規模B(明細 628,004 行)は 49.7 → 49.7 ms で横ばい**であり、共有バッファは
+#: 9,637 → 3,286 に減ったものの支配項が ``journal_entries`` とのハッシュ結合へ移っただけである。
+#: これは単一クエリの上限で、原因は同じ見積り誤差(``l.account_id = eq.account_id`` の右辺が
+#: 実行時まで不明なので ``journal_lines`` 側が 209,335 行 = 真値 2 行と見積もられる)。
+#: ネストループを強制する形(二段 LATERAL)は I/O は最適(共有バッファ 13)だが、同じ誤見積りが
+#: 総コストを 1.5M に膨らませて JIT を起動するため実測は逆に遅い(規模B 57.9 ms /
+#: ``jit=off`` なら 0.68 ms)。根治は科目リストを**クエリパラメータで渡す**ことだが
+#: (実測 規模B 0.66 ms)、読み出しが 2 文になり下の「1 クエリ」性質(独立審査 中-6)に
+#: 触れるため設計判断として ``ops/reminders.yaml`` の
+#: ``navflow-equity-account-parameterization`` に分離した。
 NAV_FLOW_SQL = """
-WITH flow AS (
-    SELECT je.entry_date AS entry_date, sum(jl.credit - jl.debit) AS amount
-    FROM ledger.journal_lines jl
-    JOIN ledger.journal_entries je ON je.entry_id = jl.entry_id
-    JOIN ledger.accounts a
-      ON a.book_id = jl.book_id AND a.account_id = jl.account_id
-    WHERE jl.book_id = %(book)s
+WITH eq AS MATERIALIZED (
+    SELECT a.account_id
+    FROM ledger.accounts a
+    WHERE a.book_id = %(book)s
       AND a.category = 'equity' AND a.account_id <> 'retained'
-    GROUP BY je.entry_date
-    HAVING sum(jl.credit - jl.debit) <> 0
+), flow AS (
+    SELECT f.entry_date AS entry_date, sum(f.amount) AS amount
+    FROM eq
+    CROSS JOIN LATERAL (
+        SELECT je.entry_date, l.credit - l.debit AS amount
+        FROM ledger.journal_lines l
+        JOIN ledger.journal_entries je ON je.entry_id = l.entry_id
+        WHERE l.book_id = %(book)s AND l.account_id = eq.account_id
+        OFFSET 0
+    ) f
+    GROUP BY f.entry_date
+    HAVING sum(f.amount) <> 0
 ), attributed AS (
     SELECT f.entry_date, f.amount, (
                SELECT min(s.snap_date) FROM ledger.nav_snapshots s
