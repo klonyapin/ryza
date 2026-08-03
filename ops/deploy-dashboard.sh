@@ -23,8 +23,10 @@
 #   - **DB は 2 ロール構成**(重大-2 / 反対意見書2の代替案):
 #       ryza_dashboard … 読取専用。ryza のメンバーシップを持たず(IN ROLE 廃止)、
 #                        全スキーマに SELECT のみ+default_transaction_read_only = on。
-#       ryza_boardroom … 役員室の書込専用。governance.minutes / minute_resolutions /
-#                        stances の INSERT と meta.runs の INSERT/UPDATE のみ。
+#       ryza_boardroom … 役員室・開発室の書込専用。governance.minutes /
+#                        minute_resolutions / stances の INSERT、meta.runs の
+#                        INSERT/UPDATE、ops.org_icon_overrides(0020)と
+#                        ops.dev_chat(0024・SELECT と列レベル INSERT (sender, body) のみ)。
 #     それぞれ別 Secret の接続 URL を別 env で Cloud Run に注入する。
 #   - **既存サービスを壊さない**: bot/daily は postgresql://ryza:ryza@localhost のまま。
 #     role `ryza` のパスワードは変更しない(変更すると localhost の scram 認証で bot/daily が
@@ -284,6 +286,26 @@ SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON ops.org_icon_overrides TO
 SELECT format('GRANT INSERT ON ops.org_icon_override_log TO %I', '__BR_ROLE__')
  WHERE to_regclass('ops.org_icon_override_log') IS NOT NULL;
 \gexec
+-- 開発室(0024・代表指示 2026-08-03)。ダッシュボードの開発室ページが代表の連絡を
+-- **追記**し、スレッドを読み返すための権限。
+--
+-- **INSERT は列レベル (sender, body) に限定する**(独立役員審査 重大-1)。表レベルの
+-- INSERT では created_at・relayed_at・inserted_by を任意指定でき、
+--   * created_at の遡及(存在しなかった時点の指示を捏造する)
+--   * relayed_at の事前設定(Discord に出ないのに「中継済み」の行を作り、中継ループに
+--     永久に拾わせない)
+--   * inserted_by の詐称(書込主体の証跡を偽る)
+-- が可能になる。0024 のガードトリガは BEFORE UPDATE OR DELETE で、**INSERT には
+-- 発火しない**ため、この入口を塞げるのは権限だけである。
+-- 残余: sender は付与列に含まれるので、このロールでも sender='design_lead' の行は
+-- 作れる(代表が UI から設計リードを騙る操作)。これは inserted_by との矛盾として
+-- 検出する設計で、権限では止めない — 止めると代表自身の投稿も書けなくなる。
+--
+-- UPDATE を与えないのは意図的で、relayed_at は Bot だけが立てる状態だからである。
+-- DELETE も与えない(表は追記オンリー)。
+SELECT format('GRANT SELECT, INSERT (sender, body) ON ops.dev_chat TO %I', '__BR_ROLE__')
+ WHERE to_regclass('ops.dev_chat') IS NOT NULL;
+\gexec
 -- meta.runs は開始 INSERT → 終了時に status/finished_at/cost を UPDATE する。UPDATE は
 -- **列レベル**に限定し、job_name / code_version / started_at / params の事後改竄を防ぐ
 -- (リネージの証跡性。再審査 条件3)。列名は migrations/0001_meta.sql に一致させること。
@@ -307,12 +329,12 @@ SELECT count(*) AS dashboard_secret_grants
 -- 役員室ロールの ops スキーマ権限(独立役員審査 0020 C-5)。上の GRANT は
 -- to_regclass ガード付きで、0020 未適用の DB では**黙ってスキップ**される。GRANT が
 -- 効いたか/余計な表に広がっていないかを、デプロイのたびにログへ残して検証する。
-\echo '-- 役員室ロールが ops で権限を持つ表(org_icon_overrides と org_icon_override_log の2表のみであること)'
+\echo '-- 役員室ロールが ops で権限を持つ表(org_icon_overrides / org_icon_override_log / dev_chat の3表のみであること)'
 SELECT table_name, string_agg(privilege_type, ',' ORDER BY privilege_type) AS privileges
   FROM information_schema.role_table_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
  GROUP BY table_name ORDER BY table_name;
-\echo '-- 役員室ロールの ops 権限の表数(2 であること。0 なら 0020 未適用で GRANT がスキップされた)'
+\echo '-- 役員室ロールの ops 権限の表数(3 であること。2 なら 0024 未適用で dev_chat の GRANT がスキップされた)'
 SELECT count(DISTINCT table_name) AS boardroom_ops_tables
   FROM information_schema.role_table_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops';
@@ -320,12 +342,36 @@ SELECT count(DISTINCT table_name) AS boardroom_ops_tables
 SELECT count(*) AS boardroom_unexpected_ops_grants
   FROM information_schema.role_table_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
-   AND table_name NOT IN ('org_icon_overrides', 'org_icon_override_log');
+   AND table_name NOT IN ('org_icon_overrides', 'org_icon_override_log', 'dev_chat');
 \echo '-- 履歴表への非 INSERT 権限(0 であること — 追記オンリー。UPDATE/DELETE/TRUNCATE を持たない)'
 SELECT count(*) AS boardroom_log_mutation_grants
   FROM information_schema.role_table_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
    AND table_name = 'org_icon_override_log' AND privilege_type <> 'INSERT';
+-- 開発室は**列レベル**で INSERT を絞っているため、表レベルの検査だけでは足りない
+-- (列だけの GRANT は role_table_grants に現れない)。両方を見る(独立役員審査 重大-1)。
+\echo '-- 開発室の表レベル権限(SELECT のみであること — INSERT/UPDATE/DELETE が表レベルで付いていない)'
+SELECT count(*) AS boardroom_dev_chat_table_grants
+  FROM information_schema.role_table_grants
+ WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+   AND table_name = 'dev_chat' AND privilege_type <> 'SELECT';
+\echo '-- 開発室の列レベル権限(INSERT は sender/body の 2 列だけであること)'
+SELECT column_name, privilege_type
+  FROM information_schema.role_column_grants
+ WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+   AND table_name = 'dev_chat' AND privilege_type <> 'SELECT'
+ ORDER BY privilege_type, column_name;
+\echo '-- 開発室で書込可能な列数(2 であること。0 なら 0024 未適用で GRANT がスキップされた)'
+SELECT count(*) AS boardroom_dev_chat_writable_columns
+  FROM information_schema.role_column_grants
+ WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+   AND table_name = 'dev_chat' AND privilege_type <> 'SELECT';
+\echo '-- 開発室の想定外の列権限(0 であること — created_at/relayed_at/inserted_by/id への書込)'
+SELECT count(*) AS boardroom_dev_chat_unexpected_column_grants
+  FROM information_schema.role_column_grants
+ WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+   AND table_name = 'dev_chat' AND privilege_type <> 'SELECT'
+   AND (privilege_type <> 'INSERT' OR column_name NOT IN ('sender', 'body'));
 """
 
 sql = (
