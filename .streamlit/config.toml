@@ -1,0 +1,99 @@
+# .streamlit/config.toml — 運用ダッシュボードのテーマ(DADS トークン層)。
+#
+# 代表指示 2026-08-03「ページ切替ボタンが小さい/デジタル庁ガイドライン参考に見直し」への
+# 対応。値はデジタル庁デザインシステム(DADS)β版の**プリミティブ/セマンティック
+# トークンの実値**で、出典と抽出元(npm @digital-go-jp/design-tokens v1.1.0 の
+# tokens.css)は docs/research/dads-streamlit-application.md §2。
+#
+# **適用範囲の裁定**(同 §7): 採用するのはトークン層(色・タイポ・余白・角丸)と、
+# 実利のあるアクセシビリティ(コントラスト 4.5:1・タップターゲット 44px・色のみに
+# 依存しない損益表示・キーボード操作)だけ。JIS X 8341-3 の全面準拠(スクリーン
+# リーダー対応・スキップリンク・visited 色)は**不採用** — 本ダッシュボードは
+# IAP 許可リストが代表1名の完全非公開ツールであり、Streamlit の st.dataframe が
+# canvas 描画で DOM にテキストを持たない以上(同 §6-1)CSS では到達もできない。
+#
+# 読み込み位置: Streamlit は**カレントディレクトリの** .streamlit/config.toml を読む。
+# 起動は常にリポジトリルート(`streamlit run dashboard/app.py`・Dockerfile の WORKDIR
+# /app)であるため、このファイルはリポジトリルート直下に置く。dashboard/.streamlit/ に
+# 置いても読まれない。
+
+[theme]
+# ── 基本色(DADS プリミティブ)────────────────────────────────────────────────
+# Blue-900。白背景でコントラスト 11.1:1(テキスト 4.5:1・非テキスト 3:1 を大きく超える)。
+# DADS の段階規定では primary=Blue-900 / hover=Blue-1000 / active=Blue-1100。
+# Streamlit は hover/active を primaryColor から自動導出するため 900 だけを与える。
+primaryColor = "#0017C1"
+# Solid Gray-900。本文テキストの規定色。
+textColor = "#1A1A1A"
+# 白。DADS は本文面を白地に置く(Gray-50 は副次面)。
+backgroundColor = "#FFFFFF"
+# Solid Gray-50。サイドバー・入力欄・コードブロック等の副次面。
+secondaryBackgroundColor = "#F2F2F2"
+# Solid Gray-420 = 白背景で 3:1 ちょうど。DADS が定める**非テキスト要素の下限**で、
+# 枠線をこれより薄くすると境界がアクセシビリティ基準を割る。
+borderColor = "#949494"
+# リンクは primary と同じ Blue-900(DADS はリンクにキーカラーを使う)。
+# visited 色は Streamlit が指定手段を持たない(調査 §6-5)— 不採用の裁定どおり放置する。
+linkColor = "#0017C1"
+
+# ── タイポグラフィ(DADS: 本文の標準最小 16px・14px 未満は不許可)──────────────
+baseFontSize = 16
+# フォントファミリは下の [[theme.fontFaces]] で self-host する Noto Sans JP。
+# フォールバックは OS 同梱の日本語ゴシック → 総称 sans-serif の順。WOFF2 が未取得でも
+# (dashboard/static/fonts/ が空でも)表示が壊れないようにフォールバックを明示する。
+font = "Noto Sans JP, Hiragino Sans, Hiragino Kaku Gothic ProN, Meiryo, sans-serif"
+
+# ── 角丸(DADS: 4/6/8/12/16/24/32px + full)──────────────────────────────────
+# 8px。DADS のボタン・カードの標準的な角丸段。
+baseRadius = "8px"
+
+# ── セマンティックカラー(差異・超過の表示に使う色)─────────────────────────────
+# Streamlit の markdown 色指定(`:red[…]` / `:green[…]` / `:orange[…]` / `:gray[…]`)は
+# ここで定義した *TextColor に解決される。dashboard/viz.py は色指定をこの4色しか使わず、
+# 実 hex を直書きしないため、DADS セマンティックへの統一はここ一箇所で効く。
+# いずれも白背景でテキストの 4.5:1 を満たすことを確認済み(計算は
+# docs/research/dashboard-visualization-guidelines.md ではなく本ファイルの下記)。
+#   error-1   #EC0000 → 4.60:1
+#   success-2 #197A4B → 5.35:1
+#   warning-orange-2 #C74700 → 4.85:1
+#   Gray-536  #767676 → 4.54:1(DADS が定めるテキスト下限そのもの)
+# 既定値(#bd4043 / #158237 / #e2660c / 60% 不透明度の灰)は DADS 外かつ灰は 4.5:1 を
+# 割るため、4色とも明示的に上書きする。
+redTextColor = "#EC0000"     # DADS semantic error-1(リミット超過・不利な差異)
+greenTextColor = "#197A4B"   # DADS semantic success-2(有利な差異)
+orangeTextColor = "#C74700"  # DADS semantic warning-orange-2(警戒・SLA 違反)
+grayTextColor = "#767676"    # DADS primitive Solid Gray-536(測れていない値)
+# 背景色版(`:red-background[…]` 等)は使っていないが、Streamlit が *TextColor から
+# 導出せず既定の派手な色を残すため、塗り面も DADS 側へ寄せておく。
+redColor = "#EC0000"
+greenColor = "#197A4B"
+orangeColor = "#C74700"
+
+[[theme.fontFaces]]
+# Noto Sans JP(SIL Open Font License 1.1)。DADS のタイポグラフィ規定のフォント。
+# **self-host する**(Google Fonts の CDN から配信すると閲覧のたびに代表の IP と
+# User-Agent が第三者へ送られる。完全非公開ツールとして避ける — 調査 §5)。
+# WOFF2 の取得・サブセット手順は ops/fetch-fonts.sh、ライセンスは
+# dashboard/static/fonts/LICENSE-OFL.txt。ファイルが未取得の場合は 404 になるだけで、
+# 上の font フォールバック(Hiragino Sans 等)へ落ちる。
+# DADS はウェイトを 400/700 の2段しか使わないため、サブセットもこの2本に絞る。
+family = "Noto Sans JP"
+url = "app/static/fonts/NotoSansJP-Regular.woff2"
+weight = 400
+style = "normal"
+
+[[theme.fontFaces]]
+family = "Noto Sans JP"
+url = "app/static/fonts/NotoSansJP-Bold.woff2"
+weight = 700
+style = "normal"
+
+[server]
+# [[theme.fontFaces]] の `app/static/...` を配信するために必須。配信対象は
+# **エントリポイント(dashboard/app.py)と同じ階層の static/ ディレクトリ**に限られる
+# ため、フォントは dashboard/static/fonts/ に置く(dashboard/fonts/ では配信されない)。
+# 公開されるのは同ディレクトリ配下だけで、リポジトリの他のファイルは配信されない。
+enableStaticServing = true
+
+[browser]
+gatherUsageStats = false
