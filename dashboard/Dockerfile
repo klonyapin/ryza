@@ -31,8 +31,13 @@ COPY pyproject.toml uv.lock ./
 COPY src ./src
 RUN uv sync --locked --no-dev --extra dashboard
 
-# アプリ本体と、queries.py が参照するリポジトリ内データ。
+# アプリ本体(dashboard/static/fonts の self-host WOFF2 を含む)と、queries.py が
+# 参照するリポジトリ内データ。
 COPY dashboard ./dashboard
+# DADS トークンのテーマ設定。Streamlit は**カレントディレクトリの** .streamlit/config.toml
+# を読むため、WORKDIR(/app)直下に置く必要がある。これが無いとクラウド側だけ既定テーマに
+# 戻り、ローカルと見た目が食い違う(2026-08-03 デザイン改修)。
+COPY .streamlit ./.streamlit
 COPY config ./config
 COPY ops/reminders.yaml ./ops/reminders.yaml
 COPY site/data.js ./site/data.js

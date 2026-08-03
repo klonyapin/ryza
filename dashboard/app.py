@@ -26,6 +26,13 @@ DB アクセスは ``queries.py``(接続と読取)と ``ryza.governance.boardroo
 (前日比・対リミット・対予算)を添え、赤緑は差異とリミット超過にだけ使う。概況は
 Few の一画面原則に従い 6 ブロック固定の監視面とし、明細は各詳細ページへ降ろす
 (Shneiderman: overview first, then details-on-demand)。
+
+**ナビゲーション(2026-08-03 代表指示のデザイン改修)**: ページ切替は ``st.navigation``
++ ``st.Page`` で、監視/成績・リスク/組織・統治/開発の 4 セクションにグルーピング
+する(構成は ``NAV_SECTIONS``)。旧実装のサイドバー ``st.radio`` は 14 行が縦に圧縮され
+タップターゲット 44px を大きく割っていた。デザイントークンは ``.streamlit/config.toml``
+(DADS 実値)、config.toml で表現できない CSS 層は ``dads.py``。根拠は
+``docs/research/dads-streamlit-application.md``。
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+import dads  # noqa: E402
 import github_api  # noqa: E402
 import queries  # noqa: E402
 import viz  # noqa: E402
@@ -167,7 +175,10 @@ def _overview_nav(conn) -> None:
     st.markdown(f"**NAV**: {viz.fmt_jpy(latest['nav'])}({latest['status']})")
     st.markdown(
         f"前日比 {viz.fmt_delta_md(d1)} / 設定来 {viz.fmt_delta_md(itd)}"
-        "  \n<span style='opacity:.6;font-size:.8em'>外部フロー調整済み(TWR)</span>",
+        # 注記なので小さくするが DADS の下限(14px)は割らない(重要-2 と同じ理由)。
+        # opacity:.6 の実効色は #767676 相当で 4.54:1 = テキスト下限ちょうど。
+        f"  \n<span style='opacity:.6;font-size:{dads.MIN_FONT_REM}rem'>"
+        "外部フロー調整済み(TWR)</span>",
         unsafe_allow_html=True,
     )
     st.caption(f"評価日 {latest['day']} / {len(series)} 営業日分")
@@ -588,9 +599,13 @@ def page_ingest(conn) -> None:
         freshness.style.map(
             # ok は着色しない: 緑は差異・リミット超過に予約してある(A12・中-7)。
             # 異常だけが色で立ち上がる方が、SLA 違反の発見も速い。
+            # 色は DADS セマンティック。pandas の Styler は生の CSS を吐くため
+            # Streamlit の色指定を経由できず、ここだけ hex を dads から引く
+            # (CSS の色名 orange/red は DADS 外かつ orange は 4.5:1 を割る)。
+            # 判定は "stale"/"no_data" という**語**で既に読めるので、色は冗長な符号化。
             lambda v: {
-                "stale": "color: orange",
-                "no_data": "color: red",
+                "stale": f"color: {dads.WARNING}",
+                "no_data": f"color: {dads.ERROR}",
             }.get(v, ""),
             subset=["status"],
         ),
@@ -813,42 +828,64 @@ def page_dev_status() -> None:
 # ── 組織(組織サイト化 — 2026-08-03 代表指示)──────────────────────────────────
 _TIER_LABELS = {"fable": "Fable(最上位)", "mid": "中位モデル", "light": "軽量/非LLM"}
 
-_ORG_CSS = """
+#: 代表(人間)のカード色。台帳に載らない唯一のカードなので、ここで色を持つ。
+#: 中性的なスレートで、キャラクター色の並びから浮かずに人間だと分かる程度に外す。
+_REPRESENTATIVE_COLOR = "#64748B"
+
+# 組織図・メンバーカードは Streamlit の部品では組めないため自前の HTML/CSS で描く。
+# 2026-08-03 のデザイン改修で DADS トークンへ寄せた: 罫線は Solid Gray-420
+# (#949494 = 白背景で 3:1 ちょうど。非テキスト要素の下限)、角丸は 6/8/12px、
+# 余白は 8px グリッド。半透明の灰(rgba(128,128,128,.35) 等)は背景次第で 3:1 を
+# 割るため実値のトークンに置き換えた。投資委員会の強調は dads.ACCENT
+# (warning-yellow-2 = 4.54:1)で、旧値 #d9a441 は白背景で 2:1 前後しか出ていなかった。
+#
+# **font-size の下限**(独立役員審査 重要-2): 全 11 箇所を dads.MIN_FONT_REM
+# (0.875rem = 14px)以上にした。改修前は 0.65〜0.85rem(10.4〜13.6px)で、
+# config.toml 側が「DADS: 14px 未満は不許可」と宣言している一方この CSS だけが
+# 例外になっていた —— 同じ改修で line-height と境界色は DADS へ寄せながら
+# font-size を据え置いたための不整合である。密度は下がるが、読めない文字を
+# 並べる方がダッシュボードとしては損。値をリテラルで書かず定数から埋めるのは、
+# 下限を1箇所で動かせるようにするため(テストも同じ定数を見る)。
+_ORG_CSS = f"""
 <style>
-.oc-apex { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:6px; }
-.oc-node { border:1px solid rgba(128,128,128,.45); border-radius:8px; padding:8px 14px;
-  font-size:.85rem; }
-.oc-node b { display:block; }
-.oc-node small { opacity:.7; }
-.oc-ic { border-color:#c9a24b; border-width:2px; }
-.oc-aud { border-style:dashed; }
-.oc-vline { width:2px; height:16px; background:rgba(128,128,128,.45); margin:0 0 6px 40px; }
-.oc-offices { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
-  gap:10px; }
-.oc-office { border:1px solid rgba(128,128,128,.35); border-radius:10px; padding:10px 12px; }
-.oc-office h4 { margin:0 0 6px; font-size:.75rem; opacity:.7; letter-spacing:.06em; }
-.oc-office ul { list-style:none; margin:0; padding:0; }
-.oc-office li { font-size:.8rem; padding:4px 8px; margin:4px 0; border-radius:6px;
-  border:1px solid rgba(128,128,128,.3); }
-.oc-office li small { display:block; opacity:.65; font-size:.68rem; }
-.oc-flow { display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:.78rem;
-  margin-top:10px; }
-.oc-flow span.s { border:1px solid rgba(128,128,128,.4); border-radius:6px; padding:2px 9px; }
-.oc-flow span.g { border-color:#d9a441; color:#d9a441; }
-.oc-flow span.a { opacity:.6; }
-.oc-members { display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr));
-  gap:12px; margin-top:6px; }
-.oc-card { border:1px solid rgba(128,128,128,.35); border-radius:12px; padding:14px;
-  display:flex; gap:12px; border-top:3px solid var(--mc,#888); }
-.oc-avatar { width:64px; height:64px; border-radius:50%; flex:none; object-fit:cover; }
-.oc-fallback { display:flex; align-items:center; justify-content:center; color:#fff;
-  font-size:1.6rem; font-weight:600; }
-.oc-card .nm { font-size:1.05rem; font-weight:600; }
-.oc-card .src { font-size:.7rem; opacity:.65; }
-.oc-card .ttl { font-size:.8rem; margin:2px 0 4px; }
-.oc-card .tg { font-size:.75rem; opacity:.75; margin-top:4px; }
-.oc-chip { font-size:.65rem; border:1px solid rgba(128,128,128,.4); border-radius:10px;
-  padding:1px 8px; margin-right:4px; white-space:nowrap; }
+.oc-apex {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:8px; }}
+.oc-node {{ border:1px solid {dads.BORDER}; border-radius:8px; padding:8px 16px;
+  font-size:{dads.MIN_FONT_REM}rem; }}
+.oc-node b {{ display:block; }}
+.oc-node small {{ opacity:.7; }}
+.oc-ic {{ border-color:{dads.ACCENT}; border-width:2px; }}
+.oc-aud {{ border-style:dashed; }}
+.oc-vline {{ width:2px; height:16px; background:{dads.BORDER}; margin:0 0 8px 40px; }}
+.oc-offices {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+  gap:8px; }}
+.oc-office {{ border:1px solid {dads.BORDER}; border-radius:12px; padding:8px 12px; }}
+.oc-office h4 {{ margin:0 0 8px; font-size:{dads.MIN_FONT_REM}rem; opacity:.7;
+  letter-spacing:.06em; }}
+.oc-office ul {{ list-style:none; margin:0; padding:0; }}
+.oc-office li {{ font-size:{dads.MIN_FONT_REM}rem; padding:4px 8px; margin:4px 0;
+  border-radius:6px; border:1px solid {dads.BORDER}; line-height:1.3; }}
+.oc-office li small {{ display:block; opacity:.65; font-size:{dads.MIN_FONT_REM}rem; }}
+.oc-flow {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center;
+  font-size:{dads.MIN_FONT_REM}rem; margin-top:8px; }}
+.oc-flow span.s {{ border:1px solid {dads.BORDER}; border-radius:6px; padding:2px 8px; }}
+.oc-flow span.g {{ border-color:{dads.ACCENT}; color:{dads.ACCENT}; }}
+.oc-flow span.a {{ opacity:.6; }}
+.oc-members {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr));
+  gap:12px; margin-top:8px; }}
+.oc-card {{ border:1px solid {dads.BORDER}; border-radius:12px; padding:16px;
+  display:flex; gap:12px; border-top:3px solid var(--mc,{dads.BORDER}); }}
+.oc-avatar {{ width:64px; height:64px; border-radius:50%; flex:none; object-fit:cover; }}
+/* 文字色は背景の輝度で黒/白を選ぶ(_avatar_html が style で個別に与える)。
+   白固定だと淡いキャラクター色で 4.5:1 を割る(#a78bfa で 2.72:1)。 */
+.oc-fallback {{ display:flex; align-items:center; justify-content:center;
+  font-size:1.6rem; font-weight:600; }}
+.oc-card .nm {{ font-size:1.05rem; font-weight:600; line-height:1.4; }}
+.oc-card .src {{ font-size:{dads.MIN_FONT_REM}rem; opacity:.65; }}
+.oc-card .ttl {{ font-size:{dads.MIN_FONT_REM}rem; margin:2px 0 4px; line-height:1.5; }}
+.oc-card .tg {{ font-size:{dads.MIN_FONT_REM}rem; opacity:.75; margin-top:4px;
+  line-height:1.5; }}
+.oc-chip {{ font-size:{dads.MIN_FONT_REM}rem; border:1px solid {dads.BORDER};
+  border-radius:10px; padding:1px 8px; margin-right:4px; white-space:nowrap; }}
 </style>
 """
 
@@ -917,10 +954,23 @@ def _org_chart_html() -> str:
 
 
 def _avatar_html(name: str, color: str, icon_url: str | None) -> str:
+    """アイコン画像、無ければキャラクター色の円に頭文字。
+
+    **文字色は背景の輝度で黒/白を選ぶ**(独立役員審査 重要-2)。白固定だった旧実装は
+    淡いキャラクター色でコントラストを割っていた(``#a78bfa`` で 2.72:1、``#059669``
+    で 3.77:1)。台帳(config/org.yaml)は色を自由に決めてよい設計なので、可読性は
+    描画側が機械的に担保する。
+
+    ``color`` は ``dads.safe_color`` を通してから ``style`` に埋める(低-9)。
+    ``html.escape`` は引用符を潰すだけで、``red;position:fixed`` のような**同じ
+    style 属性内への CSS 宣言追記**は防げない。
+    """
     if icon_url:
         return f"<img class='oc-avatar' src='{_esc(icon_url)}' alt='{_esc(name)}'>"
+    background = dads.safe_color(color)
     return (
-        f"<div class='oc-avatar oc-fallback' style='background:{_esc(color)}'>"
+        f"<div class='oc-avatar oc-fallback' "
+        f"style='background:{background};color:{dads.text_on(background)}'>"
         f"{_esc(name[0])}</div>"
     )
 
@@ -933,9 +983,12 @@ def _member_card_html(m: dict[str, Any]) -> str:
     src = (
         f"<div class='src'>出典: {_esc(m['source'])}</div>" if m.get("source") else ""
     )
+    # 台帳・DB 由来の色は #RRGGBB 以外を受け付けない(低-9)。旧既定 '#888' は3桁形で
+    # 検証を通らないため、既定も 6 桁のトークン(dads.FALLBACK_COLOR)へ揃えた。
+    color = dads.safe_color(m.get("color"))
     return (
-        f"<div class='oc-card' style='--mc:{_esc(m.get('color', '#888'))}'>"
-        + _avatar_html(m.get("name", "?"), m.get("color", "#888"), m.get("icon_url"))
+        f"<div class='oc-card' style='--mc:{color}'>"
+        + _avatar_html(m.get("name", "?"), color, m.get("icon_url"))
         + f"<div><div class='nm'>{_esc(m.get('name', ''))}</div>{src}"
         + f"<div class='ttl'>{_esc(m.get('title', ''))}</div>"
         + f"<div>{chips}</div>"
@@ -1036,9 +1089,14 @@ def page_org(conn=None) -> None:
 
     st.subheader("メンバー(config/org.yaml が正・アイコンは DB 上書きを優先)")
     rep = org_yaml.get("representative", {})
+    # 代表は台帳の members に載らない(人間なので model_tier を持たない)ため、
+    # カードをここで組む。色は他のメンバーと同じ経路(safe_color → text_on)を通し、
+    # 文字色を白に固定しない — 検査対象から外れる例外を作らないため。
+    rep_color = dads.safe_color(_REPRESENTATIVE_COLOR)
     rep_card = (
-        "<div class='oc-card' style='--mc:#64748b'>"
-        "<div class='oc-avatar oc-fallback' style='background:#64748b'>代</div>"
+        f"<div class='oc-card' style='--mc:{rep_color}'>"
+        f"<div class='oc-avatar oc-fallback' "
+        f"style='background:{rep_color};color:{dads.text_on(rep_color)}'>代</div>"
         "<div><div class='nm'>代表</div>"
         f"<div class='ttl'>{_esc(rep.get('note', 'ユーザー'))}</div>"
         "<div><span class='oc-chip'>人間</span>"
@@ -1165,10 +1223,12 @@ def page_rules() -> None:
             df.style.map(
                 # schema/gate(最も強い執行点)は無着色。緑をカテゴリ識別に使わない
                 # (A12・中-7)。色で立ち上がるのは弱い執行点と欠落だけにする。
+                # 色は DADS トークン(理由は page_ingest と同じ — Styler は生 CSS)。
+                # 執行点は列の**文字列そのもの**が種別なので、色は冗長な符号化。
                 lambda v: {
-                    "ci(テスト・CI)": "color: #2c7be5",
-                    "audit(監査ジョブ)": "color: orange",
-                    "宣言のみ(執行点なし)": "color: red; font-weight: bold",
+                    "ci(テスト・CI)": f"color: {dads.PRIMARY}",
+                    "audit(監査ジョブ)": f"color: {dads.WARNING}",
+                    "宣言のみ(執行点なし)": f"color: {dads.ERROR}; font-weight: bold",
                 }.get(v, ""),
                 subset=["執行点"],
             ),
@@ -1831,72 +1891,154 @@ def page_dev_chat() -> None:
 
 
 # ── エントリポイント ──────────────────────────────────────────────────────────
+
+
+# ── エントリポイント(st.navigation・2026-08-03 デザイン改修)─────────────────
+# 旧実装はサイドバーの ``st.radio`` 1 本に 14 ページを平積みし、選択後に if/dict で
+# 分岐していた。代表の指摘「ページ切替ボタンが小さい」は、ラジオのクリック領域が
+# 14 行ぶん圧縮されて WCAG 2.1 SC 2.5.5(44×44 px)を大きく割っていたことによる。
+# ``st.navigation`` へ移すと (a) Streamlit がページリンクとして描くため CSS で
+# タップターゲットを確保でき、(b) sections で意味的にグルーピングでき、(c) 現在地が
+# 強調表示され、(d) ページごとに URL が付く(ブックマーク可能になる)。
+# 根拠: docs/research/dads-streamlit-application.md §4・§5。
+#
+# **ページ関数の構造は変えていない** — ``page_overview(conn)`` 等はそのまま残し、
+# 接続の解決だけを下のラッパが担う。st.Page が受け取れるのは引数なしの callable のため。
+def _with_conn(page_fn):
+    """読取接続を解決して ``page_fn(conn)`` を呼ぶ、引数なしラッパを作る。
+
+    DB に繋がらないときはページを落とさず、説明を出して空のページを描く(旧 ``main``
+    と同じ挙動)。ナビゲーション自体は描画済みなので、代表は他のページへ移動できる。
+    """
+
+    def _run() -> None:
+        try:
+            conn = _conn()
+        except Exception as exc:  # noqa: BLE001 - DB 停止時も UI は説明を出して生かす
+            st.error(f"DB に接続できない: {exc}")
+            st.caption("compose.yaml の PostgreSQL 起動と RYZA_DATABASE_URL を確認。")
+            return
+        page_fn(conn)
+
+    _run.__name__ = page_fn.__name__
+    _run.__doc__ = page_fn.__doc__
+    return _run
+
+
+def _page_org() -> None:
+    """組織ページ。台帳(config/org.yaml)が主で DB は従。
+
+    アイコンの上書き(0020)の読取にだけ DB を使うため、接続できなくても台帳だけで
+    ページを出す(編集 UI は隠す)。``_with_conn`` は使えない — 接続失敗を
+    エラー表示で終わらせず ``None`` として先へ進める必要がある。
+    """
+    try:
+        org_conn = _conn()
+    except Exception:  # noqa: BLE001 - DB 停止時も組織ページは表示する
+        org_conn = None
+    page_org(org_conn)
+
+
+#: サイドバーの構成。``{セクション名: [(タイトル, url_path, アイコン, 描画関数)]}``。
+#:
+#: グルーピングの軸は「代表がその画面を開く動機」。①いま止めるべき事象が起きていないか
+#: (監視)②数字はどうなっているか(成績・リスク)③誰が何を決めたか(組織・統治)
+#: ④開発は進んでいるか(開発)。概況からのドリルダウン先(ジョブ・取込)は概況と同じ
+#: セクションに置き、Shneiderman の overview first → details-on-demand を崩さない。
+#:
+#: ``url_path`` はブックマーク可能な URL になるうえ、**ページの同一性そのもの**である
+#: (Streamlit はページのハッシュを url_path から導出する)。テストもこれでページを
+#: 指名するため、**タイトルを変えても url_path は変えない**こと。
+NAV_SECTIONS: dict[str, list[tuple[str, str, str, Any]]] = {
+    "監視": [
+        # 概況は default=True(url_path は "" に固定され、アプリのトップになる)。
+        ("概況", "overview", ":material/monitor_heart:", _with_conn(page_overview)),
+        ("ジョブ", "jobs", ":material/schedule:", _with_conn(page_jobs)),
+        ("取込", "ingest", ":material/download:", _with_conn(page_ingest)),
+        ("報道", "press", ":material/newspaper:", _with_conn(page_press)),
+        ("市場観", "market-view", ":material/insights:", _with_conn(page_market_view)),
+    ],
+    "成績・リスク": [
+        ("成績", "performance", ":material/trending_up:", _with_conn(page_performance)),
+        ("リスク", "risk", ":material/warning:", _with_conn(page_risk)),
+        ("コスト", "cost", ":material/payments:", _with_conn(page_cost)),
+    ],
+    "組織・統治": [
+        ("組織", "org", ":material/groups:", _page_org),
+        ("規則", "rules", ":material/gavel:", page_rules),  # DB 不要(governance.yaml のみ)
+        ("承認・通知", "approvals", ":material/how_to_reg:", _with_conn(page_approvals)),
+        # 役員室は書込可の専用接続を自前で持つ(READ ONLY 接続は使わない)。
+        ("役員室", "boardroom", ":material/forum:", page_boardroom),
+    ],
+    "開発": [
+        # 開発室(#68)は「代表 → 設計リードの連絡窓口」なので開発グループに置く。
+        # 役員室(経営レベルの審議)とは場が違うため組織・統治には入れない。
+        # 役員室と同じく書込可の専用接続を自前で持つ(_boardroom_conn)。
+        ("開発室", "dev-chat", ":material/chat:", page_dev_chat),
+        ("計画", "plan", ":material/checklist:", _with_conn(page_plan)),
+        ("開発ステータス", "dev-status", ":material/code:", page_dev_status),
+    ],
+}
+
+#: 概況を既定ページにする(url_path が "" になり、ルート URL で開く)。
+DEFAULT_URL_PATH = "overview"
+
+
+def _with_dads_css(page_fn):
+    """ページ描画の**先頭で** DADS の CSS 層を注入するラッパ。
+
+    ``main()`` で1回注入するのでは効かない —— ``page.run()`` がメインコンテナを
+    リセットするため、それより前に書いた ``st.html`` はブラウザに届かない
+    (2026-08-03 の実ブラウザ検証で判明。AppTest では緑のまま検出できなかった)。
+    ページ自身の描画パスの中で書く必要があるので、全ページに一律で被せる。
+    詳細と代替案(サイドバーへ逃がす案が失敗する理由)は ``dads.inject`` の docstring。
+    """
+
+    def _run() -> None:
+        dads.inject()
+        page_fn()
+
+    _run.__name__ = page_fn.__name__
+    _run.__doc__ = page_fn.__doc__
+    return _run
+
+
+def _build_pages() -> dict[str, list[Any]]:
+    """``NAV_SECTIONS`` を ``st.navigation`` が取る ``{セクション: [st.Page]}`` にする。"""
+    return {
+        section: [
+            st.Page(
+                _with_dads_css(fn),
+                title=title,
+                icon=icon,
+                url_path=url_path,
+                default=url_path == DEFAULT_URL_PATH,
+            )
+            for title, url_path, icon, fn in items
+        ]
+        for section, items in NAV_SECTIONS.items()
+    }
+
 def main() -> None:
-    st.sidebar.title("Ryza 運用ダッシュボード")
+    # CSS 層(44px タップターゲット・行間・フォーカスリング)は**ここで注入しない**。
+    # page.run() がメインコンテナをリセットするため、ここで書いてもブラウザには届かない
+    # (実ブラウザ検証で判明 — _with_dads_css と dads.inject の docstring)。
+    # 注入は _build_pages が全ページに被せる _with_dads_css が行う。
+    # expanded=True。既定(False)は 13 ページ以上で 10 件に折り畳み「View 4 more」を
+    # 出すが、監視面は**全ページが常に見えている**ことが要件(どこに何があるかを
+    # 探させない)。折り畳みボタン自体もタップターゲットを1つ増やす。
+    page = st.navigation(_build_pages(), position="sidebar", expanded=True)
+    # サイドバーへの追記は必ずナビゲーションの**下**に出る(st.navigation はサイドバー
+    # 先頭に固定される)。旧実装の st.sidebar.title はここでは脚注の位置に落ちて
+    # 読み手を混乱させるため置かない —— アプリ名はブラウザのタブ(set_page_config)と
+    # 各ページの見出しが担っており、サイドバーで名乗り直す必要がない。
+    # 残すのは「この画面で何ができないか」の断り書きだけで、脚注として妥当な内容。
+    st.sidebar.divider()
     st.sidebar.caption(
         "Cloud Run + IAP で公開(許可アカウントのみ。認証は IAP に全面委譲)+ローカル。"
         "役員室以外は読み取り専用。操作(Kill Switch 等)は Discord から。"
     )
-    # 並びは「概況(監視面)→ 概況からドリルダウンする詳細 → 組織・統治 → その他」。
-    page = st.sidebar.radio(
-        "ページ",
-        [
-            "概況",
-            "成績",
-            "リスク",
-            "ジョブ",
-            "コスト",
-            "取込",
-            "承認・通知",
-            "報道",
-            "市場観",
-            "計画",
-            "組織",
-            "規則",
-            "役員室",
-            "開発室",
-            "開発ステータス",
-        ],
-    )
-    if page == "開発ステータス":
-        page_dev_status()
-        return
-    if page == "役員室":
-        page_boardroom()  # 書込可の専用接続を自前で持つ(READ ONLY 接続は使わない)
-        return
-    if page == "開発室":
-        page_dev_chat()  # 役員室と同じ書込可の専用接続(ops.dev_chat への INSERT)
-        return
-    if page == "組織":
-        # 台帳(config/org.yaml)が主。アイコンの上書き(0020)の読取にだけ DB を使うため、
-        # 接続できなくても台帳だけでページを出す(編集 UI は隠す)。
-        try:
-            org_conn = _conn()
-        except Exception:  # noqa: BLE001 - DB 停止時も組織ページは表示する
-            org_conn = None
-        page_org(org_conn)
-        return
-    if page == "規則":
-        page_rules()  # config/governance.yaml のみ(DB 不要)
-        return
-    try:
-        conn = _conn()
-    except Exception as exc:  # noqa: BLE001 - DB 停止時も UI は説明を出して生かす
-        st.error(f"DB に接続できない: {exc}")
-        st.caption("compose.yaml の PostgreSQL 起動と RYZA_DATABASE_URL を確認。")
-        return
-    {
-        "概況": page_overview,
-        "成績": page_performance,
-        "リスク": page_risk,
-        "ジョブ": page_jobs,
-        "承認・通知": page_approvals,
-        "計画": page_plan,
-        "取込": page_ingest,
-        "報道": page_press,
-        "コスト": page_cost,
-        "市場観": page_market_view,
-    }[page](conn)
+    page.run()
 
 
 main()

@@ -25,6 +25,16 @@
 (IBCS。A12)。カテゴリ識別・通常状態の強調には使わない。したがって「正常」は緑では
 なく無着色で描く。
 
+**色に頼らない**(2026-08-03 デザイン改修): 上記の色は Streamlit の markdown 色指定
+(``:red[…]`` / ``:green[…]`` / ``:orange[…]`` / ``:gray[…]``)だけで表現し、hex は
+一切書かない。実際の描画色は ``.streamlit/config.toml`` の ``redTextColor`` 等が与える
+DADS セマンティック(error-1 ``#EC0000`` / success-2 ``#197A4B`` / warning-orange-2
+``#C74700`` / Solid Gray-536 ``#767676``)で、**色の変更点はそこ一箇所**である。
+そのうえで、色は常に**冗長な符号化**に留める — 差異には符号(``+``/``-``)と方向矢印
+(``▲``/``▼``)を、リミットの状態には語(``超過``/``警戒``/``測定不能``)を必ず併記し、
+色を落としても(色覚特性・モノクロ印刷・CSS の破損)情報が失われないようにする
+(DADS アクセシビリティ・``docs/research/dads-streamlit-application.md`` §2・§3)。
+
 テストは ``tests/dashboard/test_viz.py``(DB 不要の純ロジック + 境界値)。
 """
 
@@ -137,20 +147,31 @@ def fmt_signed_pct(value: Any, digits: int = 2) -> str:
     return f"{v * 100:+.{digits}f}%"
 
 
+#: 差異の方向を色に依存せず示す矢印(上昇/下降)。**有利/不利ではなく符号の向き**を
+#: 表す — 有利かどうかは指標ごとに違い(``good_when``)、方向は指標に依らないため。
+UP_ARROW = "▲"
+DOWN_ARROW = "▼"
+
+
 def fmt_delta_md(
     value: Any,
     text: str | None = None,
     *,
     good_when: Literal["positive", "negative"] = "positive",
 ) -> str:
-    """差異を色つき markdown にする(緑=有利・赤=不利。IBCS の variance 記法)。
+    """差異を「方向矢印 + 符号つき値」の色つき markdown にする(IBCS の variance 記法)。
 
+    色は緑=有利・赤=不利(実色は DADS セマンティック — モジュール docstring 参照)。
     ``good_when="negative"`` は「小さいほど良い」差異(コスト超過・スリッページ・
     トラッキングエラーなど)で色を反転させる。符号の向きと「有利/不利」は指標ごとに
     違うため、呼び出し側が必ず意味を宣言する(既定は増加=有利)。
 
+    **色は冗長な符号化に留める**: 先頭に ``▲``/``▼`` を、値には ``+``/``-`` の符号を
+    必ず付ける。色を落としても増減が読めることが要件(色覚特性・モノクロ・CSS 破損)。
+    矢印が示すのは**符号の向きだけ**で、緑の ``▼``(下がって有利)も普通に起きる。
+
     ``text`` を省略すると ``fmt_signed_pct`` の結果を使う。値が取れないとき・0 のときは
-    無着色(0 は差異ではない)。
+    無着色・矢印なし(0 は差異ではない)。
     """
     body = text if text is not None else fmt_signed_pct(value)
     if body == MISSING or value is None:
@@ -161,6 +182,7 @@ def fmt_delta_md(
         return body
     if v == 0 or math.isnan(v):
         return body
+    body = f"{UP_ARROW if v > 0 else DOWN_ARROW} {body}"
     favourable = v > 0 if good_when == "positive" else v < 0
     return f":green[{body}]" if favourable else f":red[{body}]"
 
@@ -184,6 +206,16 @@ def fmt_hours(value: Any, digits: int = 1) -> str:
 #: 使用率がこの割合を超えたら警戒表示(絶対値のソフトリミットが無い指標の既定)。
 DEFAULT_WARN_AT = 0.75
 
+#: bullet の状態を**色に依らず**示す語。記号だけにしないのは、絵文字が環境によって
+#: 描画されない(あるいはモノクロの豆腐になる)ことがあるためで、必ず日本語を添える。
+#: ``ok`` に印を付けないのは A12(正常を強調しない)と同じ理由。
+LEVEL_LABELS = {
+    "breach": "⛔ 超過",
+    "warn": "⚠ 警戒",
+    "unknown": "▪ 測定不能",
+    "ok": "",
+}
+
 
 @dataclass(frozen=True)
 class Bullet:
@@ -201,12 +233,18 @@ class Bullet:
 
     @property
     def text(self) -> str:
-        """progress バーに添える 1 行(実績・リミット・使用率を必ず併記する)。"""
+        """progress バーに添える 1 行(実績・リミット・使用率を必ず併記する)。
+
+        **状態は色だけで伝えない**(2026-08-03 デザイン改修): breach/warn/unknown には
+        語のラベル(``LEVEL_LABELS``)を先頭に置き、色を落としても「超過している」
+        「測れていない」が読めるようにする。ok だけは無印 —— 正常であることに
+        マークは要らず、異常だけが視覚的に立ち上がる方が発見が速い(A12 と同じ理由)。
+        """
         if self.level == "unknown":
             body = f"{self.label}: {self.actual_text} / 上限 {self.limit_text}(使用率 {MISSING})"
             if self.note:
                 body = f"{body} — {self.note}"
-            return f":gray[{body}]"
+            return f":gray[{LEVEL_LABELS['unknown']} {body}]"
         body = (
             f"{self.label}: {self.actual_text} / 上限 {self.limit_text}"
             f"(使用率 {fmt_pct(self.usage, 0)})"
@@ -214,9 +252,9 @@ class Bullet:
         if self.note:
             body = f"{body} — {self.note}"
         if self.level == "breach":
-            return f":red[{body}]"
+            return f":red[{LEVEL_LABELS['breach']} {body}]"
         if self.level == "warn":
-            return f":orange[{body}]"
+            return f":orange[{LEVEL_LABELS['warn']} {body}]"
         return body
 
 
@@ -498,7 +536,10 @@ def period_returns(
 
 __all__ = [
     "DEFAULT_PERIODS",
+    "DOWN_ARROW",
+    "LEVEL_LABELS",
     "MISSING",
+    "UP_ARROW",
     "WINDOW_LAG_TOLERANCE_DAYS",
     "Bullet",
     "PeriodReturn",

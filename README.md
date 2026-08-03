@@ -23,10 +23,20 @@ Streamlit 製の組織ダッシュボード(概況 / 成績 / リスク / ジョ
 
 ```sh
 uv sync --extra dashboard          # 依存導入(streamlit・requests。本体依存には含めない)
-.venv/bin/streamlit run dashboard/app.py
+./ops/fetch-fonts.sh               # 初回のみ: Noto Sans JP を取得(後述。省略しても動く)
+.venv/bin/streamlit run dashboard/app.py   # 必ずリポジトリルートから(.streamlit/config.toml を読む)
 ```
 
 接続先 DB は環境変数 `RYZA_DATABASE_URL`(既定 `postgresql://ryza:ryza@localhost:5432/ryza`。`docker compose up -d db` で起動)。「開発ステータス」ページは `site/data.js` を表示するため、更新するときは `python3 site/build.py` を先に実行する。
+
+### デザイン(デジタル庁デザインシステム / DADS 準拠)
+
+代表指示 2026-08-03「ページ切替ボタンが小さい/デジタル庁ガイドラインを参考に見直し」への対応。根拠と出典は [docs/research/dads-streamlit-application.md](docs/research/dads-streamlit-application.md)。
+
+- **トークン層は `.streamlit/config.toml`**(公式 API)。色・タイポ・角丸・フォントを DADS の実値で与える。primary = Blue-900 `#0017C1` / 本文 = Solid Gray-900 `#1A1A1A` / 境界 = Gray-420 `#949494`(非テキスト 3:1 の下限)/ 本文 16px / 角丸 8px。差異・超過の色は DADS セマンティック(error-1 `#EC0000` / success-2 `#197A4B` / warning-orange-2 `#C74700`)へ統一し、いずれも白背景で 4.5:1 を満たす。**起動は必ずリポジトリルートから**(Streamlit はカレントディレクトリの `.streamlit/config.toml` しか読まない。Cloud Run 側は Dockerfile が `/app` へ COPY する)
+- **CSS 層は `dashboard/dads.py`**。config.toml に対応設定が無い「タップターゲット 44×44 px」「行間(本文 150% / 表 130%)」「フォーカスリング」だけを CSS 注入で補う。**Streamlit の内部 DOM 依存の非公式手段であり、バージョン更新で無言で壊れる**。CI で検査できるのは「CSS ブロックが注入されていること」までで、実寸は人間が実ブラウザで確認するしかない(同 §6-7)
+- **フォント**: Noto Sans JP(SIL Open Font License 1.1)の WOFF2 サブセットを **self-host**(`dashboard/static/fonts/`)。CDN 配信にしないのは、閲覧のたびに代表の IP と User-Agent が第三者へ送られるため。取得は `./ops/fetch-fonts.sh`(curl と uv だけ。可変フォント → wght 400/700 → JIS X 0208 サブセット → WOFF2)。**OFL 1.1 は再配布・改変・コミットを許すが、ライセンス全文 `LICENSE-OFL.txt` の同梱が条件**でスクリプトが一緒に取得する。未取得でもアプリは壊れず、OS 同梱の日本語ゴシックへフォールバックする(詳細: [dashboard/static/fonts/README.md](dashboard/static/fonts/README.md))
+- **採用しなかったもの**: **JIS X 8341-3:2016 の全面準拠**(スクリーンリーダー対応・スキップリンク・visited リンク色)。理由は (a) 本ダッシュボードが IAP 許可リスト1名の完全非公開ツールで支援技術の利用者が存在せず、(b) 中核の `st.dataframe` が canvas 描画で DOM にテキストを持たないため CSS でも JS でも到達できない(同 §6-1)。実利のない準拠コストを払わないという判断であって「無視してよい」ではなく、利用者が代表1名という前提が変われば再評価する。フレームワーク移行(Streamlit 継続 vs Next.js 系)の比較調査は Phase 5 に登録済み(`ops/reminders.yaml`: `dashboard-framework-evaluation`)
 - **設計書(図入り)**: [docs/design/00-system-design.md](docs/design/00-system-design.md) — mermaid 図は GitHub 上でそのまま描画される
 
 ## ドキュメント地図
