@@ -37,6 +37,18 @@ class ProviderResult:
         return self.tokens_in + self.tokens_out
 
 
+class MalformedOutputError(RuntimeError):
+    """プロバイダ応答が JSON として解釈できなかった(スキーマ不適合と同様に再試行対象)。
+
+    生成に消費したトークン数を保持する(失敗した呼び出しも実費なのでコスト記録が必要)。
+    """
+
+    def __init__(self, message: str, *, tokens_in: int = 0, tokens_out: int = 0) -> None:
+        super().__init__(message)
+        self.tokens_in = tokens_in
+        self.tokens_out = tokens_out
+
+
 class LLMProvider(Protocol):
     """実プロバイダ呼び出しの差し替え口。実装(Anthropic 等)はここに閉じる。
 
@@ -122,9 +134,18 @@ class StructuredLLM:
 
         while attempts <= max_retries:
             attempts += 1
-            result = self._provider.generate(
-                system=system, user=user, schema=schema, model=model
-            )
+            try:
+                result = self._provider.generate(
+                    system=system, user=user, schema=schema, model=model
+                )
+            except MalformedOutputError as exc:
+                # パース不能もスキーマ不適合と同列の「出力不良」— コストを計上して再試行。
+                total_in += exc.tokens_in
+                total_out += exc.tokens_out
+                total_cost += self._record_cost(model_tier, exc.tokens_in + exc.tokens_out)
+                last_errors = [str(exc)]
+                retries.append(f"attempt {attempts}: {exc}")
+                continue
             cost = self._record_cost(model_tier, result.tokens)
             total_in += result.tokens_in
             total_out += result.tokens_out

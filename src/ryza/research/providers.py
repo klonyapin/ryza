@@ -33,7 +33,7 @@ from typing import Any, Protocol
 
 import yaml
 
-from ryza.research.llm import ProviderResult
+from ryza.research.llm import MalformedOutputError, ProviderResult
 
 _API_URL = "https://api.anthropic.com/v1/messages"
 _CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "llm.yaml"
@@ -308,12 +308,22 @@ class AnthropicProvider:
         body = self._build_body(system=system, user=user, schema=schema, model=model)
         data = self._post_with_retry(body)
         text = _first_text(data.get("content") or [])
-        content = extract_json_object(text)
         usage = data.get("usage") or {}
+        tokens_in = int(usage.get("input_tokens", 0))
+        tokens_out = int(usage.get("output_tokens", 0))
+        try:
+            content = extract_json_object(text)
+        except (json.JSONDecodeError, ProviderError) as exc:
+            # パース不能は StructuredLLM の再試行対象(トークンはコスト記録用に添付)。
+            raise MalformedOutputError(
+                f"応答が JSON として解釈できません: {exc}",
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+            ) from exc
         return ProviderResult(
             content=content,
-            tokens_in=int(usage.get("input_tokens", 0)),
-            tokens_out=int(usage.get("output_tokens", 0)),
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
             raw_text=text,
         )
 
