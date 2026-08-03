@@ -90,7 +90,7 @@ reminders:
       type: issue_create
       title: "A-18 実装チェックポイント(保護領域トレーラ突合・文書 config 整合・宣言棚卸し)"
       labels: [impl]
-      body: "config/governance.yaml controls の A-18-1(Approved トレーラと承認記録の突合)・A-18-2(発効文書と config の整合)を ops-weekly ジョブに実装する。未着手なら理由を記録し date を更新。実弾移行の前提条件(定款第5条)である CI 予防統制(ブランチ保護+トレーラ検査)の実装判断もここで行う。"
+      body: "config/governance.yaml controls の A-18-1(Approved トレーラと承認記録の突合)・A-18-2(発効文書と config の整合)を ops-weekly ジョブに実装する。未着手なら理由を記録し date を更新。実弾移行の前提条件(定款第5条)である CI 予防統制(ブランチ保護+トレーラ検査)の実装判断もここで行う。【改名注記】本リマインダーの id は Issue #48 の改番まで `a13-implementation-checkpoint` だった。docs/minutes/2026-08-03-governance-constitution.md は歴史的記録として旧 id で参照している(議事録は改変しない方針)。"
     status: pending
 
   - id: declaration-controls-inventory
@@ -193,8 +193,10 @@ reminders:
   - id: a18-vm-wiring-check
     what: "VM への A-18 配線確認(A18_REPO_PATH — git checkout と DB の両方に届く実行環境)"
     conditions:
+      # 2026-08-17 → 2026-08-05 へ前倒し(独立審査 C-4)。改番のマージ直後から旧 ryza-a13
+      # ユニットが毎週失敗するため、次の週次実行(月曜)より前に再デプロイの確認点を置く。
       - type: date_after
-        date: "2026-08-17"
+        date: "2026-08-05"
     action:
       type: issue_create
       title: "A-18 監査の VM 配線確認(A18_REPO_PATH)"
@@ -366,8 +368,32 @@ reminders:
       type: issue_create
       title: "protected_areas に ops/deploy-dashboard.sh を登録する"
       labels: [governance]
-      body: "(対応済み)config/governance.yaml の protected_areas に ops/deploy-dashboard.sh(area: deploy_path)を追記した。governance.yaml は L1(保護領域)のため、統合には独立役員審査 → #承認 通知 → みなし承認の手続を要する。手続が完了せず本リマインダーが発火した場合は、当該 PR が未統合であることを意味する。"
-    status: done # 起票済み(governance.yaml へ登録)。発効は L1 手続の完了(統合)をもって
+      body: "(対応済み)config/governance.yaml の protected_areas に ops/deploy-dashboard.sh(area: deploy_path)を追記した。governance.yaml は L1(保護領域)のため、統合には独立役員審査 → #承認 通知 → みなし承認の手続を要する。手続が完了せず本リマインダーが発火した場合は、当該 PR が未統合であることを意味する。【起票時の設計リード裁定(履歴として保存)】0020 の PR とは別 PR にするのは、承認の単位を『スキーマ』と『統制対象の定義変更』で混ぜないため(設計リード裁定 2026-08-03)。"
+    status: done # 起票済み(governance.yaml へ登録)。発効は L1 手続の完了(統合)をもって成立する
+
+  - id: a18-acknowledged-findings
+    what: "A-18-1 の既知違反(承認済みとして受容した過去のコミット)を恒久ノイズにしない acknowledged_findings 機構(独立審査 C-3)"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "A-18-1 に acknowledged_findings(既知違反の受容記録)を実装する"
+      labels: [governance]
+      body: "A-18-1(保護領域突合)は批准コミット以降の全履歴を毎回再検査するため、是正不能な過去の違反が毎週の警告に載り続ける。ops/deploy-dashboard.sh を保護領域へ登録した時点で顕在化した既知違反は2件ある: (1) `2191285`「merge: origin/main(T-015 リスク・T-016 デモ執行・キャラクター適用)を統合」— evil merge のコンフリクト解消差分が ops/deploy-dashboard.sh に触れ Approved トレーラ無し、(2) `7a56c98`「merge: origin/main(T-015 リスクエンジン)を統合 (T-016)」— 同じく evil merge で migrations/0016_nav_daily.sql に触れ Approved トレーラ無し。いずれも登録前・改番前の履歴であり git 履歴の書き換えなしには是正できない。恒久的な警告は『毎週赤いが誰も見ない』という形骸化(05-governance §6-5)を招くため、機構で受容を明示する。実装内容: ①config/governance.yaml に acknowledged_findings(commit・触れた保護パス・受容理由・受容日・承認記録の参照)を追加する、②A-18-1 は一致した違反を violations から除外し、報告 embed の別フィールド『受容済み既知違反: N 件』として必ず可視化する(黙って消さない — 沈黙を作らない原則)、③受容エントリは commit SHA とパスの両方が一致する場合のみ有効とし、将来の別の違反を巻き込まないこと、④受容エントリ自体の追加が承認手続を要することをテストで固定する。**src/ryza/audit/** と config/governance.yaml はいずれも保護領域のため、本件は改番 PR とは別 PR とし、独立役員審査 → #承認 通知 → みなし承認の L1 手続を経ること。** 出典: 改番 PR の独立審査 C-3。"
+    status: pending
+
+  - id: protected-areas-path-existence-test
+    what: "protected_areas の非 glob パスが実在することの不変条件テスト(改名・削除で保護が静かに外れるのを防ぐ。独立審査 C-5)"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "protected_areas の非 glob パス実在を tests/test_ips.py の不変条件テストで固定する"
+      labels: [impl]
+      body: "config/governance.yaml の protected_areas に列挙されたパスが実在するかは、現状どこでも検証されていない。ファイルを改名・削除すると保護領域の登録は残るが実体を指さなくなり、A-18-1 は『そのパスに触れたコミット』を永久に見つけられないまま静かに無力化する(Issue #48 の改番で ops/deploy-a13.sh → ops/deploy-a18.sh、src/ryza/audit/a13.py → a18.py を改名した際に現実の危険として顕在化した。今回は同一 PR 内で登録も更新したが、機械的な検知は無い)。実装内容: ①tests/test_ips.py に、protected_areas のうち **glob メタ文字(`*`・`?`)を含まないパス**がリポジトリに実在することを検査するテストを追加する、②glob を含むパスは少なくとも1件にマッチすることを検査する(`ops/lib/**` のように並行ラインで新設されるパスは、実体が入るまで既知の未充足として明示的に許容リストへ入れるか、実体の追加後にテストを有効化するかを判断して記録すること)、③失敗メッセージには『保護領域の登録が実体を失っている』ことと governance.yaml の該当行を出す。**tests/test_ips.py は protected_areas に area: invariant_tests として登録済みの保護領域であり、変更には独立役員審査+承認手続を要する。** 出典: 改番 PR の独立審査 C-5。"
+    status: pending
 
   - id: icon-rehost-storage
     what: "キャラクターアイコンを保存時に自前で再ホストする(独立役員審査 0020 C-6/C-7 の恒久是正)"

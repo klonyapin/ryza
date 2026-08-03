@@ -57,6 +57,8 @@ for u in ryza-a13.timer ryza-a13.service ryza-a13-fail.service; do
   systemctl disable --now "\$u" 2>/dev/null || true
   rm -f "/etc/systemd/system/\$u"
 done
+# 失敗状態のまま残るとユニット削除後も systemctl --failed に出続けるため明示的に消す。
+systemctl reset-failed ryza-a13.service 2>/dev/null || true
 rm -f /opt/ryza-a13-run.sh /opt/ryza-a13-fail.sh
 
 # 監査用ランナー(トークンは実行時に Secret Manager から取得し env + askpass で渡す)
