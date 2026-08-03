@@ -74,22 +74,28 @@ class ThesisRecord:
 def _ref_lookup(ref: dict[str, Any]) -> tuple[str, tuple[Any, ...], str]:
     """証憑参照 → (SQL, パラメータ, 表示名)。語彙違反は ``ThesisError``。
 
-    SQL はいずれも「参照先の最小 as_of」を1列で返す(行が無ければ NULL)。最小を採るのは
-    改定(indicators の revision)・再取得(bars の as_of 複数)で最も早く知り得た時点を
-    point-in-time の基準にするため。
+    SQL はいずれも **2列**を返す(行が無ければ NULL):
+
+    1. 参照先の最小 ``as_of``(知り得た時点)。最小を採るのは改定(indicators の revision)・
+       再取得(bars の as_of 複数)で最も早く知り得た時点を point-in-time の基準にするため
+    2. 参照先の最大 ``ts``(**対象時点** — bar / indicator のみ。文書系は NULL)。
+       ts は WHERE の等値条件でもあるが、比較を DB 側に寄せて timestamptz として返させる
+       のは、文字列の ts をアプリ側でパースして tz 有無を取り違えるのを避けるため
+       (独立役員審査 T-017 C-6)
     """
     kind = ref.get("kind")
     if kind == "document":
         doc_id = _require_int(ref, "doc_id")
         return (
-            "SELECT min(as_of) FROM docs.documents WHERE doc_id = %s",
+            "SELECT min(as_of), NULL::timestamptz FROM docs.documents WHERE doc_id = %s",
             (doc_id,),
             f"document(doc_id={doc_id})",
         )
     if kind == "research_report":
         report_id = _require_int(ref, "report_id")
         return (
-            "SELECT min(as_of) FROM docs.research_reports WHERE report_id = %s",
+            "SELECT min(as_of), NULL::timestamptz FROM docs.research_reports "
+            "WHERE report_id = %s",
             (report_id,),
             f"research_report(report_id={report_id})",
         )
@@ -100,7 +106,7 @@ def _ref_lookup(ref: dict[str, Any]) -> tuple[str, tuple[Any, ...], str]:
         if ts is None:
             raise ThesisError(f"証憑参照 bar に ts が無い: {ref!r}")
         return (
-            "SELECT min(as_of) FROM market.bars "
+            "SELECT min(as_of), max(ts) FROM market.bars "
             "WHERE instrument_id = %s AND timeframe = %s AND ts = %s",
             (instrument_id, timeframe, ts),
             f"bar(instrument_id={instrument_id}, ts={ts})",
@@ -111,7 +117,8 @@ def _ref_lookup(ref: dict[str, Any]) -> tuple[str, tuple[Any, ...], str]:
         if not series_code or ts is None:
             raise ThesisError(f"証憑参照 indicator に series_code/ts が無い: {ref!r}")
         return (
-            "SELECT min(as_of) FROM market.indicators WHERE series_code = %s AND ts = %s",
+            "SELECT min(as_of), max(ts) FROM market.indicators "
+            "WHERE series_code = %s AND ts = %s",
             (str(series_code), ts),
             f"indicator({series_code} @ {ts})",
         )
@@ -133,6 +140,13 @@ def validate_evidence_refs(
 ) -> list[dict[str, Any]]:
     """証憑参照を検証して正規化リストを返す(全件 as_of 以前に存在すること)。
 
+    検証は2つの時点に対して行う(独立役員審査 T-017 C-6):
+
+    - **as_of(知り得た時点)**: 参照先が判断時点より後に取り込まれていないか
+    - **ts(対象時点 — bar / indicator)**: 参照している足・指標そのものが判断時点より
+      未来のものでないか。バックフィルや誤登録では「as_of は過去だが ts は未来」の行が
+      作れてしまい、as_of の検査だけでは未来バーの参照を検知できない
+
     空リストは拒否(証憑なしの提案は作らない)。違反は ``EvidenceError`` に全件列挙する
     — 1件目で止めないのは、LLM(Ben)の出力を1回で全て直せる形で返すため。
     """
@@ -153,6 +167,7 @@ def validate_evidence_refs(
             cur.execute(sql, params)
             row = cur.fetchone()
         found = row[0] if row else None
+        ref_ts = row[1] if row else None
         if found is None:
             problems.append(f"{label}: 証憑が存在しない(参照先の行なし)")
             continue
@@ -160,6 +175,12 @@ def validate_evidence_refs(
             problems.append(
                 f"{label}: 証憑の as_of {found.isoformat()} が判断時点 "
                 f"{as_of.isoformat()} より新しい(未来情報の混入 — 不変原則4)"
+            )
+            continue
+        if ref_ts is not None and ref_ts > as_of:
+            problems.append(
+                f"{label}: 証憑の対象時点 ts {ref_ts.isoformat()} が判断時点 "
+                f"{as_of.isoformat()} より後(未来のバー・指標の参照 — 不変原則4)"
             )
             continue
         normalized.append(dict(raw))

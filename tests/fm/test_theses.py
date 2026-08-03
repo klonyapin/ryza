@@ -79,6 +79,60 @@ def test_evidence_bar_ref(conn, run, instrument, insert_bars):
     assert len(validate_evidence_refs(conn, refs, as_of=datetime.now(UTC))) == 3
 
 
+# ── 対象時点(ts)の検証(独立役員審査 T-017 C-6)───────────────────────────────
+def test_evidence_bar_with_future_ts_is_rejected(conn, run, instrument, insert_bars):
+    """as_of は過去でも ts が判断時点より後のバーは拒否する(バックフィル・誤登録対策)。
+
+    「知り得た時点(as_of)」だけを見る検査は、改定やバックフィルで作られる
+    『as_of は過去だが ts は未来』の行を通してしまう。
+    """
+    iid = instrument()
+    as_of = datetime.now(UTC)
+    future_day = (as_of + timedelta(days=3)).astimezone(UTC).date()
+    # as_of は判断時点より前(= 知り得た時点としては合法)だが、ts は未来。
+    stamps = insert_bars(
+        iid, [100], last_day=future_day, as_of=as_of - timedelta(days=1)
+    )
+    refs = [
+        {"kind": "bar", "instrument_id": iid, "timeframe": "1d", "ts": stamps[0].isoformat()}
+    ]
+    with pytest.raises(EvidenceError, match="対象時点 ts") as exc:
+        validate_evidence_refs(conn, refs, as_of=as_of)
+    assert "不変原則4" in exc.value.problems[0]
+
+
+def test_evidence_indicator_with_future_ts_is_rejected(conn, run):
+    as_of = datetime.now(UTC)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO market.indicators (series_code, ts, value, revision, as_of, run_id)
+            VALUES ('TEST_TS_CHECK', %s, 1.0, 0, %s, %s)
+            """,
+            (as_of + timedelta(days=2), as_of - timedelta(days=1), run.run_id),
+        )
+    refs = [
+        {
+            "kind": "indicator",
+            "series_code": "TEST_TS_CHECK",
+            "ts": (as_of + timedelta(days=2)).isoformat(),
+        }
+    ]
+    with pytest.raises(EvidenceError, match="対象時点 ts"):
+        validate_evidence_refs(conn, refs, as_of=as_of)
+
+
+def test_evidence_past_ts_still_accepted(conn, run, instrument, insert_bars):
+    """ts 検査を足しても、過去の足の参照は従来どおり通る(回帰)。"""
+    iid = instrument()
+    stamps = insert_bars(iid, [100, 101])
+    refs = [
+        {"kind": "bar", "instrument_id": iid, "timeframe": "1d", "ts": s.isoformat()}
+        for s in stamps
+    ]
+    assert len(validate_evidence_refs(conn, refs, as_of=datetime.now(UTC))) == 2
+
+
 def test_evidence_unknown_kind(conn, run):
     with pytest.raises(EvidenceError, match="未知の証憑 kind"):
         _record(conn, run, evidence_refs=[{"kind": "gut_feeling", "id": 1}])
