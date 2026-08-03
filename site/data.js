@@ -1,5 +1,5 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-03 12:14 JST",
+ "generated_at": "2026-08-03 12:33 JST",
  "phase": "実装フェーズ(T-010 階層0前処理 進行中)",
  "milestones": [
   {
@@ -85,7 +85,7 @@ window.RYZA_DATA = {
   {
    "name": "ペーパー運用開始",
    "detail": "日次サイクル(取込→分析→朝刊→取引→記帳)フル稼働",
-   "status": "todo"
+   "status": "user"
   }
  ],
  "issues": [
@@ -315,9 +315,52 @@ window.RYZA_DATA = {
     "impl"
    ],
    "milestone": "T-007/T-008 朝刊・速報"
+  },
+  {
+   "number": 26,
+   "title": "Anthropic API キーの登録(朝刊の実 LLM 執筆に必要・5分)",
+   "state": "OPEN",
+   "labels": [
+    "user-action"
+   ],
+   "milestone": "ペーパー運用開始"
+  },
+  {
+   "number": 27,
+   "title": "T-013: 実 LLM プロバイダ+日次サイクル常駐化",
+   "state": "CLOSED",
+   "labels": [
+    "impl"
+   ],
+   "milestone": "ペーパー運用開始"
   }
  ],
  "commits": [
+  {
+   "hash": "389c594",
+   "date": "08/03 12:32",
+   "subject": "feat(jobs): 実 LLM プロバイダと日次サイクル (T-013)"
+  },
+  {
+   "hash": "4f14eb2",
+   "date": "08/03 12:30",
+   "subject": "wip(jobs): providers/daily テストと日次オーケストレータ"
+  },
+  {
+   "hash": "078c94c",
+   "date": "08/03 12:26",
+   "subject": "wip(jobs): 実 LLM プロバイダ・階層設定・日次オーケストレータの骨格"
+  },
+  {
+   "hash": "fdc88b8",
+   "date": "08/03 12:15",
+   "subject": "docs(tasks): T-013 実装指示書(実 LLM プロバイダ+日次サイクル常駐化)"
+  },
+  {
+   "hash": "8a2b4b1",
+   "date": "08/03 12:14",
+   "subject": "chore(site): T-007/T-008 マイルストーン完了"
+  },
   {
    "hash": "9c4823c",
    "date": "08/03 12:13",
@@ -342,31 +385,6 @@ window.RYZA_DATA = {
    "hash": "edca140",
    "date": "08/03 12:08",
    "subject": "wip(press): 純関数テスト（リンター・採点・embed・画像）"
-  },
-  {
-   "hash": "c416e4b",
-   "date": "08/03 12:06",
-   "subject": "wip(press): 朝刊パイプラインと速報エンジン本体"
-  },
-  {
-   "hash": "56ab7ec",
-   "date": "08/03 12:00",
-   "subject": "feat(config): 初代4名の FM マンデートを確定・機械可読化"
-  },
-  {
-   "hash": "7aea526",
-   "date": "08/03 11:59",
-   "subject": "wip(press): 執筆・embed・画像・トピック採点モジュール"
-  },
-  {
-   "hash": "fba3b0b",
-   "date": "08/03 11:57",
-   "subject": "docs(design): IPS §7 の2論点を解消(2026-08-03 ユーザー決定)"
-  },
-  {
-   "hash": "c92ce78",
-   "date": "08/03 11:56",
-   "subject": "wip(press): config ローダと文体リンター（L-1〜L-5・L-7・U字判定）"
   }
  ]
 };
