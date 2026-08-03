@@ -4,7 +4,8 @@
 
   A-18-1 保護領域突合   … `protected_areas` の glob に触れた発効日以後のコミットを列挙し、
                           (a) ``Approved:`` トレーラ (b) GitHub マージ PR 経由(Merge pull request
-                          マージコミットの配下)のいずれも無いものを違反として列挙する
+                          マージコミットの配下) (c) PR 承継(トレーラ有効な PR マージが持ち込んだ
+                          コミット群)のいずれも無いものを違反として列挙する
   A-18-2 文書⇔config    … 80-ips.md ⇔ config/ips.yaml、06-constitution.md ⇔ config/governance.yaml
                           のバージョン文字列一致を検査する
   A-18-3 宣言棚卸し     … controls のうち ``enforcement: declaration`` を列挙する(検査ではなく
@@ -30,6 +31,14 @@
 - GitHub の squash マージ(``... (#N)`` 形式の単独コミット)は「マージ PR」と判定しない。
   本リポジトリの承認手続はマージコミット(``Merge pull request``)で行われている(批准 PR #32 が
   実例)。squash 併用を始める場合は判定の拡張が必要
+
+**PR 承継(2026-08-04 設計リード裁定)**: first-parent 上のマージ M が有効な ``Approved:``
+トレーラを持つとき、M が main に持ち込んだコミット群(M の配下でまだ main に無かったもの)は
+M の承認を承継し違反としない。PR 単位のみなし承認は独立審査を経た PR の内容全体に及ぶためで、
+ブランチ内コミット(worktree の統合マージ含む)に個別トレーラを要求すると統合フローが構造的に
+違反を量産し監査が形骸化する。承継は ``inherited`` として集計し報告に必ず出す(黙って消さない)。
+承継の起点は「first-parent 上・件名がマージ形式・トレーラ有効」の3条件を満たすコミットのみで、
+トレーラの無い PR マージ配下は従来どおり検査する。
 
 **既知違反の受容(acknowledged_findings)**: 是正不能な過去の違反(git 履歴の書き換えなしには
 消せない evil merge 等)は ``config/governance.yaml`` の ``acknowledged_findings`` に
@@ -202,12 +211,14 @@ def check_protected_commits(
     gov: dict[str, Any],
     *,
     since_commit: str | None = RATIFICATION_COMMIT,
-) -> tuple[list[dict[str, Any]], int]:
-    """A-18-1: 保護領域に触れた無承認コミットの一覧と、検査したコミット数を返す。
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    """A-18-1: 無承認コミットの一覧・PR 承継で承認されたコミットの一覧・検査コミット数を返す。
 
     承認とみなす条件(定款附則):
       (a) コミット本文の ``Approved:`` トレーラ
       (b) GitHub マージ PR 経由 = ``Merge pull request`` マージコミットの配下で main に到達
+      (c) **PR 承継**: 有効な ``Approved:`` トレーラを持つ first-parent 上の PR マージ M が
+          main に持ち込んだコミット群は、M の承認を承継する(下記)
     ``since_commit``(批准コミット)以前のコミットは ``rev-list since..HEAD`` により対象外。
     """
     repo = str(repo_path)
@@ -221,6 +232,7 @@ def check_protected_commits(
     fp_merges = _rev_list(repo, since_commit, "--first-parent", "--merges")
 
     violations: list[dict[str, Any]] = []
+    inherited: list[dict[str, Any]] = []
     for sha in commits:
         parents = _git(repo, "log", "-1", "--format=%P", sha).split()
         is_merge = len(parents) > 1
@@ -238,14 +250,44 @@ def check_protected_commits(
         message = _git(repo, "log", "-1", "--format=%B", sha)
         if has_approval_trailer(message, trailer):
             continue
+
+        # 承継の起点候補: sha を main に持ち込んだ first-parent 上のマージ M。
+        # sha 自身が first-parent 上にある場合(= main への直接の到達点)は承継しない。
+        merge = None if sha in first_parent else _find_introducing_merge(repo, sha, fp_merges)
+        if merge is not None:
+            m_subject = _git(repo, "log", "-1", "--format=%s", merge).strip()
+            m_is_pr = bool(_PR_MERGE_RE.match(m_subject))
+            m_approved = has_approval_trailer(
+                _git(repo, "log", "-1", "--format=%B", merge), trailer
+            )
+            if m_is_pr and not is_merge:
+                continue  # (b) マージ PR 経由のブランチ内コミット = 代表承認(附則・従来どおり)
+            if m_is_pr and m_approved:
+                # (c) PR 承継。PR 単位のみなし承認(定款第3条 v0.4)は独立審査を経た PR の
+                # 内容全体に及ぶ。ブランチ内コミット(worktree の統合マージ含む)に個別
+                # トレーラを要求すると、統合フローが構造的に違反を量産し監査が形骸化する
+                # (2026-08-04 設計リード裁定・g-a18 審査 C-3 の恒久対策)。
+                # 承継の起点は「first-parent 上の・件名がマージ形式の・トレーラ有効な」
+                # コミットに限る。トレーラの無い PR マージ(#56 等の初期)は承継させない。
+                inherited.append(
+                    {
+                        "commit": sha[:12],
+                        "commit_full": sha,
+                        "subject": _git(repo, "log", "-1", "--format=%s", sha).strip(),
+                        "files": touched,
+                        "merge": merge[:12],
+                        "merge_subject": m_subject,
+                    }
+                )
+                continue
+
         if is_merge:
             # マージ自身の差分は PR 件名では承認と見なさない(レビューはブランチ内容に対する
             # もので、マージ時に持ち込まれた差分をカバーしない)。トレーラ必須。
+            # 承継が効くのは「トレーラ有効な PR マージが持ち込んだ」ブランチ内マージのみで、
+            # first-parent 上のマージ自身(件名偽装の余地がある経路)は従来どおり検査する。
             reason = "マージ自身のコンフリクト解消差分(evil merge)で Approved トレーラなし"
         elif sha not in first_parent:
-            merge = _find_introducing_merge(repo, sha, fp_merges)
-            if merge and _PR_MERGE_RE.match(_git(repo, "log", "-1", "--format=%s", merge)):
-                continue  # マージ PR 経由 = 代表承認(附則)
             reason = "マージ経由だが PR マージコミットが確認できない"
         else:
             reason = "main への直接コミットで Approved トレーラなし"
@@ -259,7 +301,7 @@ def check_protected_commits(
                 "reason": reason,
             }
         )
-    return violations, len(commits)
+    return violations, inherited, len(commits)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -470,7 +512,9 @@ def run_a18(
 ) -> dict[str, Any]:
     """A-18 の4検査を実行して構造化 dict を返す(DB・Discord に依存しない純検査)。"""
     gov = load_governance(repo_path, governance_path)
-    found, checked = check_protected_commits(repo_path, gov, since_commit=since_commit)
+    found, inherited, checked = check_protected_commits(
+        repo_path, gov, since_commit=since_commit
+    )
     # 既知違反の受容: violations からは外すが捨てない(報告で必ず別枠表示する)。
     violations, acknowledged, ack_notes = partition_acknowledged(found, gov)
     direct_pushes, fp_checked = check_direct_pushes(repo_path, since_commit=pr_since_commit)
@@ -479,6 +523,7 @@ def run_a18(
         "since_commit": since_commit,
         "checked_commits": checked,
         "violations": violations,
+        "inherited": inherited,
         "acknowledged": acknowledged,
         "mismatches": check_versions(repo_path, version_pairs),
         "declarations": list_declarations(gov),
@@ -521,6 +566,21 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
             {
                 "name": "A-18-1 保護領域突合",
                 "value": f"✅ 違反なし(検査 {result['checked_commits']} コミット)",
+                "inline": False,
+            }
+        )
+
+    # PR 承継で承認されたコミットは違反にしないが、起点の PR マージごとに集計して可視化する。
+    inherited = result.get("inherited") or []
+    if inherited:
+        by_merge: dict[str, list[dict[str, Any]]] = {}
+        for item in inherited:
+            by_merge.setdefault(f"`{item['merge']}` {item['merge_subject']}", []).append(item)
+        inh_lines = [f"- {m}: {len(items)} コミット" for m, items in by_merge.items()]
+        fields.append(
+            {
+                "name": f"PR 承継で承認: {len(inherited)} コミット(起点 {len(by_merge)} PR)",
+                "value": "\n".join(inh_lines)[:1024],
                 "inline": False,
             }
         )
@@ -629,9 +689,10 @@ def run_and_report(
     report = has_findings(result) or always_report
     if dry_run:
         log.info(
-            "[DRY_RUN] A-18 結果: violations=%d acknowledged=%d mismatches=%d declarations=%d "
-            "direct_pushes=%d(enqueue %s)",
-            len(result["violations"]), len(result.get("acknowledged") or []),
+            "[DRY_RUN] A-18 結果: violations=%d inherited=%d acknowledged=%d mismatches=%d "
+            "declarations=%d direct_pushes=%d(enqueue %s)",
+            len(result["violations"]), len(result.get("inherited") or []),
+            len(result.get("acknowledged") or []),
             len(result["mismatches"]), len(result["declarations"]),
             len(result["direct_pushes"]),
             "対象" if report else "不要",
@@ -685,6 +746,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
         print(f"[直push] {d['commit']} {d['subject']}: {d['files']}", file=sys.stderr)
     print(
         f"A-18 完了(検査 {result['checked_commits']} コミット, 違反 {len(result['violations'])}, "
+        f"PR 承継 {len(result.get('inherited') or [])}, "
         f"受容済み {len(result.get('acknowledged') or [])}, "
         f"不整合 {len(result['mismatches'])}, 宣言 {len(result['declarations'])}, "
         f"直push {len(result['direct_pushes'])})",

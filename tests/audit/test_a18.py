@@ -76,6 +76,12 @@ def repo(tmp_path: Path) -> tuple[Path, str]:
 
 
 def _run_a181(repo_path: Path, since: str | None):
+    """A-18-1 を実行し (違反, 検査コミット数) を返す(PR 承継の一覧は _run_a181_full で見る)。"""
+    violations, _inherited, checked = _run_a181_full(repo_path, since)
+    return violations, checked
+
+
+def _run_a181_full(repo_path: Path, since: str | None):
     gov = a18.load_governance(repo_path)
     return a18.check_protected_commits(repo_path, gov, since_commit=since)
 
@@ -195,6 +201,124 @@ def test_evil_merge_with_trailer_is_ok(repo):
     )
     violations, _ = _run_a181(r, since)
     assert violations == []
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# A-18-1 PR 承継(2026-08-04 設計リード裁定)
+# ────────────────────────────────────────────────────────────────────────────
+APPROVED = "Approved: https://github.com/x/y/pull/9"
+
+
+def _merge_pr_with_evil_merge(r: Path, merge_message: str) -> tuple[str, str]:
+    """ブランチ内で「origin/main 統合の evil merge」を作り、PR マージで main へ取り込む。
+
+    実運用の worktree フロー(ブランチ作業中に origin/main を統合してコンフリクトを解消する)
+    を再現する。戻り値は (ブランチ内 evil merge の sha, main 側 PR マージの sha)。
+    """
+    base = _git(r, "rev-parse", "HEAD").strip()
+    _git(r, "checkout", "-q", "-b", "prfeature")
+    _commit(r, "docs/protected.md", "branch side\n", "docs: ブランチ側の保護領域変更")
+    _git(r, "checkout", "-q", "main")
+    _commit(r, "docs/protected.md", "main side\n", "docs: main 側\n\n" + APPROVED)
+    main_tip = _git(r, "rev-parse", "HEAD").strip()
+    _git(r, "checkout", "-q", "prfeature")
+    conflict = subprocess.run(
+        ["git", "-C", str(r), "merge", main_tip], capture_output=True, text=True, check=False
+    )
+    assert conflict.returncode != 0  # コンフリクトが起きていること
+    (r / "docs/protected.md").write_text("resolved: neither side\n", encoding="utf-8")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-m", "merge: origin/main をブランチへ統合(コンフリクト解消)")
+    evil = _git(r, "rev-parse", "HEAD").strip()
+    _git(r, "checkout", "-q", "main")
+    _git(r, "merge", "--no-ff", "-q", "prfeature", "-m", merge_message)
+    assert base  # 起点の記録(可読性のため)
+    return evil, _git(r, "rev-parse", "HEAD").strip()
+
+
+def test_pr_inheritance_covers_in_branch_evil_merge(repo):
+    """トレーラ有効な PR マージが持ち込んだブランチ内 evil merge は違反にならない。"""
+    r, since = repo
+    evil, merge = _merge_pr_with_evil_merge(
+        r, "Merge pull request #9 from k/feature\n\n" + APPROVED
+    )
+    violations, inherited, _ = _run_a181_full(r, since)
+    assert violations == []
+    assert [i["commit"] for i in inherited] == [evil[:12]]
+    assert inherited[0]["merge"] == merge[:12]
+    assert inherited[0]["files"] == ["docs/protected.md"]
+
+
+def test_pr_inheritance_is_visible_in_report(repo):
+    """承継は黙って消さず、起点 PR ごとの集計行として報告に出す。"""
+    r, since = repo
+    evil, merge = _merge_pr_with_evil_merge(
+        r, "Merge pull request #9 from k/feature\n\n" + APPROVED
+    )
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [i["commit"] for i in result["inherited"]] == [evil[:12]]
+    field = next(
+        f for f in a18.build_alert_embed(result)["fields"] if f["name"].startswith("PR 承継で承認")
+    )
+    assert "1 コミット" in field["name"]
+    assert merge[:12] in field["value"] and "1 コミット" in field["value"]
+
+
+def test_pr_inheritance_requires_trailer_on_the_merge(repo):
+    """トレーラの無い PR マージ配下の evil merge は従来どおり違反(初期 PR #56 型)。"""
+    r, since = repo
+    evil, _ = _merge_pr_with_evil_merge(r, "Merge pull request #9 from k/feature")
+    violations, inherited, _ = _run_a181_full(r, since)
+    assert [v["commit"] for v in violations] == [evil[:12]]
+    assert "evil merge" in violations[0]["reason"]
+    assert inherited == []
+
+
+def test_pr_inheritance_requires_pr_merge_subject(repo):
+    """件名がマージ形式でない(= PR でない)統合は、トレーラがあっても承継の起点にしない。"""
+    r, since = repo
+    evil, _ = _merge_pr_with_evil_merge(r, "ローカルマージ(PR でない)\n\n" + APPROVED)
+    violations, inherited, _ = _run_a181_full(r, since)
+    assert inherited == []
+    # evil merge に加え、ブランチ内の通常コミットも附則(b)の対象外になり違反として残る。
+    assert evil[:12] in [v["commit"] for v in violations]
+
+
+def test_first_parent_merge_itself_is_not_inherited(repo):
+    """first-parent 上のマージ自身の解消差分は承継の対象外(件名偽装の防御を維持)。
+
+    main 側で直接コンフリクト解消したマージ(= first-parent 上)は、トレーラを持つ別の PR の
+    配下に見えても承継しない。起点になれるのは自分より前の first-parent マージだけである。
+    """
+    r, since = repo
+    _merge_pr_with_evil_merge(r, "Merge pull request #9 from k/feature\n\n" + APPROVED)
+    _make_evil_merge(r, "Merge pull request #10 from k/other")  # トレーラなし・main 上
+    violations, inherited, _ = _run_a181_full(r, since)
+    assert len(violations) == 1
+    assert "evil merge" in violations[0]["reason"]
+    assert len(inherited) == 1  # 先の PR #9 配下の承継は維持される
+
+
+def test_inheritance_does_not_cover_direct_main_commits(repo):
+    """main への直コミットは、後続 PR にトレーラがあっても承継されない。"""
+    r, since = repo
+    sha = _commit(r, "docs/protected.md", "v2\n", "docs: main への直コミット")
+    _merge_pr(r, "f1", "src/prot/ks.py", "x = 1\n", 11)
+    violations, inherited, _ = _run_a181_full(r, since)
+    assert [v["commit"] for v in violations] == [sha[:12]]
+    assert inherited == []
+
+
+def test_plain_branch_commits_are_not_counted_as_inherited(repo):
+    """従来どおり附則(b)で承認されるブランチ内の通常コミットは承継集計に載せない。
+
+    集計「PR 承継で承認: N」は『承継が無ければ違反になっていたコミット』だけを数える
+    (毎週の集計を実質的な件数に保つため)。
+    """
+    r, since = repo
+    _merge_pr(r, "f1", "src/prot/ks.py", "x = 1\n", 12)
+    violations, inherited, _ = _run_a181_full(r, since)
+    assert violations == [] and inherited == []
 
 
 # ────────────────────────────────────────────────────────────────────────────

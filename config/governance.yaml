@@ -171,16 +171,13 @@ approval_trailer: "Approved:"
 #     同じコミットが別の保護パスにも触れていたと判明した場合、paths 集合が変わるため受容は
 #     自動的に外れる(将来の別の違反を巻き込まない)
 #   - 一致する違反が無くなったエントリ(改番・登録漏れ)は報告 notes に「陳腐化」として出る
+# 履歴注記(2026-08-04): 当初は `2191285…`(ops/deploy-dashboard.sh・PR #58 配下の evil merge)も
+# 受容登録する予定だったが、同じ PR で A-18-1 に **PR 承継** ルール(トレーラ有効な PR マージが
+# 持ち込んだコミット群は承認を承継する)を入れた結果、親 PR #58 のマージがトレーラを持つため
+# 承継でカバーされ、受容は不要になった(同様に `3814ba1…`/PR #70・`91e249b…`/PR #73 も承継)。
+# 本エントリは main に到達する前の草案段階で取り下げたものであり、追記オンリー規則が禁じる
+# 「発効済み受容の削除」ではない。承継の可視化は報告 embed の「PR 承継で承認: N コミット」で行う。
 acknowledged_findings:
-  - commit: 21912859586c4ed678a81a120272c89bf9953570
-    paths:
-      - ops/deploy-dashboard.sh
-    reason: >-
-      evil merge(origin/main 統合時のコンフリクト解消差分)で ops/deploy-dashboard.sh に触れ
-      Approved トレーラが無い。同スクリプトが保護領域に登録されたのは本コミットより後
-      (PR #66)であり、当時は保護対象でなかった。git 履歴の書き換えなしに是正できない。
-    approval_ref: https://github.com/klonyapin/ryza/pull/58
-    acknowledged_on: "2026-08-03"
   - commit: 7a56c98fb624f2c72288c73b47018cbf63c253a1
     paths:
       - migrations/0016_nav_daily.sql
@@ -188,7 +185,9 @@ acknowledged_findings:
     reason: >-
       evil merge(origin/main 統合時のコンフリクト解消差分)で migrations/0016_nav_daily.sql と
       src/ryza/risk/daily.py に触れ Approved トレーラが無い。内容自体は PR #56 のみなし承認で
-      カバーされているが、マージ自身のトレーラを欠く。git 履歴の書き換えなしに是正できない。
+      カバーされているが、マージ自身のトレーラを欠く。親 PR #56 のマージコミットにも Approved
+      トレーラが無いため PR 承継(2026-08-04 裁定)でもカバーできない。git 履歴の書き換えなしに
+      是正できない。
     approval_ref: https://github.com/klonyapin/ryza/pull/56
     acknowledged_on: "2026-08-03"
 

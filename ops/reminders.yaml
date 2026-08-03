@@ -465,7 +465,7 @@ reminders:
       title: "A-18-1 に acknowledged_findings(既知違反の受容記録)を実装する"
       labels: [governance]
       body: "(完了済み)A-18-1(保護領域突合)は批准コミット以降の全履歴を毎回再検査するため、是正不能な過去の違反が毎週の警告に載り続ける。ops/deploy-dashboard.sh を保護領域へ登録した時点で顕在化した既知違反は2件ある: (1) `2191285`「merge: origin/main(T-015 リスク・T-016 デモ執行・キャラクター適用)を統合」— evil merge のコンフリクト解消差分が ops/deploy-dashboard.sh に触れ Approved トレーラ無し、(2) `7a56c98`「merge: origin/main(T-015 リスクエンジン)を統合 (T-016)」— 同じく evil merge で migrations/0016_nav_daily.sql に触れ Approved トレーラ無し。いずれも登録前・改番前の履歴であり git 履歴の書き換えなしには是正できない。恒久的な警告は『毎週赤いが誰も見ない』という形骸化(05-governance §6-5)を招くため、機構で受容を明示する。実装内容: ①config/governance.yaml に acknowledged_findings(commit・触れた保護パス・受容理由・受容日・承認記録の参照)を追加する、②A-18-1 は一致した違反を violations から除外し、報告 embed の別フィールド『受容済み既知違反: N 件』として必ず可視化する(黙って消さない — 沈黙を作らない原則)、③受容エントリは commit SHA とパスの両方が一致する場合のみ有効とし、将来の別の違反を巻き込まないこと、④受容エントリ自体の追加が承認手続を要することをテストで固定する。**src/ryza/audit/** と config/governance.yaml はいずれも保護領域のため、本件は改番 PR とは別 PR とし、独立役員審査 → #承認 通知 → みなし承認の L1 手続を経ること。** 出典: 改番 PR の独立審査 C-3。"
-    status: done # 2026-08-03 実装: governance.yaml の acknowledged_findings 節(追記オンリー)+ a18.partition_acknowledged。既知2件(2191285・7a56c98)を登録し、報告 embed に「受容済み既知違反: N 件」を別枠表示
+    status: done # 2026-08-04 実装: governance.yaml の acknowledged_findings 節(追記オンリー)+ a18.partition_acknowledged。受容は 7a56c98 の1件のみ(2191285 は同 PR で入れた「PR 承継」ルールでカバーされ受容不要)。報告 embed に「受容済み既知違反: N 件」「PR 承継で承認: N コミット」を別枠表示
 
   - id: protected-areas-path-existence-test
     what: "protected_areas の非 glob パスが実在することの不変条件テスト(改名・削除で保護が静かに外れるのを防ぐ。独立審査 C-5)"
