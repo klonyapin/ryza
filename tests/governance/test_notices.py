@@ -218,6 +218,85 @@ def test_reserved_kind_rolls_back_the_notice(conn, run_id):
     conn.rollback()
 
 
+def test_outbox_failure_leaves_no_decision(conn, run_id, monkeypatch):
+    """**逆方向のフォールト注入**(独立役員審査 軽微-12): 通知側が落ちたら記録も残らない。
+
+    既存の原子性テストは「記録の失敗で通知が消える」方向だけを見ていた。逆向き
+    ——通知の書込が途中まで進んでから失敗する——は、放置すると「記録なき通知」ではなく
+    **書きかけの通知行が残ったまま記録が無い**状態を作りうる。enqueue が行を書いた直後に
+    落ちる障害を注入し、SAVEPOINT が両方を巻き戻すことを確かめる。
+    """
+    real_enqueue = notices.enqueue
+
+    def failing_enqueue(c, channel, embed, rid, **kwargs):
+        real_enqueue(c, channel, embed, rid, **kwargs)  # 行を書いてから落ちる
+        raise RuntimeError("通知配送系の障害を模擬")
+
+    monkeypatch.setattr(notices, "enqueue", failing_enqueue)
+    with pytest.raises(RuntimeError, match="模擬"):
+        notices.announce_deemed_approval(conn, "fault-outbox", "pr", NOTICE, run_id)
+    assert _outbox_rows(conn, run_id) == []
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM governance.decisions WHERE proposal_ref = 'fault-outbox'"
+        )
+        assert cur.fetchone()[0] == 0
+    # 呼び出し側のトランザクションは生きている(巻き戻しは SAVEPOINT まで)。
+    monkeypatch.undo()
+    assert notices.announce_deemed_approval(conn, "fault-after", "pr", NOTICE, run_id)
+    assert len(_outbox_rows(conn, run_id)) == 1
+    conn.rollback()
+
+
+def test_outbox_constraint_violation_rolls_back_both(conn, run_id):
+    """DB 側の障害(``press.outbox.run_id`` の NOT NULL 違反)でも双方が消える。
+
+    Python 側の例外(前のテスト)と違い、制約違反は**トランザクションを abort 状態にする**。
+    SAVEPOINT で包んでいなければ、以降の文が全て失敗して呼び出し側の作業ごと道連れになる。
+    """
+    import psycopg
+
+    with pytest.raises(psycopg.errors.NotNullViolation):
+        # run_id=None で outbox の NOT NULL に触れさせる(通知側だけを DB 層で失敗させる)。
+        notices.announce_deemed_approval(conn, "fault-null", "pr", NOTICE, None)  # type: ignore[arg-type]
+    assert _outbox_rows(conn, run_id) == []
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM governance.decisions WHERE proposal_ref = 'fault-null'")
+        assert cur.fetchone()[0] == 0
+    # abort した文の後でも呼び出し側のトランザクションは使える(SAVEPOINT まで戻った)。
+    assert notices.announce_deemed_approval(conn, "fault-null-after", "pr", NOTICE, run_id)
+    conn.rollback()
+
+
+def test_announce_on_an_idle_connection_does_not_commit(migrated_db):
+    """CLI 経路(新規接続で announce)で ``transaction()`` が COMMIT に化けないこと。
+
+    psycopg の ``conn.transaction()`` は**最も外側なら exit 時に COMMIT する**。CLI は
+    まっさらな接続(``IDLE``)で announce を呼ぶため、無害な文でトランザクションを開いて
+    おかないと、SAVEPOINT のつもりの束ねが確定してしまい、呼び出し側の rollback が効かない
+    (= 失敗しても記録と通知が残る)。軽微-12 で未カバーだった分岐。
+    """
+    from psycopg import pq
+
+    c = connect()
+    run = start_run("test.governance.notices.idle", conn=c)
+    c.commit()  # Run だけ確定させ、接続を IDLE(CLI 起動直後と同じ状態)に戻す
+    try:
+        assert c.info.transaction_status == pq.TransactionStatus.IDLE
+        result = notices.announce_deemed_approval(c, "idle-ref", "pr", NOTICE, run.run_id)
+        assert current_decision(c, "idle-ref") is not None
+        c.rollback()
+        assert current_decision(c, "idle-ref") is None
+        with c.cursor() as cur:
+            cur.execute("SELECT count(*) FROM press.outbox WHERE id = %s", (result.outbox_id,))
+            assert cur.fetchone()[0] == 0
+    finally:
+        with c.cursor() as cur:  # 確定させた Run 行だけ後始末する
+            cur.execute("DELETE FROM meta.runs WHERE run_id = %s", (run.run_id,))
+        c.commit()
+        c.close()
+
+
 def test_autocommit_connection_is_refused(migrated_db):
     """autocommit では SAVEPOINT が成立せず片方だけ永続化されうる — 書込前に拒否する。"""
     c = connect(autocommit=True)
