@@ -910,10 +910,15 @@ def _render_chat_turn(turn: boardroom.ChatTurn) -> None:
     """1 発言を吹き出し表示する。役職側は名前(役職)+キャラクター色+アバター。
 
     発言しなかった役員は単に現れない(会議の進行役が発言者を選ぶ方式のため — 05 §5)。
+    進行役の定型応答(LLM ではない)はキャラクターを持たないため小さく表示する。
+    決定論ガードで呼ばれた発言はその旨をキャプションに出す(選定経路の可視化)。
     """
     if turn.speaker == "representative":
         with st.chat_message("user"):
             st.markdown(turn.text)
+        return
+    if turn.speaker == boardroom.FACILITATOR_SPEAKER:
+        st.caption(turn.text)
         return
     member = _role_member(turn.speaker)
     with st.chat_message("assistant", avatar=_role_avatar(turn.speaker)):
@@ -922,6 +927,8 @@ def _render_chat_turn(turn: boardroom.ChatTurn) -> None:
             f"{_role_display(turn.speaker)}</span>",
             unsafe_allow_html=True,
         )
+        if turn.source == "guard":
+            st.caption("重要決定の兆候を検出したため、決定論ガードが発言を要求(05 §3)")
         st.markdown(turn.text)
 
 
@@ -997,8 +1004,13 @@ def page_boardroom() -> None:
                         # 発言は残す — 会議で実際にあった発言を握り潰さない)。
                         on_reply=_append_and_render,
                     )
-                # ルータの選定結果を Run に残す(誰が呼ばれたかの事後検証用)。
-                r.update_params({"rounds": len(result.rounds), "roles": result.rounds})
+                # ルータ・ガードの選定結果を Run の runtime 名前空間に残す
+                # (入力証跡は書き換えない — provenance.Run.record_runtime)。
+                r.record_runtime({
+                    "rounds": len(result.rounds),
+                    "roles": result.rounds,
+                    "guard_fired": result.guard_fired,
+                })
         except Exception as exc:  # noqa: BLE001 - API 失敗時も会議を壊さず継続
             if len(turns) == spoke_before:
                 turns.pop()  # 誰も発言できなかった場合は代表の発言ごと取り消す
@@ -1010,22 +1022,26 @@ def page_boardroom() -> None:
     st.divider()
     if st.button("議事録として保存(主張・懸念も蓄積)", disabled=not turns):
         try:
-            roles = boardroom.speaking_roles(turns)  # パスのみの役職は要約しない
+            roles = boardroom.speaking_roles(turns)  # 発言した役職のみ要約する
             with st.spinner("議事録を保存し、主張・懸念を要約中…"):
                 with run_ctx(
                     "dashboard.boardroom.save", {"roles": roles}, conn=wconn
                 ) as r:
+                    held_at = datetime.now(UTC)
                     saved = boardroom.save_office_chat_minute(
-                        wconn, turns=turns, run_id=r.run_id
+                        wconn, turns=turns, run_id=r.run_id, held_at=held_at
                     )
                     # 要約は mid 固定(応答の階層とは独立 — 要約に fable は不要)。
-                    # 役職ごとに独立して要約・追記する(記憶の分離 — 05 §6-2)。
+                    # 入力は当該役職+代表の発言のみに決定論フィルタ(記憶の分離 —
+                    # 05 §6-2。他役職の主張が永続記憶へ混入する経路を構造的に塞ぐ)。
                     stance_ids: list[int] = []
                     for role in roles:
                         digest = boardroom.digest_stances(
                             _boardroom_llm(r, "mid"),
                             role=role,
-                            transcript_md=saved.body_md,
+                            transcript_md=boardroom.role_digest_input(
+                                turns, role, held_at=held_at
+                            ),
                             model=_llm_config().model_for("mid"),
                             model_tier="mid",
                         )
@@ -1056,15 +1072,28 @@ def page_boardroom() -> None:
             proposal_ref = st.text_input(
                 "proposal_ref(承認事項なら governance.decisions と突合。任意)"
             )
+            # 決定論チェック(05 §3): 独立役員の発言が無い議事録の決議には明示確認を
+            # 求める。ブロックではなく摩擦であり、決議権は代表に残る(定款第3条)。
+            confirm = st.checkbox(
+                "独立役員の批判を経ていない議事録でも決議する(内容を理解した上で)"
+            )
             if st.form_submit_button("決議としてマーク(代表として)"):
                 if not title.strip() or not body.strip():
                     st.warning("タイトルと本文は必須")
                 else:
-                    rid = boardroom.mark_resolution(
-                        wconn, minute_id=minute_id, title=title.strip(),
-                        resolution_md=body, proposal_ref=proposal_ref.strip() or None,
-                    )
-                    st.success(f"決議 #{rid} をマークした")
+                    try:
+                        rid = boardroom.mark_resolution(
+                            wconn, minute_id=minute_id, title=title.strip(),
+                            resolution_md=body,
+                            proposal_ref=proposal_ref.strip() or None,
+                            confirmed_without_critic=confirm,
+                        )
+                        st.success(f"決議 #{rid} をマークした")
+                    except boardroom.CriticAbsentError as exc:
+                        st.warning(
+                            f"{exc}。上のチェックボックスで明示確認するか、"
+                            "独立役員に発言させてから保存し直すこと。"
+                        )
         for res in boardroom.fetch_resolutions(wconn, minute_id):
             ref = f" / proposal_ref: {res['proposal_ref']}" if res["proposal_ref"] else ""
             st.caption(f"決議 {res['seq']}: {res['title']}(#{res['resolution_id']}{ref})")

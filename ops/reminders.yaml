@@ -344,3 +344,15 @@ reminders:
       channel: 運営
       body: "代表が OAuth 同意画面(https://console.cloud.google.com/auth/overview?project=ryza-main、アプリ名 Ryza Dashboard・External・テストユーザーに mileage_embassy_9x@icloud.com)を設定したか確認する。設定済みなら: gcloud iap oauth-clients create で OAuth クライアントを作成し IAP へ紐付け → 未認証 curl が 302 を返すこと・代表アカウントでダッシュボード(https://ryza-dashboard-weuuqovieq-uw.a.run.app)にログインできることを確認 → URL を #承認 へ報告し本リマインダーを done に。未設定なら代表へ再依頼。現状: IAP は有効で未認証は 502(IAP 生成・遮断確認済み)だが、OAuth クライアント不在のため代表もログイン不可(2026-08-03 デプロイ時のエラー『Empty Google Account OAuth client ID(s)/secret(s)』)。"
     status: pending
+
+  - id: stances-source-kind
+    what: "governance.stances に出所種別カラムを追加(会議由来と個別レビュー由来の区別。盲検着任時に会議由来を除外できるようにする)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "governance.stances に出所種別(source_kind)を追加し、盲検着任で会議由来を除外する"
+      labels: [impl]
+      body: "独立役員審査(docs/reviews/boardroom-meeting-independent-review.md C-3)の後続是正。役員室が会議形式になったことで、stances には『会議で他役職・代表の発言を聞いた文脈で形成された主張』が入る。盲検レビュー(戦略昇格・IPS 改訂案の評価。議論規約3)で独立役員が着任するとき、この会議由来の stance を読むと代表の選好が盲検経路へ透過しうる。実装内容: ①migrations/ に governance.stances.source_kind(例: office_meeting|committee|review|manual)を追加する保護領域マイグレーション(独立役員審査+Approved トレーラ必須)、②boardroom.record_chat_stances は office_meeting を書く、③personas.recent_stances に除外オプションを足し、盲検着任経路は会議由来を読まない、④既存行のバックフィル方針(既存は office_meeting 相当か unknown か)を決めて記録。**順序: ①のマイグレーションは保護領域のため独立役員審査を先に通すこと**"
+    status: pending

@@ -119,22 +119,27 @@ class Run:
             )
         self._commit_if_owned()
 
-    def update_params(self, patch: dict[str, Any]) -> None:
-        """``meta.runs.params`` に実行中に判明した情報を追記する(浅いマージ)。
+    def record_runtime(self, patch: dict[str, Any]) -> None:
+        """実行中に判明した情報を ``params['runtime']`` へ追記する。
 
-        開始時点では決まらないパラメータ(例: 役員室会議で進行役が選んだ発言者)を
-        後から記録するための口。既存キーは上書きし、他のキーは保持する。
+        開始時点では決まらない値(例: 役員室会議で進行役が選んだ発言者)を後から記録
+        するための口。**入力証跡(start_run が書いた params 本体)は書き換えない** —
+        実行時の観測値は ``runtime`` 名前空間に隔離する(独立役員審査 2026-08-03 C-7)。
+        マージは SQL 側の ``||`` で行い、read-modify-write の競合を作らない。
         """
         if not patch:
             return
         with self._conn.cursor() as cur:
-            cur.execute("SELECT params FROM meta.runs WHERE run_id = %s", (self.run_id,))
-            row = cur.fetchone()
-            merged: dict[str, Any] = dict(row[0] or {}) if row else {}
-            merged.update(patch)
             cur.execute(
-                "UPDATE meta.runs SET params = %s WHERE run_id = %s",
-                (Jsonb(merged), self.run_id),
+                """
+                UPDATE meta.runs
+                SET params = coalesce(params, '{}'::jsonb) || jsonb_build_object(
+                        'runtime',
+                        coalesce(params -> 'runtime', '{}'::jsonb) || %s::jsonb
+                    )
+                WHERE run_id = %s
+                """,
+                (Jsonb(patch), self.run_id),
             )
         self._commit_if_owned()
 
