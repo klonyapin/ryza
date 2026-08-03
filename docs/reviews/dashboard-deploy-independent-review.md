@@ -102,3 +102,57 @@
 - 重大-3・中-4〜7・低-9・低-10: 是正を実装。
 - 低-8: restart は設定変更があった初回のみ必要 — pg_hba/conf 変更時のみ reload/restart
   する条件分岐とし、09:00 JST 帯を避ける注記を追加。
+
+---
+
+## 再審査記録(2026-08-03)
+
+- 判定: **条件付き承認**(下記「マージ前必須条件」の実装をもって承認)
+- 対象: 差し戻し是正コミット(ops/deploy-dashboard.sh・dashboard/*・config/roadmap.yaml・
+  ops/reminders.yaml・README.md・tests/dashboard/*)
+
+### 是正の確認
+
+重大-1〜3 はいずれも是正済みと確認した。重大-1 は git ゲート(作業ツリー clean かつ
+HEAD == origin/main)・コミット SHA タグ・code_version のラベル/env 記録が入り、
+恒久策の Cloud Build トリガー化は Phase 5 への繰延としてリマインダーに登録されている。
+重大-2 は 2 ロール構成(ryza_dashboard は SELECT のみ+default_transaction_read_only、
+ryza_boardroom は governance 3テーブルと meta.runs のみ)が実装され、実 PostgreSQL 17 に
+対する権限境界の実測が添付された — 意見でなくテストで決着させており(議論規約4)、
+この点は評価する。重大-3 は get-iam-policy による allUsers / allAuthenticatedUsers の
+検査と除去が入った。中-4〜7・低-8〜10 も裁定どおり実装されている。
+
+### マージ前必須条件(5件)
+
+1. **公開バインディング検査の実効化**: `get-iam-policy` の失敗を「公開なし」と
+   区別すること(現状は失敗が沈黙して検出ゼロと同じ挙動になる)。ポリシーは一度
+   変数に取得してから grep し、取得失敗は `exit 1`。加えてデプロイ末尾に**未認証 curl
+   による陽性テスト**(401/302/403 を確認、200 なら `exit 1`)と、**プロジェクトレベル
+   IAM の allUsers + run.invoker 検査**を追加する。設定の読みだけでは統制の実効を
+   示せない。
+2. **code_version のリネージ実効化**: コンテナに .git は無く、`_git_code_version()` は
+   必ず 'unknown' を返す。Cloud Run の env に SHA を入れても `meta.runs.code_version` に
+   届かなければ不変原則3を満たさない。`src/ryza/provenance/runs.py` が env
+   `RYZA_CODE_VERSION` を最優先で読むこと。
+3. **meta.runs の UPDATE を列レベルに限定**: `GRANT INSERT, UPDATE (finished_at,
+   status, cost) ON meta.runs`。テーブル全体の UPDATE では job_name・code_version・
+   started_at・params を事後改竄でき、リネージの証跡性が失われる。
+4. **origin URL の照合**: `HEAD == origin/main` は origin を差し替えれば容易に満たせる。
+   `git remote get-url origin` が `https://github.com/klonyapin/ryza`(.git 有無の
+   両方)と一致することを検証し、不一致で `exit 1`。
+5. **.gcloudignore の先回りコミット**(新-F): `.gcloudignore` が無いと gcloud が
+   git リポジトリから自動生成してカレントディレクトリに書き出し、作業ツリーが dirty に
+   なって次回実行時の git ゲートが落ちる — 冪等性が壊れる。.gitignore と整合する
+   `.gcloudignore` をリポジトリに追加し、自動生成させない。
+
+### 次回 PR 対応(3件・マージ阻止要因ではない)
+
+- ロール検証クエリの**ゲート化**: 現状 `dashboard_write_grants` などの検証クエリは
+  デプロイログに出力されるだけで、値が想定外でもスクリプトは進む。SQL 側で
+  0 以外なら例外を上げる(`DO` ブロック等)か、結果を読んで中断すること。
+- pg_hba 検査の **CIDR 列限定**: 現在は行全体に対する文字列マッチのため、コメントや
+  データベース名に `localhost` を含む行が誤って「安全」と判定されうる。アドレス列を
+  取り出して判定すること。
+- **デプロイ統制のリグレッションテスト**: git ゲート・公開バインディング検査・
+  origin 照合が「実際に中断する」ことを検証するテストが無い。統制コードは壊れても
+  静かに通るため、Phase 5 の Cloud Build トリガー化までに必須。

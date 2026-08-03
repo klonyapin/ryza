@@ -75,6 +75,8 @@ LLM_KEY_SECRET="${LLM_KEY_SECRET:-anthropic-api-key}"              # 役員室�
 AR_REPO="${AR_REPO:-ryza}"
 RUNTIME_SA_ID="${RUNTIME_SA_ID:-ryza-dashboard}"                   # 専用実行 SA(中-4)
 PGVER="${PGVER:-17}"
+# 承認済みコードの出所。origin がこれ以外を指していたらデプロイしない(再審査 条件4)。
+EXPECTED_ORIGIN="${EXPECTED_ORIGIN:-https://github.com/klonyapin/ryza}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SSH=(gcloud compute ssh "${VM}" --zone "${ZONE}" --project "${PROJECT}")
@@ -89,6 +91,15 @@ echo "project=${PROJECT} region=${REGION} vm=${VM} service=${SERVICE} user=${DAS
 echo "-- 稼働コードの検証: 作業ツリー clean かつ HEAD == origin/main"
 if ! git -C "${ROOT}" rev-parse --git-dir >/dev/null 2>&1; then
   echo "ERROR: ${ROOT} は git リポジトリではない。デプロイは承認済み main の checkout から行う。" >&2
+  exit 1
+fi
+# origin が本物のリポジトリを指すことを確認する。HEAD == origin/main だけでは、
+# origin を攻撃者のリモートに差し替えれば任意コードが「承認済み」を騙れる(再審査 条件4)。
+ORIGIN_URL="$(git -C "${ROOT}" remote get-url origin 2>/dev/null || true)"
+if [ "${ORIGIN_URL%.git}" != "${EXPECTED_ORIGIN%.git}" ]; then
+  echo "ERROR: origin が想定と違う(取得='${ORIGIN_URL}' 期待='${EXPECTED_ORIGIN}')。" >&2
+  echo "       origin を差し替えれば HEAD==origin/main は容易に満たせるため、ここで中断する。" >&2
+  echo "       SSH リモート(git@github.com:...)を使っている場合は EXPECTED_ORIGIN で明示すること。" >&2
   exit 1
 fi
 DIRTY="$(git -C "${ROOT}" status --porcelain)"
@@ -248,8 +259,10 @@ GRANT SELECT ON governance.minutes, governance.minute_resolutions, governance.st
                 meta.runs TO "__BR_ROLE__";
 GRANT INSERT ON governance.minutes, governance.minute_resolutions, governance.stances
   TO "__BR_ROLE__";
--- meta.runs は開始 INSERT → 終了時に status/finished_at/cost を UPDATE する。
-GRANT INSERT, UPDATE ON meta.runs TO "__BR_ROLE__";
+-- meta.runs は開始 INSERT → 終了時に status/finished_at/cost を UPDATE する。UPDATE は
+-- **列レベル**に限定し、job_name / code_version / started_at / params の事後改竄を防ぐ
+-- (リネージの証跡性。再審査 条件3)。列名は migrations/0001_meta.sql に一致させること。
+GRANT INSERT, UPDATE (finished_at, status, cost) ON meta.runs TO "__BR_ROLE__";
 
 -- ── 3) 証跡(デプロイログに残す)─────────────────────────────────────────────
 \echo '-- ロール属性(rolsuper/rolinherit は false、memberships は 0 であること)'
@@ -447,13 +460,25 @@ gcloud beta iap web get-iam-policy --project "${PROJECT}" --resource-type=cloud-
 # ── 12. 公開バインディングの検査と除去(重大-3)──────────────────────────────────
 # 2026-08-02 の無認証 Cloud Run 公開版と同名サービスの場合、allUsers の run.invoker が
 # 残っていると IAP を有効化しても直接 URL で全世界に公開されたままになる。
+#
+# **失敗は「公開なし」ではない**(再審査 条件1)。get-iam-policy が権限不足・API 断で
+# 落ちたときに「検出ゼロ」と同じ扱いにすると、検査自体が沈黙して公開を見逃す。
+# 取得の終了コードを見て、失敗なら中断する。
 echo "-- 公開バインディング(allUsers / allAuthenticatedUsers)を検査"
-public_bindings() {
+service_iam_policy() {  # 失敗時は非ゼロで返る(呼び出し側が中断する)
   gcloud run services get-iam-policy "${SERVICE}" --project "${PROJECT}" --region "${REGION}" \
-    --flatten="bindings[].members" --format="value(bindings.role,bindings.members)" 2>/dev/null \
-    | grep -E '[[:space:]](allUsers|allAuthenticatedUsers)$' || true
+    --flatten="bindings[].members" --format="value(bindings.role,bindings.members)"
 }
-FOUND="$(public_bindings)"
+public_members_in() {  # $1=ポリシーのテキスト
+  printf '%s\n' "$1" | grep -E '[[:space:]](allUsers|allAuthenticatedUsers)$' || true
+}
+
+if ! POLICY="$(service_iam_policy)"; then
+  echo "ERROR: ${SERVICE} の IAM ポリシーを取得できなかった。公開状態を確認できないため中断する。" >&2
+  echo "       (取得失敗を『公開なし』とみなすと検査が沈黙する — 再審査 条件1)" >&2
+  exit 1
+fi
+FOUND="$(public_members_in "${POLICY}")"
 if [ -n "${FOUND}" ]; then
   echo "WARNING: 公開バインディングを検出したため除去する:" >&2
   printf '%s\n' "${FOUND}" >&2
@@ -464,7 +489,11 @@ if [ -n "${FOUND}" ]; then
       --project "${PROJECT}" --region "${REGION}" \
       --member="${member}" --role="${role}" --quiet >/dev/null </dev/null
   done <<< "${FOUND}"
-  STILL="$(public_bindings)"
+  if ! POLICY="$(service_iam_policy)"; then
+    echo "ERROR: 除去後の IAM ポリシーを再取得できなかった。公開のままの可能性がある。" >&2
+    exit 1
+  fi
+  STILL="$(public_members_in "${POLICY}")"
   if [ -n "${STILL}" ]; then
     echo "ERROR: 公開バインディングを除去できなかった。サービスは全世界公開のままの可能性がある。" >&2
     printf '%s\n' "${STILL}" >&2
@@ -472,11 +501,59 @@ if [ -n "${FOUND}" ]; then
   fi
   echo "-- 公開バインディングを除去した(現在は無し)"
 else
-  echo "-- 公開バインディングは無し"
+  echo "-- サービスレベルの公開バインディングは無し"
 fi
+
+# ── 12.5 プロジェクトレベル IAM の公開バインディング(再審査 条件1)────────────────
+# roles/run.invoker がプロジェクト全体で allUsers に付いていると、サービス側の
+# ポリシーが清潔でも全 Cloud Run サービスが無認証で叩ける。ここは**自動で消さない** —
+# 他サービスへの影響が読めないため、検出したら中断して人間に判断させる。
+echo "-- プロジェクトレベル IAM の公開バインディングを検査"
+if ! PROJ_POLICY="$(gcloud projects get-iam-policy "${PROJECT}" \
+    --flatten="bindings[].members" --format="value(bindings.role,bindings.members)")"; then
+  echo "ERROR: プロジェクトの IAM ポリシーを取得できなかった。公開状態を確認できないため中断する。" >&2
+  exit 1
+fi
+PROJ_PUBLIC="$(printf '%s\n' "${PROJ_POLICY}" \
+  | grep -E '^roles/run\.[a-zA-Z]+[[:space:]]+(allUsers|allAuthenticatedUsers)$' || true)"
+if [ -n "${PROJ_PUBLIC}" ]; then
+  echo "ERROR: プロジェクトレベルで Cloud Run の公開バインディングがある(全サービスが無認証で到達可能):" >&2
+  printf '%s\n' "${PROJ_PUBLIC}" >&2
+  echo "       他サービスへの影響があるため自動では消さない。手動で除去してから再実行すること。" >&2
+  exit 1
+fi
+echo "-- プロジェクトレベルの公開バインディングは無し"
 
 URL="$(gcloud run services describe "${SERVICE}" --project "${PROJECT}" --region "${REGION}" \
   --format='value(status.url)')"
+
+# ── 13. 陽性テスト: 未認証アクセスが実際に拒否されることを確認(再審査 条件1)────────
+# IAM ポリシーの読みは「設定がそうなっている」ことしか示さない。実際に外から叩いて
+# 拒否されることを確認して初めて統制が効いていると言える(議論規約4)。
+# -L は付けない — IAP のサインイン画面への 302 は「拒否」であり、追跡すると 200 に見える。
+if ! command -v curl >/dev/null 2>&1; then
+  echo "ERROR: curl が無く未認証アクセスの陽性テストを実行できない。検証せずに完了扱いにしない。" >&2
+  exit 1
+fi
+echo "-- 陽性テスト: 未認証で ${URL}/ を叩く(401/403/302 なら拒否されている)"
+if ! HTTP_CODE="$(curl -sS -o /dev/null -w '%{http_code}' -m 30 "${URL}/")"; then
+  HTTP_CODE="000"   # 接続失敗(DNS・タイムアウト等)。拒否の証拠にはならない
+fi
+case "${HTTP_CODE}" in
+  401|403|302|307)
+    echo "-- 未認証アクセスは HTTP ${HTTP_CODE}(拒否)— OK"
+    ;;
+  2??)
+    echo "ERROR: 未認証アクセスが HTTP ${HTTP_CODE} を返した。サービスが公開されている。" >&2
+    echo "       IAP の有効化と invoker バインディングを確認すること。" >&2
+    exit 1
+    ;;
+  *)
+    echo "WARNING: 未認証アクセスが想定外の HTTP ${HTTP_CODE}(000=接続失敗)。" >&2
+    echo "         拒否と断定できないため、ブラウザで直接 URL を開いて確認すること。" >&2
+    ;;
+esac
+
 echo "== 完了 =="
 echo "アクセス URL: ${URL}(${DASHBOARD_USER} の Google アカウントでのみ閲覧可)"
 echo "code_version: ${CODE_VERSION}(= origin/main。イメージタグ・Cloud Run ラベル・env に記録)"

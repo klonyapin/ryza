@@ -161,5 +161,17 @@ reminders:
       type: issue_create
       title: "ダッシュボードのデプロイを Cloud Build トリガー化(ローカルビルドの廃止)"
       labels: [impl]
-      body: "独立役員審査 2026-08-03(docs/reviews/dashboard-deploy-independent-review.md 重大-1)への恒久策。現行の ops/deploy-dashboard.sh は操作者の端末で Cloud Build にコンテキストを送るローカルビルドで、統制は同スクリプト内の git 検証(作業ツリー clean かつ HEAD == origin/main、イメージタグ = コミット SHA、Cloud Run へ code_version 記録)に依存している。検証はスクリプト自体を書き換えれば無効化できるため、GitHub の main への push を起点とする Cloud Build トリガーに移し、ビルド元を人間の端末から切り離す。設計リード裁定(反対意見書1の代替案)により Phase 5 に繰延した項目。config/roadmap.yaml の Phase 5 マイルストーンと対応。"
+      body: "独立役員審査 2026-08-03(docs/reviews/dashboard-deploy-independent-review.md 重大-1)への恒久策。現行の ops/deploy-dashboard.sh は操作者の端末で Cloud Build にコンテキストを送るローカルビルドで、統制は同スクリプト内の git 検証(作業ツリー clean かつ HEAD == origin/main、origin URL 照合、イメージタグ = コミット SHA、Cloud Run へ code_version 記録)に依存している。検証はスクリプト自体を書き換えれば無効化できるため、GitHub の main への push を起点とする Cloud Build トリガーに移し、ビルド元を人間の端末から切り離す。設計リード裁定(反対意見書1の代替案)により Phase 5 に繰延した項目。config/roadmap.yaml の Phase 5 マイルストーンと対応。着手前に dashboard-deploy-hardening-followup のリグレッションテストを完了させること。"
+    status: pending
+
+  - id: dashboard-deploy-hardening-followup
+    what: "ダッシュボード・デプロイ統制の次回 PR 対応3件(再審査の非阻止指摘)"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "デプロイ統制の強化3件(ロール検証のゲート化・pg_hba 検査の CIDR 列限定・リグレッションテスト)"
+      labels: [impl]
+      body: "独立役員 再審査 2026-08-03(docs/reviews/dashboard-deploy-independent-review.md 再審査記録「次回 PR 対応」)。条件付き承認のマージ阻止要因ではないが、着手期限を切って残す。(1) ロール検証クエリのゲート化: ops/deploy-dashboard.sh のロール定義 SQL 末尾にある dashboard_write_grants などの検証クエリは現在ログ出力のみで、値が想定外でもデプロイが続行する。DO ブロックで例外を上げるか結果を読んで中断する。(2) pg_hba 検査の CIDR 列限定: 現在は行全体の文字列マッチのため、コメントやデータベース名に localhost を含む行を誤って安全と判定しうる。アドレス列を取り出して判定する。(3) デプロイ統制のリグレッションテスト: git ゲート(dirty・HEAD != origin/main・origin URL 不一致)と公開バインディング検査が『実際に中断する』ことを検証するテストが無い。統制コードは壊れても静かに通るため、**Phase 5 の Cloud Build トリガー化(dashboard-cloudbuild-trigger)に着手する前に必須**とする。"
     status: pending

@@ -10,7 +10,8 @@
 
 Streamlit 製の組織ダッシュボード(概況 / 組織 / 承認・通知 / 規則 / 計画 / 取込 / 報道 / コスト / 市場観 / 役員室 / 開発ステータス)。**Cloud Run + IAP で公開**(2026-08-03 代表指示。認証は IAP の許可リストに全面委譲 — アプリ内に認証コードは無い。2026-08-02 に撤去した無認証 Cloud Run 公開版とは異なり、許可した Google アカウントしかアクセスできない)。役員室(議事録の追記のみ)を除き**読み取り専用** — Kill Switch 等の操作は Discord Bot の管轄。
 
-- **デプロイ**: `./ops/deploy-dashboard.sh`(冪等)。**作業ツリーが clean かつ HEAD == origin/main でなければ中断**する(稼働コード=承認済み main。定款第5条)。イメージタグはコミット SHA で、Cloud Run にラベル `code-version` と env `RYZA_CODE_VERSION` として記録される。Cloud Build → Cloud Run(Direct VPC egress で VM 内 PostgreSQL の内部 IP へ接続)→ IAP 有効化+許可リストを**代表1名へ宣言的に収束** → allUsers / allAuthenticatedUsers の invoker が残っていないか検査
+- **デプロイ**: `./ops/deploy-dashboard.sh`(冪等)。**origin が `klonyapin/ryza` を指し、作業ツリーが clean かつ HEAD == origin/main でなければ中断**する(稼働コード=承認済み main。定款第5条)。イメージタグはコミット SHA で、Cloud Run にラベル `code-version` と env `RYZA_CODE_VERSION` として記録される(後者は `meta.runs.code_version` に届く)。Cloud Build → Cloud Run(Direct VPC egress で VM 内 PostgreSQL の内部 IP へ接続)→ IAP 有効化+許可リストを**代表1名へ宣言的に収束** → サービス/プロジェクト双方の IAM で allUsers・allAuthenticatedUsers の invoker を検査 → **未認証 curl で実際に拒否される(401/403/302)ことを確認**(200 なら失敗扱い)
+- **`.gcloudignore` はリポジトリに置く**: 無いと gcloud が自動生成して作業ツリーが dirty になり、次回の git ゲートが落ちる。`.gitignore` を変えたら合わせて更新する
 - **DB は 2 ロール**: 読取ページ = `ryza_dashboard`(SELECT のみ・`default_transaction_read_only = on`)、役員室の書込 = `ryza_boardroom`(`governance.minutes` / `minute_resolutions` / `stances` の INSERT と `meta.runs` の INSERT/UPDATE のみ)。接続 URL は別々の Secret から別々の env(`RYZA_DATABASE_URL` / `RYZA_BOARDROOM_DATABASE_URL`)で注入する
 - **実行 SA**: 専用の `ryza-dashboard@`(付与は対象 Secret の `secretAccessor` のみ。既定 compute SA は使わない)
 - **実行タイミング**: PostgreSQL の再起動は設定に実変更があった初回のみ。それでも **09:00 JST 前後(日次サイクル)は避ける**
