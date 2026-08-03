@@ -712,6 +712,42 @@ def test_cost_account_refuses_postings_without_a_quantity_evidence(conn, run_id)
     assert _snapshot(conn, DAY)[0] == D(11_000_000)
 
 
+def test_close_does_not_flag_a_healthy_book_with_a_future_dated_fill(conn, run_id):
+    """後日付の約定が先に記帳されている日でも原価恒等式は鳴らない(独立審査 新-22)。
+
+    審査の実測: d0 買い 100@500 → **d2 買い 100@700 を先に記帳** → d1 売り 50@800 で、
+    d1 の締めが ``{book_value: 20000, replay_cost: 25000, qty: 50,
+    reason: cost_identity_broken}`` を出し(d2 の締めでは消える)、健全な帳簿に対して
+    #運営 へ ⚠️ が飛んだ。根因は ``post_fill`` の売りが ``as_of`` なしの全期間再生で
+    ``cost_released`` を決めていたことであり、恒等式側は ``as_of=date`` で切っていた。
+    毎日の通知に載せる検査なので偽陽性の第一の源から潰す(通知疲れは検出器を殺す)。
+    """
+    iid = 1001
+    d0, d1, d2 = DAY, DAY + timedelta(days=1), DAY + timedelta(days=2)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                      qty=100, price=500, entry_date=d0, run_id=run_id)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                      qty=100, price=700, entry_date=d2, run_id=run_id)  # 後日付を先に記帳
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="sell",
+                      qty=50, price=800, entry_date=d1, run_id=run_id)
+
+    d1_result = closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d1, price_source={iid: 800}, run_id=run_id
+    )
+    assert d1_result["unexplained_residue"] == {}  # 修正前: {'1001': {...20000 vs 25000...}}
+    assert "unexplained_residue" not in _snapshot(conn, d1)[2]
+
+    # 対照: 後日付の買いが視界に入る d2 でも成立し続ける(片側を直して他方を壊さない)。
+    d2_result = closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=d2, price_source={iid: 800}, run_id=run_id
+    )
+    assert d2_result["unexplained_residue"] == {}
+    # d1: 実現益 15,000(40,000−25,000)+ 残 50 株の未実現 15,000 = +30,000。
+    # d2: 実現益 15,000 + 残 150 株の未実現 25,000(120,000−95,000)= +40,000。
+    assert _snapshot(conn, d1)[0] == D(10_030_000)
+    assert _snapshot(conn, d2)[0] == D(10_040_000)
+
+
 def test_close_writes_off_only_the_mtm_share_when_both_coexist(conn, run_id):
     """原価側に説明不能な残高が同居しても、洗い替えるのは評価調整勘定ぶんだけ。
 

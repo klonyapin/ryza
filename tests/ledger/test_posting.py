@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from decimal import Decimal
 
@@ -202,6 +203,78 @@ def test_mark_to_market_uses_the_same_as_of_for_qty_and_book_value(conn, run_id)
     assert _carrying(conn, "DEMO_FUND", as_of=d0, instrument_id=iid) == D(60000)
 
 
+def test_sell_releases_cost_at_the_entry_date_not_the_whole_history(conn, run_id):
+    """売りの ``cost_released`` は ``as_of=entry_date`` の建玉から決める(独立審査 新-22)。
+
+    審査の実測ケースそのもの: d0 買い 100@500 → **d2 買い 100@700 を先に記帳** →
+    d1 売り 50@800。全期間再生だと平均原価が (50,000+70,000)/200=600 になり
+    ``cost_released=30,000``、d1 時点の ``securities`` 残高は 20,000 に落ちる一方、
+    恒等式側の再生原価は 25,000 で、健全な帳簿なのに 5,000 のずれが立った。
+    """
+    iid = 1040
+    d0, d1, d2 = DAY, date(2026, 8, 4), date(2026, 8, 5)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                      qty=100, price=500, entry_date=d0, run_id=run_id)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                      qty=100, price=700, entry_date=d2, run_id=run_id)  # 後日付を先に記帳
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="sell",
+                      qty=50, price=800, entry_date=d1, run_id=run_id)
+
+    # d1 時点の平均原価は 500(d2 の買いは混ざらない)→ 取り崩しは 25,000。
+    assert _balance(conn, "DEMO_FUND", "securities", as_of=d1, instrument_id=iid) == D(25000)
+    # 実現損益 = 50*800 − 25,000 = 15,000(修正前は 30,000 取り崩しで 10,000 だった)。
+    assert _balance(conn, "DEMO_FUND", "realized_pnl", as_of=d1) == D(-15000)
+
+    # 原価恒等式(0034)が d1・d2 の両方で成立する = 締めが偽陽性を出さない。
+    # d2 側は ``replay_position`` の再生順が ``(entry_date, entry_id)`` であることを固定する
+    # — ``entry_id`` 順のままだと d2 の買いが d1 の売りより前に置かれて 90,000 になり、
+    # 偽陽性が d1 から d2 へ移るだけになる(2 つの是正は対)。
+    for day, expected in ((d1, D(25000)), (d2, D(95000))):
+        _qty, cost = _util.replay_position(conn, "DEMO_FUND", iid, as_of=day)
+        assert cost == expected
+        assert _util.securities_cost_value(conn, "DEMO_FUND", iid, as_of=day) == expected
+
+
+def test_sell_rejects_quantity_not_held_on_the_entry_date(conn, run_id):
+    """保有超過の判定も ``entry_date`` 時点で行う(新-22 の日付対称の裏側)。
+
+    後日付の買いを先に記帳しても、その株は売却日には存在しない(不変原則4)。
+    """
+    iid = 1041
+    d0, d1, d2 = DAY, date(2026, 8, 4), date(2026, 8, 5)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                      qty=100, price=500, entry_date=d0, run_id=run_id)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                      qty=100, price=700, entry_date=d2, run_id=run_id)
+    with pytest.raises(ValueError, match="売り数量が保有を超過"):
+        posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="sell",
+                          qty=150, price=800, entry_date=d1, run_id=run_id)
+
+
+def test_backdated_buy_after_a_sell_still_breaks_the_cost_identity(conn, run_id):
+    """**真陽性は消さない**: 売りより前の日付の買いを後から入れた帳簿は名指しされる。
+
+    既記帳の ``cost_released`` は当時の平均原価で確定しており(仕訳は追記オンリー —
+    0005)、後から過去日に買いを足すと再生原価と原価勘定残高が食い違う。これは偽陽性
+    ではなく「実現損益が古い平均原価で確定している」事実であり、新-22 の是正で消して
+    しまってはならない量である(消すには証憑に ``cost_released`` を焼き込んで再生を
+    その値に従わせるしかなく、恒等式が内部整合の検査に退化する — 新-21 と同じ形)。
+    """
+    iid = 1042
+    d0, d1, d5 = DAY, date(2026, 8, 4), date(2026, 8, 8)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                      qty=100, price=500, entry_date=d0, run_id=run_id)
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="sell",
+                      qty=50, price=900, entry_date=d5, run_id=run_id)  # 取り崩し 25,000
+    posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                      qty=100, price=700, entry_date=d1, run_id=run_id)  # 過去日を後から
+
+    # 残高 50,000+70,000−25,000 = 95,000 に対し、再生は 50 株を平均 600 で取り崩して 90,000。
+    assert _balance(conn, "DEMO_FUND", "securities", as_of=d5, instrument_id=iid) == D(95000)
+    _qty, cost = _util.replay_position(conn, "DEMO_FUND", iid, as_of=d5)
+    assert cost == D(90000)
+
+
 def test_mark_to_market_rejects_missing_price_while_holding(conn, run_id):
     """数量が残っている銘柄に ``price=None`` を渡すのは呼び出し側の誤り(黙って 0 評価しない)。"""
     iid = 1004
@@ -391,11 +464,11 @@ def test_reversal_exemption_requires_a_real_matching_line(conn, run_id):
 
 
 def test_every_mtm_posted_by_value_is_accepted_by_the_database(conn, run_id):
-    """``MTM_POSTED_BY`` の全要素が DB トリガに受理される(独立審査 新-24 の二重管理検出)。
+    """``MTM_POSTED_BY`` の全要素が DB トリガに受理される(独立審査 新-24)。
 
-    トリガは ``'ledger.closing'`` をハードコードしており Python 側と二重管理になっている。
-    値を足したときに「Python は通し DB が拒否する」不整合を、この 1 本が即座に落とす。
-    単一ソース化そのものは ``ops/reminders.yaml`` の ``mtm-posted-by-single-source``。
+    **振る舞い側**の固定: 値を足したときに「Python は通し DB が
+    ``RaiseException`` で拒否する」不整合を、実際に記帳して落とす。定義文字列側の
+    突合は ``test_mtm_posted_by_matches_the_database_trigger``。
     """
     for i, posted_by in enumerate(_util.MTM_POSTED_BY):
         iid = 1030 + i
@@ -405,6 +478,75 @@ def test_every_mtm_posted_by_value_is_accepted_by_the_database(conn, run_id):
             conn, book_id="DEMO_FUND", instrument_id=iid, price=120, entry_date=DAY,
             run_id=run_id, posted_by=posted_by,
         ) is not None
+
+
+# ── 新-24: 許可 posted_by の単一ソース化(トリガ本文 ⇔ Python 定数)────────────
+#: ``ledger.check_mtm_line`` が ``parent_posted_by`` と突き合わせる文字列リテラル。
+#: 現行の 0034 は ``parent_posted_by IS DISTINCT FROM 'ledger.closing'``、値が増えたときの
+#: 自然な書き方は同じ述語の ``AND`` 連結(``check_cost_line`` が既にその形)である。
+_TRIGGER_POSTED_BY_RE = re.compile(
+    r"parent_posted_by\s+IS\s+DISTINCT\s+FROM\s+'((?:[^']|'')*)'", re.IGNORECASE
+)
+
+
+def _trigger_posted_by_values(function_source: str) -> set[str]:
+    """トリガ関数の定義文字列から、許可される ``posted_by`` の集合を抜き出す。
+
+    抜き出せなければ空集合を返す。呼び出し側が「空でないこと」を別途表明するので、
+    トリガの書き方を上の正規表現が想定しない形(``= ANY (ARRAY[...])`` 等)に変えた
+    場合は**黙って通らず**、抽出器を直せという形で落ちる。
+    """
+    return {m.group(1).replace("''", "'") for m in _TRIGGER_POSTED_BY_RE.finditer(function_source)}
+
+
+def test_mtm_posted_by_matches_the_database_trigger(conn):
+    """トリガ本文の許可値と ``_util.MTM_POSTED_BY`` を**双方向で**突合する(独立審査 新-24)。
+
+    トリガは適用済み migration の中にあり Python 定数を読めないため、単一ソース化は
+    「片側だけ変えたら落ちる」ことの固定で行う(0019 C-11 の ``pg_get_constraintdef``
+    双方向突合と同じ形)。部分文字列検査だけでは「トリガ側にだけ余分な値がある」=
+    Python が知らない記帳経路が DB で通る、という片方向の漏れを検出できない。
+    変更手順は ``_util.MTM_POSTED_BY`` の docstring。
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_get_functiondef('ledger.check_mtm_line()'::regprocedure)")
+        row = cur.fetchone()
+    assert row is not None, "ledger.check_mtm_line() が存在しない(0034 未適用?)"
+    values = _trigger_posted_by_values(row[0])
+    assert values, (
+        "トリガ本文から posted_by の許可値を抽出できなかった。書き方を変えたなら "
+        "_TRIGGER_POSTED_BY_RE も直すこと(黙って素通りさせない)"
+    )
+    assert values == set(_util.MTM_POSTED_BY), (
+        f"トリガの許可値 {sorted(values)} と _util.MTM_POSTED_BY "
+        f"{sorted(_util.MTM_POSTED_BY)} が一致しない。値を足すときは Python と "
+        "migration(CREATE OR REPLACE FUNCTION ledger.check_mtm_line)の両方に足す。"
+    )
+
+
+@pytest.mark.parametrize(
+    ("literals", "constant", "expected_match"),
+    [
+        # 両方に足した(正常な変更手順)。
+        (["ledger.closing", "ledger.rebuild"], ("ledger.closing", "ledger.rebuild"), True),
+        # Python にだけ足した = DB が RaiseException で拒否する状態。
+        (["ledger.closing"], ("ledger.closing", "ledger.rebuild"), False),
+        # トリガにだけ足した = Python が知らない記帳経路が DB で通る状態。
+        (["ledger.closing", "ledger.rebuild"], ("ledger.closing",), False),
+    ],
+)
+def test_posted_by_single_source_check_detects_one_sided_changes(
+    literals, constant, expected_match
+):
+    """突合が**片側だけの変更**を両向きで捕まえる(新-24 の検出器そのものの検証)。
+
+    DB を触らずに済むよう、トリガ本文は 0034 と同じ述語の形で組み立てる。
+    """
+    body = "\n".join(
+        f"    IF parent_posted_by IS DISTINCT FROM '{lit}' THEN RAISE EXCEPTION 'x'; END IF;"
+        for lit in literals
+    )
+    assert (_trigger_posted_by_values(body) == set(constant)) is expected_match
 
 
 # ── 現物拠出の統制(独立審査 新-21)──────────────────────────────────────────
