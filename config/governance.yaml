@@ -1,0 +1,116 @@
+# config/governance.yaml — 権限マトリクス・保護領域・統制テーブル(定款の機械可読版)
+# 正: docs/design/06-constitution.md(v0.1 ドラフト — 批准前。批准時に status を active へ)
+# 保護領域(定款第5条): 本ファイル自身の変更も代表承認必須。
+version: "0.1"
+status: draft # draft | active。批准(代表)で active
+source: docs/design/06-constitution.md
+
+roles:
+  representative: 代表(ユーザー)。専決事項の決定者
+  cio: CIO ペルソナ(執行側統括・起草)
+  independent_officer: 独立役員ペルソナ(非執行・批判専任・盲検レビュー)
+  audit: 監査部門(read-only・代表直接報告)
+  design_lead: 設計リード(Fable 開発セッション)
+  department_job: 部門ジョブ(取込・分析・報道・経営管理などの決定論ジョブ)
+  fm: ファンドマネージャーペルソナ(ポッド運用。マンデート範囲内)
+
+# 定款第3条: 代表の専決事項(システムは起票のみ可。ips_amendment は起票も代表のみ)
+representative_reserved:
+  - constitution_amendment
+  - ips_amendment # 起票も代表のみ(80-ips.md)
+  - capital_injection_and_live_transition
+  - protected_area_change_approval
+  - mandate_grant_and_amendment
+  - strategy_promotion
+  - kill_switch_resume
+
+# 定款第4条: 文書4層と改訂権限
+document_layers:
+  L1:
+    docs: [docs/design/06-constitution.md]
+    draft_by: [representative, cio]
+    review_by: [independent_officer] # 盲検
+    approve_by: [representative]
+  L2:
+    docs: [docs/design/80-ips.md, docs/design/70-writing-standard.md, docs/design/05-governance.md]
+    draft_by: [representative] # IPS。他 L2 文書は cio も可(個別に ips_amendment 参照)
+    review_by: [independent_officer]
+    approve_by: [representative]
+  L3:
+    docs: [docs/design/81-fm-mandates.md, docs/design/*.md, personas/*/charter.md]
+    draft_by: [cio, department_job]
+    review_by: [independent_officer] # 重要変更のみ
+    approve_by: [representative] # 投資委員会
+  L4:
+    docs: [config/*.yaml, docs/tasks/*.md]
+    draft_by: [design_lead, department_job]
+    review_by: [design_lead]
+    approve_by: [design_lead] # ただし protected_areas に該当する場合は代表承認必須
+
+# 定款第5条: 保護領域(変更に代表の承認記録が必須。A-13 が git 履歴と突合)
+protected_areas:
+  - path: docs/design/06-constitution.md
+    area: constitution
+  - path: config/governance.yaml
+    area: constitution
+  - path: docs/design/80-ips.md
+    area: ips
+  - path: config/ips.yaml
+    area: ips
+  - path: docs/design/70-writing-standard.md
+    area: writing_standard
+  - path: src/ryza/bot/killswitch.py
+    area: kill_switch
+  - path: migrations/0012_killswitch_modes.sql
+    area: kill_switch
+  - path: src/ryza/ledger/** # 会計エンジン
+    area: ledger_engine
+  - path: src/ryza/ips.py # IPS ローダ・マンデート整合検証(コンプラゲートの参照実装)
+    area: compliance_gate
+  - path: config/mandates/*.yaml
+    area: mandates
+  # audit: 監査部門コードは実装時にパスを追記すること(A-13 が「宣言のみ」として警告する)
+
+# 定款第6条: 統制テーブル(J-SOX RCM 様式の応用)。A-13 監査ジョブが verification を実行する。
+# enforcement: schema(DB 制約)| gate(実行時ゲート)| ci(テスト・lint)| audit(監査ジョブ)| declaration(宣言のみ)
+controls:
+  - rule: 定款第5条(保護領域の無承認変更禁止)
+    risk: 保護コード・文書が承認なく書き換えられる
+    enforcement: audit
+    kind: 発見
+    verification: 保護パスの変更コミットと承認記録(Issue 決議 / governance.decisions)の突合(A-13-1)
+  - rule: 定款第6条2項(発効文書と config の整合)
+    risk: 文書は改訂されたがエンジン参照値が旧いまま乖離する
+    enforcement: audit
+    kind: 発見
+    verification: 80-ips.md の版・値と config/ips.yaml の一致検査(A-13-2)。tests/test_ips.py が CI で先行検知
+  - rule: 定款第2条2項(判断と執行の分離)
+    risk: LLM 出力が発注・サイジングに直結する
+    enforcement: ci
+    kind: 予防
+    verification: killswitch・執行経路モジュールが research/llm を import しないことの静的検査(A-13-3。未実装 — 執行層実装時に追加)
+  - rule: 第4条(下層文書は上層を緩められない)
+    risk: マンデートが IPS より緩い上限を持つ
+    enforcement: gate
+    kind: 予防
+    verification: src/ryza/ips.py validate_mandates(CI: tests/test_ips.py)
+  - rule: 第7条禁止(帳簿間参照の禁止 — 不変原則2)
+    risk: ファンド帳簿と運営帳簿が混合する
+    enforcement: schema
+    kind: 予防
+    verification: ledger スキーマの book_id 制約(migrations)
+  - rule: 第7条義務(証憑・リネージ記録 — 不変原則3)
+    risk: 出所不明のデータ・生成物が意思決定に使われる
+    enforcement: schema
+    kind: 予防
+    verification: evidence_id NOT NULL・lineage_edges 記録(migrations)+ A-5 証跡監査
+  - rule: 第7条構造的保証(独立役員の異議経路・監査の独立)
+    risk: 執行側が批判経路を無効化する
+    enforcement: declaration # 執行点未実装(役員室・監査ジョブ実装時に protected_areas へ昇格)
+    kind: 予防
+    verification: A-13 が「宣言のみ」条文として四半期棚卸しに載せる
+  - rule: 議論規約2(決議への反対意見書添付)
+    risk: 追従による無批判な決議
+    enforcement: declaration # 役員室実装時に決議フローで強制
+    kind: 予防
+    verification: 同上
