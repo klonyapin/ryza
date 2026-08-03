@@ -1,0 +1,12 @@
+# 独立役員審査: migrations/0027 クエリ索引(保護領域 schema・軽量スコープ)
+
+- 日付: 2026-08-04 / 対象: `5507ff7`(`migrations/0027_query_indexes.sql` 新規・`tests/test_migrations.py` 追加2件・`ops/reminders.yaml` 3件)
+- 手法: diff 全文検分(文の型を網羅走査)+ PostgreSQL 17.10 の使い捨て DB に合成データ(明細 50,004 行=規模A 相当 / 600,004 行=規模B 相当)を投入し、索引1・索引2・不採用判断を独立に再現
+
+**判定: 条件付き承認。索引4本は変更不要。** 0027 は `CREATE INDEX IF NOT EXISTS` 4本と `COMMENT ON INDEX` 4本のみで、制約・トリガ・権限・DML には一切触れていない(意味論変更なし)。既存索引と重複せず、全27本の適用と追加テスト18本の通過を確認。**再現できたこと**: 索引1は規模A で `securities_book_value` 4.00→0.53 ms・`held_instruments` 5.4→2.4 ms、規模B で 36.9→13.3 ms・38.6→26.0 ms。索引2は起草者が簡略化した形ではなく**実 SQL 形**(`(%s::date IS NULL OR je.entry_date <= %s)`)で検証しても Bitmap Index Scan が選ばれ 30.5→21.3 ms(1.43x。起草者 1.44x と一致)、psycopg3 の prepared(汎用プラン)でも索引は落ちなかった — 私が事前に立てたパラメータ化で索引が無効化される仮説は実測で否定された。不採用判断の論理も再現: `max(entry_id)` 相関サブクエリは索引を置いても PK 逆走査+Filter+Limit(見積り 3.42)が選ばれ、実行 91 ms で 295,616 行を捨てる。枝刈りが是正という結論は正しい。
+
+**中-1(要修正・計測の一般化しすぎ)**: 「2列版 `(book_id, account_id)` はプランナに選ばれなかった」は**規模依存**であり、無条件命題として書かれている点が誤り。規模A では 2 列版は**選ばれ**(Bitmap Index Scan)、`securities_book_value` を 4.00→2.19 ms(1.8x)改善した。選ばれなくなるのは規模B からで、そこでは起草者値(39.7/37.1 ms)を私の再現(39.3/36.5 ms)がほぼ一致で裏づける。3列採用の結論は両規模で正しいので索引は据え置きでよいが、`tests/test_migrations.py` の `EXPECTED_INDEX_DEFS` 上のコメントは将来「列を落とすな」の根拠として読まれるため、規模条件を明記すること。
+**中-2(要修正・事実誤り)**: `ops/reminders.yaml` の `db-indexes-dashboard` 完了注記が「(2)(4) は不採用」と書くが、(2) `ledger.journal_entries (book_id, entry_date)` は**本 migration で作成されている**(`pg_indexes` で確認)。不採用は (4) のみ。将来の読者が重複索引を足す経路。
+**中-3(要修正・リネージ)**: 否定的結果2件の出典参照が両方とも実在しない箇所を指す。`reclose-stale-pruning` の「入れなかったもの (A)」は実際には索引2の「効かない用途」節(A は `meta.runs (job_name, run_id DESC)` の話)、`navflow-equity-flow-query-rewrite` の「(C)」は 0027 に存在せず該当は (B)。不変原則3を掲げる文書で参照が解決不能なのは実害。**小**: 同一計測が2文書で不一致(stale 検出 8,279→8,211 ms / 8,278→8,156 ms)。
+**中-4(敵対的・沈黙劣化)**: `runs_running_idx` の述語 `status = 'running'` を守る仕組みが無い。`meta.runs.status` に CHECK 制約は存在せず(0001)、根拠は列コメントの `running|success|failed` だけである。`'starting'`/`'retrying'` の追加や `fetch_running_runs` の `IN (...)` 化で索引は**エラーなく**使われなくなり、テストは存在しか見ないので検出できない。「`press.outbox` の `outbox_pending_idx` と同じ設計」という説明は不正確 — そちらの述語は `sent_at IS NULL` という構造的条件でドリフトしえない。要求: この一文を削るか、別 migration で status に CHECK を置いて語彙を凍結すること(`meta.runs` にも同型の `finished_at IS NULL` がある)。
+**記録のみ**: `CONCURRENTLY` でないため構築中は書込がロックされるが、ランナーが1ファイル=1トランザクションのため原理的に選べず、現行データ量では無視できる。冪等テストは「索引が既にある状態」しか見ておらず部分適用からの再実行は未検証(`IF NOT EXISTS` により理屈上は安全)。

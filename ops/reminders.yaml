@@ -846,6 +846,42 @@ reminders:
       title: "migrations: journal_lines / meta.runs の索引を追加する"
       labels: [impl]
       body: "ダッシュボードの NAV 系列(dashboard/queries.py fetch_nav_series)は ledger.journal_lines × journal_entries × accounts を全走査して出資フローを日次集計し、コスト集計(fetch_cost_daily / fetch_cost_summary)は meta.runs を started_at で全走査する。どちらも支える索引が無い(journal_lines の PK は (entry_id, line_no)、meta.runs の PK は run_id のみ)。現在は行数が小さく問題にならないが、仕訳と実行記録は単調増加するため放置すると再実行のたびに全表走査が効く。暫定対応として app.py 側に @st.cache_data(ttl=60) を入れてある(独立役員審査 中-10 の部分対応)。是正: (1) ledger.journal_lines (book_id, account_id) の索引、(2) ledger.journal_entries (book_id, entry_date) の索引、(3) meta.runs (started_at DESC) の索引、(4) meta.runs (job_name, run_id DESC) の索引を migrations で追加し、EXPLAIN で効いていることを確認する。**migrations は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 中-10。 **追記(2026-08-04・再締め審査 新-5)**: (2) の `ledger.journal_entries (book_id, entry_date)` は優先度が上がった。日次の再締め(`ledger.closing.reclose_stale`)の stale 検出が、スナップショット 1 日につき `journal_entries` への相関サブクエリを 2 本(水位 max・建玉性 EXISTS)回すため、コストは スナップショット数 × 仕訳数 で伸びる(`EXPLAIN ANALYZE` で `SubPlan 3` が `loops=15`)。年単位の運用で毎日の締めが線形に重くなる。索引に加えて安価な枝刈り(全スナップショットの `stored_watermark` 最大値より後ろの `entry_id` を持つ最古の `entry_date` を 1 回求め、その日以降のスナップショットだけを候補にする)も同時に検討すること。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 新-5。"
+    status: done # 2026-08-04 実装: migrations/0027_query_indexes.sql。EXPLAIN ANALYZE の前後比較で採否を決めた。採用は4本 — (1) は 2 列版が規模B でプランナに選ばれないため 3 列 (book_id, account_id, instrument_id) に変更して採用、(2) journal_entries (book_id, entry_date) は**採用**(ただし審査が想定した stale 検出には効かず、再締めの as_of 建玉復元 _util.replay_position に効く別根拠で採用)、(3) started_at は採用、加えて meta.runs (run_id DESC) WHERE status='running' の部分索引を追加。**不採用は (4) meta.runs (job_name, run_id DESC) のみ**(実クエリが索引なしで 0.007 ms、一方この索引だけ 13MB と最大)。(2) が本来狙った stale 検出の是正(枝刈り)は reclose-stale-pruning として別項目に登録。独立役員審査は 0027 について条件付き承認(docs/reviews/0027-indexes-independent-review.md)
+
+  - id: reclose-stale-pruning
+    what: "再締めの stale 検出に枝刈りを入れる(索引では直せないことが実測で確定した — db-indexes-dashboard の残り)"
+    conditions:
+      - type: date_after
+        date: "2026-08-20"
+    action:
+      type: issue_create
+      title: "ledger.closing: reclose_stale の stale 検出を枝刈りで定数時間に近づける"
+      labels: [impl, ledger]
+      body: "`ledger.closing.reclose_stale` の stale 検出(`_STALE_SNAPSHOTS_SQL`)は、スナップショット 1 日ごとに `SELECT max(je.entry_id) ... WHERE book_id = %s AND entry_date <= snap.snap_date` という相関サブクエリを回すため、コストが スナップショット数 × 仕訳数 で伸びる。**索引では直らないことが実測で確定した**(2026-08-04・migrations/0027 の検証): プランナはこのサブクエリを『主キーの逆走査 + フィルタ + LIMIT 1』(見積りコスト 0.43)と評価するので、`(book_id, entry_date)`・`(book_id, entry_date) INCLUDE (entry_id)`・`(book_id, entry_date, entry_id)` のいずれを置いても選ばれず、実行時間が変わらない(規模A = 仕訳 31,413 行 で 778.6 ms → 766.6 ms、規模B = 仕訳 314,013 行・スナップショット 785 日 で 8,371.1 ms → 8,184.6 ms。どちらも誤差で、`pg_stat_user_indexes.idx_scan` は 0)。実測の伸び方も理論どおりで、行数 10 倍で所要 10.7 倍(778.6 ms → 8,371.1 ms)。是正は再々審査 新-5 が併記していた**枝刈り**である: 全スナップショットの `stored_watermark` の最大値より後ろの `entry_id` を持つ最古の `entry_date` を 1 回だけ求め(実測 0.57 ms)、その日以降のスナップショットだけを stale 候補にする。遅延仕訳が無い通常日は候補ゼロになり、検出は事実上ゼロコストになる。**注意点**: `stored_watermark` が NULL のスナップショット(本機能より前に書かれた日)は判定材料が無く現行実装が fail-safe で stale 扱いにしているので、枝刈りでもこの日を落としてはならない。**src/ryza/ledger/ は会計エンジン = 保護領域のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 新-5、`migrations/0027_query_indexes.sql` の **索引2(`ledger.journal_entries (book_id, entry_date)`)の「効かない用途」節**(『入れなかったもの』節ではない — 索引2 自体は別根拠で採用済み)、`docs/reviews/0027-indexes-independent-review.md` 中-3。"
+    status: pending
+
+  - id: navflow-equity-flow-query-rewrite
+    what: "navflow の出資フロー抽出クエリを書き換える(索引が効かない理由が見積り誤差にあることが実測で確定した)"
+    conditions:
+      - type: date_after
+        date: "2026-09-15"
+    action:
+      type: issue_create
+      title: "risk.navflow: NAV_FLOW_SQL の flow CTE をプランナが絞れる形に書き換える"
+      labels: [impl, risk]
+      body: "`ryza.risk.navflow.NAV_FLOW_SQL` の flow CTE は `ledger.journal_lines` を `ledger.accounts` と結合して `category='equity' AND account_id <> 'retained'` の科目に絞るが、**プランナは結合前に『どの account_id が equity か』を知れない**ため、journal_lines 側の行数を平均選択度で見積もる(実測: 真値 13 行に対し見積り 6,107 行)。結果としてどんな索引を置いてもハッシュ結合＋逐次走査が選ばれ、`journal_lines` の全走査が消えない(2026-08-04 の migrations/0027 検証: 規模B で前後とも 58〜61 ms、プラン不変)。結合順を強制すると 2.4x 速い(規模A: 10.5 ms → 4.4 ms、共有バッファ 1,102 → 96)ので、**是正は索引ではなくクエリの書き換えである**。案: 対象科目を先に確定させる(`WITH eq AS (SELECT account_id FROM ledger.accounts WHERE book_id = %(book)s AND category='equity' AND account_id <> 'retained')` を MATERIALIZED にして `jl.account_id IN (SELECT ...)` にする、あるいは LATERAL で科目ごとに journal_lines を引く)。**科目リストを SQL にハードコードしてはならない** — accounts が正であり、二重管理は帳簿の定義がコード側にずれる典型経路である。現状の緩和は dashboard 側の `@st.cache_data(ttl=60)` のみ。**src/ryza/risk/ は保護領域のため独立役員審査+みなし承認の手続を経ること。** 出典: `migrations/0027_query_indexes.sql` の「入れなかったもの」節の **(B) ryza.risk.navflow.NAV_FLOW_SQL 向けの索引**、および `docs/reviews/0027-indexes-independent-review.md`。"
+    status: pending
+
+  - id: meta-runs-status-check
+    what: "meta.runs.status に CHECK を置いて語彙を凍結する(runs_running_idx の述語が自由文字列に依存している — 独立役員審査 0027 中-4)"
+    conditions:
+      - type: date_after
+        date: "2026-08-24"
+    action:
+      type: issue_create
+      title: "migrations: meta.runs.status に CHECK 制約を置き、部分索引の述語を守る"
+      labels: [impl, schema]
+      body: "`migrations/0027` が追加した部分索引 `meta.runs (run_id DESC) WHERE status = 'running'` は、**述語が守られていない自由文字列に依存している**。`meta.runs.status` に CHECK 制約は存在せず(0001)、`running|success|failed` という語彙の根拠は列コメントだけである。したがって `'starting'` / `'retrying'` のような値を後から足す、あるいは `dashboard.queries.fetch_running_runs` の述語を `status IN (...)` に広げると、**エラーも警告も出ないまま索引が使われなくなる**。テストは索引の存在と定義しか見ておらず(EXPLAIN のプラン検証はフレーク源なのでテスト化していない)、CI の DB は空に近いので EXPLAIN でも捕まらない — 典型的な沈黙劣化の経路である。比較対象として `press.outbox` の `outbox_pending_idx`(0007)は述語が `sent_at IS NULL` という**構造的条件**なのでドリフトしえない。是正の選択肢: (a) `ALTER TABLE meta.runs ADD CONSTRAINT runs_status_check CHECK (status IN ('running','success','failed'))` で語彙を凍結する(既存行に違反が無いことを先に確認すること。`ryza.provenance.runs` が書く値が唯一の生成元)、(b) 索引の述語を構造的条件 `finished_at IS NULL` に置き換える(meta.runs には同型の列がある。ただし `fetch_running_runs` の述語も揃える必要があり、『実行中』の定義が status と finished_at の 2 箇所に散る点は要検討)。**どちらも migrations = 保護領域(定款第5条 area: schema)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/0027-indexes-independent-review.md 中-4、migrations/0027_query_indexes.sql の索引4の節。"
     status: pending
 
   - id: streamlit-upgrade-dads-visual-check
