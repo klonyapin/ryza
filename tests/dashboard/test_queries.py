@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import psycopg
 import pytest
@@ -16,6 +16,7 @@ import queries
 from psycopg.types.json import Jsonb
 
 from ryza.ingest.freshness import FreshnessSLA
+from ryza.ledger.posting import post_entry
 
 NOW = datetime.now(UTC)
 
@@ -213,6 +214,142 @@ def test_fetch_market_view_and_snapshots(conn, run):
 
     snaps = queries.fetch_market_view_snapshots(conn, limit=5)
     assert any(s["view_id"] == view_id for s in snaps)
+
+
+# ── 成績・リスク・未処理通知(T-018)──────────────────────────────────────────
+def _insert_nav(conn, *, day: date, nav: int, book_id: str = "DEMO_FUND") -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ledger.nav_snapshots (book_id, snap_date, nav, status, detail)
+            VALUES (%s, %s, %s, 'confirmed', '{}'::jsonb)
+            ON CONFLICT (book_id, snap_date) DO UPDATE SET nav = EXCLUDED.nav
+            """,
+            (book_id, day, nav),
+        )
+
+
+def test_fetch_nav_series_joins_external_flows(conn, run):
+    """出資仕訳(capital)が当日の net_flow として NAV 系列に付く。
+
+    これを引かないと増資日のリターンが跳ねる(TWR にならない)。集計式は
+    ryza.risk.daily.load_nav_series と同一。
+    """
+    _insert_nav(conn, day=date(2026, 7, 1), nav=1_000_000)
+    _insert_nav(conn, day=date(2026, 7, 2), nav=1_500_000)
+    post_entry(
+        conn,
+        book_id="DEMO_FUND",
+        entry_date=date(2026, 7, 2),
+        description="追加出資",
+        lines=[
+            {"account_id": "cash", "debit": 500_000, "currency": "JPY"},
+            {"account_id": "capital", "credit": 500_000, "currency": "JPY"},
+        ],
+        evidence={
+            "kind": "invoice", "payload_ref": "test://capital",
+            "sha256": hashlib.sha256(b"capital").digest(),
+            "source": "test", "retrieved_at": NOW,
+        },
+        run_id=run.run_id,
+    )
+    series = queries.fetch_nav_series(conn)
+    assert [r["day"] for r in series] == [date(2026, 7, 1), date(2026, 7, 2)]
+    assert float(series[0]["net_flow"]) == 0.0
+    assert float(series[1]["net_flow"]) == 500_000.0
+    # 出資を除けばリターンは 0(NAV は 100万 → 150万 だが中身は増えていない)。
+    prev, cur = series
+    ret = (float(cur["nav"]) - float(cur["net_flow"]) - float(prev["nav"])) / float(prev["nav"])
+    assert ret == pytest.approx(0.0)
+
+
+def test_fetch_nav_series_filters_by_book(conn, run):
+    _insert_nav(conn, day=date(2026, 7, 1), nav=1_000_000, book_id="DEMO_FUND")
+    _insert_nav(conn, day=date(2026, 7, 1), nav=7_777, book_id="OPS")
+    assert [float(r["nav"]) for r in queries.fetch_nav_series(conn)] == [1_000_000.0]
+
+
+def test_fetch_limits_state_and_latest_metrics(conn, run):
+    assert queries.fetch_latest_risk_metrics(conn) is None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO risk.limits_state
+                (book_id, dd_soft, dd_hard, vol_exceeded, es_exceeded, as_of, run_id)
+            VALUES ('DEMO_FUND', true, false, false, false, %s, %s)
+            ON CONFLICT (book_id) DO UPDATE SET dd_soft = EXCLUDED.dd_soft
+            """,
+            (NOW, run.run_id),
+        )
+        for dd in ("0.10", "0.18"):
+            cur.execute(
+                """
+                INSERT INTO risk.limits_state_events
+                    (book_id, event, dd_soft, dd_hard, vol_exceeded, es_exceeded,
+                     metrics, actor, as_of, run_id)
+                VALUES ('DEMO_FUND', 'engine_update', true, false, false, false,
+                        %s, 'risk.daily', %s, %s)
+                """,
+                (Jsonb({"drawdown": dd}), NOW, run.run_id),
+            )
+    state = next(s for s in queries.fetch_limits_state(conn) if s["book_id"] == "DEMO_FUND")
+    assert state["dd_soft"] is True and state["dd_hard"] is False
+    latest = queries.fetch_latest_risk_metrics(conn)
+    assert latest is not None
+    assert latest["metrics"]["drawdown"] == "0.18"  # 最新イベントを返す
+
+
+def test_fetch_outbox_pending_counts_and_oldest(conn, run):
+    assert queries.fetch_outbox_pending(conn) == []
+    _insert_outbox(conn, run, channel="approval", title="承認1")
+    _insert_outbox(conn, run, channel="approval", title="承認2")
+    sent = _insert_outbox(conn, run, channel="ops", title="配送済み")
+    with conn.cursor() as cur:
+        cur.execute("UPDATE press.outbox SET sent_at = now() WHERE id = %s", (sent,))
+    rows = queries.fetch_outbox_pending(conn)
+    assert [(r["channel"], int(r["pending"])) for r in rows] == [("approval", 2)]
+    assert float(rows[0]["oldest_age_hours"]) >= 0
+
+
+def test_fetch_latest_daily_run_reports_duration(conn, run):
+    assert queries.fetch_latest_daily_run(conn) is None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO meta.runs
+                (job_name, code_version, started_at, finished_at, status, params)
+            VALUES ('jobs.daily', 'test', %s, %s, 'success', '{}'::jsonb)
+            """,
+            (NOW - timedelta(minutes=10), NOW),
+        )
+    latest = queries.fetch_latest_daily_run(conn)
+    assert latest is not None
+    assert latest["status"] == "success"
+    assert float(latest["duration_seconds"]) == pytest.approx(600, abs=1)
+
+
+def test_fetch_cost_summary_returns_ratio_inputs(conn, run):
+    """比率(1 実行あたり)の分母になる実行数を返し、累計トークンは返さない。"""
+    run.add_cost("mid", tokens=1000, cost_estimate=0.6)
+    summary = queries.fetch_cost_summary(conn, days=30)
+    assert int(summary["cost_runs"]) >= 1
+    assert int(summary["all_runs"]) >= int(summary["cost_runs"])
+    assert float(summary["total_cost"]) >= 0.6
+    assert "tokens" not in summary
+
+
+def test_load_llm_budget_and_ips_limits_from_repo_config():
+    budget = queries.load_llm_budget()
+    assert float(budget["monthly_jpy"]) > 0  # config/llm.yaml の既定値
+    limits = queries.load_ips_limits()
+    assert limits["dd_hard_limit"] == 0.25
+    assert limits["dd_soft_limit"] < limits["dd_hard_limit"]
+
+
+def test_load_llm_budget_absent_key_returns_empty(tmp_path):
+    path = tmp_path / "llm.yaml"
+    path.write_text("version: '1'\n", encoding="utf-8")
+    assert queries.load_llm_budget(path) == {}
 
 
 # ── 開発ステータス(site/data.js)───────────────────────────────────────────────

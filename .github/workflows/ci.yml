@@ -52,8 +52,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      # dashboard extra を入れるのは tests/dashboard/test_app_pages.py が Streamlit の
+      # AppTest で全ページをヘッドレス描画するため(T-018)。可視化ヘルパとページ実装の
+      # 不整合は描画時にしか出ないため、UI をテスト対象外にしていた従来方針を改めた。
+      # uv.lock には既に dashboard extra の解決結果が入っており --locked のまま足せる。
       - name: Install dependencies
-        run: uv sync --locked --extra dev
+        run: uv sync --locked --extra dev --extra dashboard
 
       # ── lint(DB 不要のチェックを先に落とす) ──
       - name: Ruff

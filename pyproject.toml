@@ -31,7 +31,9 @@ bot = [
 ]
 # 運用ダッシュボード(Issue #10 → VM 認証付き公開・2026-08-03 代表指示)。
 # 本体依存に入れない(ジョブには不要)。閲覧環境(ローカル/VM)で .[dashboard] を入れる。
-# テスト(tests/dashboard)は DB 層・純ロジックのみ検証し streamlit を import しない。
+# T-018 以降、tests/dashboard は viz ヘルパの純ロジックに加え Streamlit の AppTest で
+# 全ページのヘッドレス描画も検証するため、CI は .[dev] に加えて .[dashboard] も入れる
+# (.github/workflows/ci.yml)。streamlit 未導入の環境では該当テストが skip される。
 # requests はタスクページの GitHub REST 取得(dashboard/github_api.py)用。
 dashboard = [
     "streamlit>=1.37",
