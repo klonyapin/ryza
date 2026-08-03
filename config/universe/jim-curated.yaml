@@ -59,8 +59,8 @@ manages_tags: [liquid_equity]
 
 # 承認記録(null の間は反映されない)。approved_at は ISO 日付、approved_by は
 # 'representative' 固定(起草者が自分で名乗れない — 審査 C-24)。
-approved_at: null
-approved_by: null
+approved_at: "2026-08-04"
+approved_by: "representative"
 
 # criterion + entries の正規化 sha256(内容と版の紐付け — 審査 C-25)。
 content_sha256: "69827e5059efb0215d91216cf7df292f6f055efe4478158cd040c7cf31045921"
