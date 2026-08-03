@@ -119,6 +119,30 @@ class Run:
             )
         self._commit_if_owned()
 
+    def record_runtime(self, patch: dict[str, Any]) -> None:
+        """実行中に判明した情報を ``params['runtime']`` へ追記する。
+
+        開始時点では決まらない値(例: 役員室会議で進行役が選んだ発言者)を後から記録
+        するための口。**入力証跡(start_run が書いた params 本体)は書き換えない** —
+        実行時の観測値は ``runtime`` 名前空間に隔離する(独立役員審査 2026-08-03 C-7)。
+        マージは SQL 側の ``||`` で行い、read-modify-write の競合を作らない。
+        """
+        if not patch:
+            return
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE meta.runs
+                SET params = coalesce(params, '{}'::jsonb) || jsonb_build_object(
+                        'runtime',
+                        coalesce(params -> 'runtime', '{}'::jsonb) || %s::jsonb
+                    )
+                WHERE run_id = %s
+                """,
+                (Jsonb(patch), self.run_id),
+            )
+        self._commit_if_owned()
+
     def finish(self, status: str = "success") -> None:
         """実行を終了として記録する(``finished_at`` と ``status`` を更新)。
 

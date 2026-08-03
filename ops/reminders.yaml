@@ -345,6 +345,18 @@ reminders:
       body: "代表が OAuth 同意画面(https://console.cloud.google.com/auth/overview?project=ryza-main、アプリ名 Ryza Dashboard・External・テストユーザーに mileage_embassy_9x@icloud.com)を設定したか確認する。設定済みなら: gcloud iap oauth-clients create で OAuth クライアントを作成し IAP へ紐付け → 未認証 curl が 302 を返すこと・代表アカウントでダッシュボード(https://ryza-dashboard-weuuqovieq-uw.a.run.app)にログインできることを確認 → URL を #承認 へ報告し本リマインダーを done に。未設定なら代表へ再依頼。現状: IAP は有効で未認証は 502(IAP 生成・遮断確認済み)だが、OAuth クライアント不在のため代表もログイン不可(2026-08-03 デプロイ時のエラー『Empty Google Account OAuth client ID(s)/secret(s)』)。"
     status: pending
 
+  - id: stances-source-kind
+    what: "governance.stances に出所種別カラムを追加(会議由来と個別レビュー由来の区別。盲検着任時に会議由来を除外できるようにする)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "governance.stances に出所種別(source_kind)を追加し、盲検着任で会議由来を除外する"
+      labels: [impl]
+      body: "独立役員審査(docs/reviews/boardroom-meeting-independent-review.md C-3)の後続是正。役員室が会議形式になったことで、stances には『会議で他役職・代表の発言を聞いた文脈で形成された主張』が入る。盲検レビュー(戦略昇格・IPS 改訂案の評価。議論規約3)で独立役員が着任するとき、この会議由来の stance を読むと代表の選好が盲検経路へ透過しうる。実装内容: ①migrations/ に governance.stances.source_kind(例: office_meeting|committee|review|manual)を追加する保護領域マイグレーション(独立役員審査+Approved トレーラ必須)、②boardroom.record_chat_stances は office_meeting を書く、③personas.recent_stances に除外オプションを足し、盲検着任経路は会議由来を読まない、④既存行のバックフィル方針(既存は office_meeting 相当か unknown か)を決めて記録。**順序: ①のマイグレーションは保護領域のため独立役員審査を先に通すこと**"
+    status: pending
+
   - id: governance-protect-deploy-dashboard
     what: "ops/deploy-dashboard.sh を config/governance.yaml の protected_areas へ登録(独立役員審査 0020 C-4)"
     conditions:
@@ -379,4 +391,28 @@ reminders:
       title: "outbox の内部キー(author.member_id)を embed_json の外へ出す"
       labels: [impl]
       body: "0020 は配送時にアイコン上書きを解決するため、embed_json の author に内部キー member_id を載せる方式を採った(src/ryza/org.py embed_author / AUTHOR_MEMBER_KEY)。これは press.outbox の全行に Discord API のフィールドではない値が永続化されることを意味し、除去は送信直前の1関数(org.resolve_author)だけに依存している(独立役員審査 0020 C-10)。将来 embed_json を別経路(新しい配送先・再送ツール・エクスポート)へ流す実装が resolve_author を通し忘れると、未知フィールドが Discord へ送られる。是正: press.outbox に author_member_id 列を追加する(あるいは embed_json と並ぶ meta 列を設ける)か、outbox.OutboxMessage のデータ構造として embed とは別に持ち、embed_json には Discord のフィールドだけを入れる。press.outbox はスキーマ変更のため保護領域の手続を経ること。現行方式でも実害が出ていないのは、Discord が未知フィールドを無視するためであり(0020 時点で確認)、緊急性は低い。"
+    status: pending
+
+  - id: resolution-critic-recency
+    what: "決議の決定論チェックを『最終代表発言以降に独立役員が発言したか』へ精緻化し、確認付き決議の連続を監査アラート対象にする(独立役員 再確認審査 懸念A)"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "決議チェックの精緻化(批判の鮮度)と確認付き決議の連続検出"
+      labels: [governance]
+      body: "現行の boardroom.mark_resolution は『議事録の出席者に独立役員が居るか』しか見ない(src/ryza/governance/boardroom.py)。そのため会議の冒頭で独立役員が別論点に1度発言していれば、その後に代表が持ち出した本題が無批判のまま決議できてしまう(独立役員 再確認審査 懸念A)。実装内容: ①チェックを『最終の代表発言以降に独立役員の発言があるか』へ精緻化する(guard_scope_text と同じ区間の考え方を決議側にも適用)、②confirmed_without_critic=True で通した決議を証跡として残す(現状は DB に痕跡が無く、連続使用を検出できない — governance.minute_resolutions への列追加は保護領域のため独立役員審査が必要)、③監査ジョブ(src/ryza/audit)に『確認付き決議の連続』を 05-governance §6-5(形骸化の防止)のアラートとして追加する。②の列追加なしに③は成立しないため順序に注意。"
+    status: pending
+
+  - id: meeting-reaction-round-consistency
+    what: "進行役の定型応答の直後に反応ラウンドが回る筋を整理する(独立役員 再確認審査 懸念C)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "会議1ターンの反応ラウンド条件を整理する(進行役フォールバック後の扱い)"
+      labels: [impl]
+      body: "boardroom.conduct_meeting は、ルータが誰も選ばなかった場合に進行役の定型文(LLM 呼び出しなし)を返した後も、残枠があるため反応ラウンドのルータを1回回す(独立役員 再確認審査 懸念C)。『誰も反応すべきでない』と判断した直後に『反応すべき役職はいるか』を問い直す構造は筋が通らず、ルータ呼び出し1回ぶんの無駄でもある。整理の選択肢: (a) 進行役フォールバックの場合は反応ラウンドをスキップする(意味論としては最も素直)、(b) 進行役の定型文をトランスクリプトに入れずに反応ラウンドを回す、(c) 現行を維持し『代表発言の再解釈の機会』として docstring に根拠を明記する。いずれかを選び、テストで固定すること。挙動の是非は実運用のログ(meta.runs.params.runtime.rounds)を数ターン分見てから判断してよい。"
     status: pending

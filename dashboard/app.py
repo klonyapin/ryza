@@ -970,18 +970,45 @@ def _role_member(role: str) -> org.Member | None:
         return None
 
 
+@st.cache_data(ttl=10)
+def _icon_overrides() -> dict[str, str]:
+    """代表が設定したアイコン上書き(0020・``ops.org_icon_overrides``)。
+
+    DB に繋がらない場合は空(台帳のアイコンで表示を続ける — 組織ページと同じ方針)。
+    発言ごとに引くため 10 秒だけキャッシュする(組織ページの即時反映は別経路)。
+    """
+    try:
+        return org.icon_overrides(_boardroom_conn())
+    except Exception:  # noqa: BLE001 - 表示は台帳へフォールバック
+        return {}
+
+
 def _role_display(role: str) -> str:
-    """役職の表示は「名前(役職)」(代表指示 2026-08-03)。台帳に無ければ従来ラベル。"""
+    """役職の表示は「名前(役職)」(代表指示 2026-08-03)。例:「エミリア(CIO)」。
+
+    役職名は会議の役職ラベル(``BOARDROOM_ROLES``)を優先する。台帳の title は
+    「CIO(執行統括)」のように括弧を含み、入れ子になって読みにくいため。
+    台帳に無い役職は台帳の表記(``Member.display_name``)→ 役職キーの順に落とす。
+    """
     member = _role_member(role)
-    return member.display_name if member else boardroom.BOARDROOM_ROLES.get(role, role)
+    label = boardroom.BOARDROOM_ROLES.get(role)
+    if member is None:
+        return label or role
+    return f"{member.name}({label})" if label else member.display_name
 
 
 def _role_avatar(role: str) -> str | None:
-    """チャット吹き出しのアバター。ローカル SVG(Streamlit は表示可)→ 台帳の
-    icon_url(リモート)→ 既定アイコンの順でフォールバックする。"""
+    """チャット吹き出しのアバター。
+
+    代表が設定したアイコン上書き(0020・``ops.org_icon_overrides``)を最優先し、
+    無ければリポジトリ内の SVG(Streamlit は表示可)→ 台帳の icon_url の順に落とす。
+    """
     member = _role_member(role)
     if member is None:
         return None
+    override = _icon_overrides().get(member.id)
+    if override:
+        return override
     path = member.icon_repo_path
     if path.exists():
         return str(path)
@@ -989,27 +1016,45 @@ def _role_avatar(role: str) -> str | None:
 
 
 def _render_chat_turn(turn: boardroom.ChatTurn) -> None:
-    """1 発言を吹き出し表示する。役職側は名前(役職)+キャラクター色+アバター。"""
+    """1 発言を吹き出し表示する。役職側は名前(役職)+キャラクター色+アバター。
+
+    発言しなかった役員は単に現れない(会議の進行役が発言者を選ぶ方式のため — 05 §5)。
+    進行役の定型応答(LLM ではない)はキャラクターを持たないため小さく表示する。
+    決定論ガードで呼ばれた発言はその旨をキャプションに出す(選定経路の可視化)。
+    """
     if turn.speaker == "representative":
         with st.chat_message("user"):
             st.markdown(turn.text)
         return
+    if turn.speaker == boardroom.FACILITATOR_SPEAKER:
+        st.caption(turn.text)
+        return
     member = _role_member(turn.speaker)
     with st.chat_message("assistant", avatar=_role_avatar(turn.speaker)):
-        if member is not None:
-            st.markdown(
-                f'<span style="color:{member.color};font-weight:600">'
-                f"{member.display_name}</span>",
-                unsafe_allow_html=True,
-            )
+        st.markdown(
+            f'<span style="color:{member.color if member else "inherit"};font-weight:600">'
+            f"{_role_display(turn.speaker)}</span>",
+            unsafe_allow_html=True,
+        )
+        if turn.source == "guard":
+            st.caption("重要決定の兆候を検出したため、決定論ガードが発言を要求(05 §3)")
         st.markdown(turn.text)
+
+
+# 役員の発言は 05 §3 の設計階層(CIO・独立役員=fable)どおり fable 固定 — 2026-08-03
+# 代表指示。誰が発言するかを選ぶルータ段は安価な mid 固定(交通整理に高階層は要らない)。
+# 1ターンの fable 呼び出しは boardroom.MAX_SPEECHES_PER_TURN 件で打ち切る。
+_BOARDROOM_TIER = "fable"
+_ROUTER_TIER = "mid"
 
 
 def page_boardroom() -> None:
     st.header("役員室")
     st.caption(
-        "経営レベルの対話・審議の場(05-governance §5)。対話は判断材料であり、"
-        "何も自動執行しない(不変原則1)。発効する決定は「決議」マークのみ。"
+        "経営レベルの審議の場(05-governance §5)。代表が発言すると、進行役が"
+        "**反応すべきと判断した役員だけ**が順に応答する会議形式(2026-08-03 代表指示)。"
+        "対話は判断材料であり、何も自動執行しない(不変原則1)。"
+        "発効する決定は「決議」マークのみ。"
     )
     try:
         wconn = _boardroom_conn()
@@ -1017,75 +1062,102 @@ def page_boardroom() -> None:
         st.error(f"DB に接続できない: {exc}")
         return
 
-    role = st.selectbox(
-        "役職", list(boardroom.BOARDROOM_ROLES),
-        format_func=lambda r: boardroom.BOARDROOM_ROLES[r],
+    st.caption(
+        "出席: 代表、"
+        + "、".join(_role_display(r) for r in boardroom.MEETING_ORDER)
+        + f" / 発言={_BOARDROOM_TIER}・進行役={_ROUTER_TIER}(固定)"
+        + f" / 1ターン最大 {boardroom.MAX_SPEECHES_PER_TURN} 発言"
     )
-    if st.session_state.get("br_role") != role:
-        # 役職を切り替えたら会話をリセット(役職間で記憶・文脈を共有しない — 05 §6-2)。
-        st.session_state["br_role"] = role
-        st.session_state["br_turns"] = []
-        st.session_state["br_minute_id"] = None
-    # CIO/独立役員の設計階層は fable(05 §3)だが、コスト配慮で既定は mid。
-    use_fable = st.toggle("fable で応答(既定は mid — コスト配慮。設計上の階層は fable)")
-    tier = "fable" if use_fable else "mid"
 
-    turns: list[boardroom.ChatTurn] = st.session_state["br_turns"]
+    turns: list[boardroom.ChatTurn] = st.session_state.setdefault("br_turns", [])
     for turn in turns:
-        avatar = "user" if turn.speaker == "representative" else "assistant"
-        with st.chat_message(avatar):
-            st.markdown(turn.text)
+        _render_chat_turn(turn)
 
-    role_label = boardroom.BOARDROOM_ROLES[role]
-    text = st.chat_input(f"{role_label} への発言(あなたは代表として話す)")
+    text = st.chat_input("会議での発言(あなたは代表として話す)")
     if text:
         turns.append(boardroom.ChatTurn("representative", text))
-        with st.chat_message("user"):
-            st.markdown(text)
+        _render_chat_turn(turns[-1])
+        spoke_before = len(turns)
+
+        def _append_and_render(turn: boardroom.ChatTurn) -> None:
+            """発言が出るたびに会話へ追記し、その場で描画する(逐次表示)。"""
+            turns.append(turn)
+            _render_chat_turn(turn)
+
         try:
-            with st.spinner(f"{role_label} が応答中({tier})…"):
-                # LLM 1 呼び出しごとに Run を開閉する(コスト記録の受け皿)。セッション
-                # 単位の Run にしない理由: Streamlit にはセッション終了フックがなく、
-                # ブラウザを閉じると 'running' 行が漏れ残るため。
-                with run_ctx(
-                    "dashboard.boardroom.chat", {"role": role, "tier": tier}, conn=wconn
-                ) as r:
-                    reply = boardroom.chat_reply(
-                        _boardroom_llm(r, tier),
-                        # 着任プロンプトは毎回組み立てる(直近の stances を反映 — 05 §2)。
-                        onboarding_prompt=personas.assume_role(wconn, role),
+            # LLM 呼び出しは会議1ターン(ルータ段+発言段+反応ラウンド)で 1 Run に
+            # まとめる(コスト記録の単位 — ルータ呼び出しも同 Run に入る)。セッション
+            # 単位の Run にしない理由: Streamlit にはセッション終了フックがなく、
+            # ブラウザを閉じると 'running' 行が漏れ残るため。
+            with run_ctx(
+                "dashboard.boardroom.meeting",
+                {"speaker_tier": _BOARDROOM_TIER, "router_tier": _ROUTER_TIER},
+                conn=wconn,
+            ) as r:
+                with st.spinner(
+                    f"進行役({_ROUTER_TIER})が発言者を選び、役員({_BOARDROOM_TIER})が"
+                    "順に発言中…"
+                ):
+                    result = boardroom.conduct_meeting(
+                        router_llm=_boardroom_llm(r, _ROUTER_TIER),
+                        speaker_llm=_boardroom_llm(r, _BOARDROOM_TIER),
+                        # 着任プロンプトは役職ごとに毎回組み立てる(永続記憶は役職別 —
+                        # 05 §2・§6-2。会議で共有されるのはトランスクリプトのみ)。
+                        onboarding_for_role=lambda role: personas.assume_role(wconn, role),
                         turns=turns,
-                        model=_llm_config().model_for(tier),
-                        model_tier=tier,
+                        router_model=_llm_config().model_for(_ROUTER_TIER),
+                        router_tier=_ROUTER_TIER,
+                        speaker_model=_llm_config().model_for(_BOARDROOM_TIER),
+                        speaker_tier=_BOARDROOM_TIER,
+                        # 発言が出るたびに追記・描画する(途中で失敗しても既に得た
+                        # 発言は残す — 会議で実際にあった発言を握り潰さない)。
+                        on_reply=_append_and_render,
                     )
-        except Exception as exc:  # noqa: BLE001 - API 失敗時は発言を取り消して継続
-            turns.pop()
-            st.error(f"応答の生成に失敗: {exc}")
+                # ルータ・ガードの選定結果を Run の runtime 名前空間に残す
+                # (入力証跡は書き換えない — provenance.Run.record_runtime)。
+                r.record_runtime({
+                    "rounds": len(result.rounds),
+                    "roles": result.rounds,
+                    "guard_fired": result.guard_fired,
+                })
+        except Exception as exc:  # noqa: BLE001 - API 失敗時も会議を壊さず継続
+            if len(turns) == spoke_before:
+                turns.pop()  # 誰も発言できなかった場合は代表の発言ごと取り消す
+                st.error(f"応答の生成に失敗: {exc}")
+            else:
+                st.error(f"会議は途中で中断した(既出の発言は保持): {exc}")
             return
-        turns.append(boardroom.ChatTurn(role, reply))
-        with st.chat_message("assistant"):
-            st.markdown(reply)
 
     st.divider()
     if st.button("議事録として保存(主張・懸念も蓄積)", disabled=not turns):
         try:
+            roles = boardroom.speaking_roles(turns)  # 発言した役職のみ要約する
             with st.spinner("議事録を保存し、主張・懸念を要約中…"):
-                with run_ctx("dashboard.boardroom.save", {"role": role}, conn=wconn) as r:
+                with run_ctx(
+                    "dashboard.boardroom.save", {"roles": roles}, conn=wconn
+                ) as r:
+                    held_at = datetime.now(UTC)
                     saved = boardroom.save_office_chat_minute(
-                        wconn, role=role, turns=turns, run_id=r.run_id
+                        wconn, turns=turns, run_id=r.run_id, held_at=held_at
                     )
-                    # 要約は mid 固定(応答トグルとは独立 — 要約に fable は不要)。
-                    digest = boardroom.digest_stances(
-                        _boardroom_llm(r, "mid"),
-                        role=role,
-                        transcript_md=saved.body_md,
-                        model=_llm_config().model_for("mid"),
-                        model_tier="mid",
-                    )
-                    stance_ids = boardroom.record_chat_stances(
-                        wconn, role=role, stances=digest,
-                        minute_id=saved.minute_id, run_id=r.run_id,
-                    )
+                    # 要約は mid 固定(応答の階層とは独立 — 要約に fable は不要)。
+                    # 入力は当該役職+代表の発言のみに決定論フィルタ(記憶の分離 —
+                    # 05 §6-2。他役職の主張が永続記憶へ混入する経路を構造的に塞ぐ)。
+                    stance_ids: list[int] = []
+                    for role in roles:
+                        digest = boardroom.digest_stances(
+                            _boardroom_llm(r, "mid"),
+                            role=role,
+                            transcript_md=boardroom.role_digest_input(
+                                turns, role, held_at=held_at
+                            ),
+                            model=_llm_config().model_for("mid"),
+                            model_tier="mid",
+                        )
+                        stance_ids += boardroom.record_chat_stances(
+                            wconn, role=role, stances=digest,
+                            minute_id=saved.minute_id, run_id=r.run_id,
+                        )
             st.session_state["br_minute_id"] = saved.minute_id
             st.success(
                 f"議事録 #{saved.minute_id} を保存(stances へ {len(stance_ids)} 件追記)"
@@ -1109,15 +1181,28 @@ def page_boardroom() -> None:
             proposal_ref = st.text_input(
                 "proposal_ref(承認事項なら governance.decisions と突合。任意)"
             )
+            # 決定論チェック(05 §3): 独立役員の発言が無い議事録の決議には明示確認を
+            # 求める。ブロックではなく摩擦であり、決議権は代表に残る(定款第3条)。
+            confirm = st.checkbox(
+                "独立役員の批判を経ていない議事録でも決議する(内容を理解した上で)"
+            )
             if st.form_submit_button("決議としてマーク(代表として)"):
                 if not title.strip() or not body.strip():
                     st.warning("タイトルと本文は必須")
                 else:
-                    rid = boardroom.mark_resolution(
-                        wconn, minute_id=minute_id, title=title.strip(),
-                        resolution_md=body, proposal_ref=proposal_ref.strip() or None,
-                    )
-                    st.success(f"決議 #{rid} をマークした")
+                    try:
+                        rid = boardroom.mark_resolution(
+                            wconn, minute_id=minute_id, title=title.strip(),
+                            resolution_md=body,
+                            proposal_ref=proposal_ref.strip() or None,
+                            confirmed_without_critic=confirm,
+                        )
+                        st.success(f"決議 #{rid} をマークした")
+                    except boardroom.CriticAbsentError as exc:
+                        st.warning(
+                            f"{exc}。上のチェックボックスで明示確認するか、"
+                            "独立役員に発言させてから保存し直すこと。"
+                        )
         for res in boardroom.fetch_resolutions(wconn, minute_id):
             ref = f" / proposal_ref: {res['proposal_ref']}" if res["proposal_ref"] else ""
             st.caption(f"決議 {res['seq']}: {res['title']}(#{res['resolution_id']}{ref})")
