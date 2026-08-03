@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ryza import org
 from ryza.press import embeds
 from ryza.press.images import ImageResult
 from ryza.press.linter import Prediction, Sentence, Topic, TradeImplication
@@ -18,9 +19,19 @@ def _topic() -> Topic:
 
 def test_morning_embed_color_and_disclaimer():
     embed = embeds.build_morning_embed([_topic()])
-    assert embed["color"] == embeds.COLOR_NORMAL == 0x5B54C7
+    # 朝刊の色は発信者キャラクター(台帳 org.yaml)の色(代表指示 2026-08-03)。
+    press = org.get_member(embeds.PRESS_MEMBER_ID)
+    assert embed["color"] == press.color_int
     assert embeds.DISCLAIMER in embed["footer"]["text"]
     assert len(embed["fields"]) == 1
+
+
+def test_morning_embed_author_is_press_character():
+    """全対話面で「名前(役職)」+アイコンを名乗る(代表指示 2026-08-03)。"""
+    embed = embeds.build_morning_embed([_topic()])
+    press = org.get_member(embeds.PRESS_MEMBER_ID)
+    assert embed["author"]["name"] == press.display_name
+    assert embed["author"]["icon_url"] == press.icon_url
 
 
 def test_morning_embed_includes_trade_implication_ja():
@@ -52,8 +63,10 @@ def test_morning_nav_provisional_marked():
 
 
 def test_flash_embed_is_red():
+    # 速報は author をキャラクターにしつつ、赤=緊急度シグナルは維持する。
     embed = embeds.build_flash_embed(_topic())
     assert embed["color"] == embeds.COLOR_FLASH == 0xC24E3A
+    assert embed["author"] == org.embed_author(embeds.PRESS_MEMBER_ID)
 
 
 def test_flash_prediction_embed_shows_label():
@@ -80,3 +93,4 @@ def test_digest_embed_combines_topics():
     assert "まとめ速報" in embed["title"]
     assert "3件" in embed["title"]
     assert embed["color"] == embeds.COLOR_FLASH
+    assert embed["author"] == org.embed_author(embeds.PRESS_MEMBER_ID)
