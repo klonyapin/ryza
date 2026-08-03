@@ -93,6 +93,11 @@ def build_embeds(
     """本文を author(名前(役職)+アイコン)付き embed 列へ組む(純関数)。
 
     タイトルは先頭 embed のみ。author は全 embed に付け、色はキャラクター色。
+
+    アイコンは**台帳(config/org.yaml)の値**を使う。DB のアイコン上書き
+    (``ops.org_icon_overrides``・0020)は適用しない — 本モジュールは psycopg 非依存の
+    軽量経路(モジュール docstring)であり、DB 接続を持たないため。開発対話用の
+    ブリッジに限った割り切りで、Bot 本体の配送(outbox 経路)は上書きに追従する。
     """
     embeds: list[dict[str, Any]] = []
     for i, chunk in enumerate(split_chunks(text)):
