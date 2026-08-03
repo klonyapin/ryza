@@ -138,7 +138,14 @@ reminders:
       title: "A-18-1: マージ PR の実在を GitHub API で照合する"
       labels: [impl]
       body: "現行の src/ryza/audit/a18.py は PR 件名(Merge pull request #N)の自己申告のみで承認と判定しており件名偽装でバイパス可能(独立役員審査 2026-08-03 で実証)。GitHub API で PR #N の実在・マージコミット SHA の一致・マージ実行者を照合する。定款第5条の実弾移行前提条件(ブランチ保護+トレーラ検査 CI)の実装判断と合わせて行う。**2026-08-04 追記**: PR 承継ルールの導入で偽トレーラの爆風半径が『1コミット』から『ブランチ全体』に拡大したため、本件は `approved-trailer-v2`(期限 2026-08-10)と統合して実装してよい(実装するなら早い方に寄せる)。"
-    status: pending
+    # 2026-08-04 完了: approved-trailer-v2 と統合して実装(PRVerifier)。件名の PR 番号と
+    # トレーラの PR URL を `repos/<slug>/pulls/N` で実在+マージ済み照合し、A-18-1(承継起点・
+    # 附則 b・トレーラ参照)と A-18-4(非 PR マージ)の双方に配線した。API 不達は fail-open で
+    # 縮退し件数・理由を報告 notes に開示する(週次監査を API 障害で止めない)。私有リポジトリ
+    # +認証不備で全件 404 になる誤検出を避けるため、`repos/<slug>` の到達性を先に確認する。
+    # マージ実行者の照合は未実装(GitHub の設定上マージ実行者は PR 作成者と同一になりうるため
+    # 統制価値が薄く、ブランチ保護 required review で担保する方が直接的)。
+    status: done # 2026-08-04 実装(src/ryza/audit/a18.py の PRVerifier)
 
   - id: approved-trailer-v2
     what: "Approved トレーラ様式 v2(reviewed=<sha40> 等)と PR 実在照合 — PR 承継の起点検証(独立審査 2026-08-04 重大-1/重大-2 の恒久対策)"
@@ -150,6 +157,42 @@ reminders:
       title: "Approved トレーラ様式 v2: 承継を reviewed SHA の祖先に限定し PR 実在を照合する"
       labels: [governance]
       body: "A-18-1 の PR 承継(2026-08-04 導入)は、first-parent 上の『件名がマージ形式・親2・Approved トレーラ有効』なマージが持ち込んだコミット群を承認扱いにする。独立役員審査(docs/reviews/g-a18-protect-independent-review.md「承継ルール審査記録」)は2つの構造的欠陥を PoC 付きで指摘した: **重大-1** `has_approval_trailer` は `^Approved:\\s*\\S+` を見るだけ、`_PR_MERGE_RE` は PR 番号の実在を見ないため、実在しない PR #999999 の件名+架空 URL のトレーラを持つマージが、ブランチ内 evil merge による Kill Switch 改変を violations=0 で通した。承継は偽トレーラ1件の爆風半径を『1コミット』から『ブランチ全体』へ公式化する。**重大-2** 承継は『マージ時点のブランチ全体』に及ぶため、独立審査・#承認 通知の**後**に積まれたコミットも同じトレーラで承認扱いになる(審査後 push の吸収)。実装内容: ①トレーラ様式を `Approved: <url> reviewed=<sha40> mode=deemed|principal notified=<ISO8601>` に拡張する(定款第5条 C-5 様式の改訂 = L1 手続)、②承継を `reviewed` SHA の祖先に限定する(reviewed より後に積まれたコミットは承継しない)、③`mode=deemed` は #承認 通知の実在と発効条件を機械検査する(定款 v0.4 は effective: on_notice のため 48h 経過検査ではなく**通知の実在**を照合する — 審査者の 48h 前提は v0.3 の様式で事実誤認、2026-08-04 設計リード裁定)、④様式不備のトレーラは承継の起点にしない(fail-safe)、⑤`a18-github-pr-verification`(PR 実在の API 照合)と統合してよい。移行: 既存の v1 トレーラ(reviewed 無し)は経過措置として当面 violations にしないが、承継の起点としては扱わない/扱う のいずれにするかを実装時に決めて記録すること。出典: 独立役員審査 2026-08-04 重大-1・重大-2 と反対意見書③(承継は reviewed SHA 固定を伴う場合のみ有効とし、それ以外は受容へ寄せる代替案)。"
+    # 2026-08-04 実装(src/ryza/audit/a18.py・config/governance.yaml の様式コメント):
+    #   ① 様式 v2 `Approved: <参照> reviewed=<sha40>` を**任意拡張**として受理(approval_trailers /
+    #      reviewed_shas)。mode=/notified= は解釈せず属性として無視する — 定款 v0.4 のみなし承認は
+    #      「通知と同時に発効」であり、通知の実在照合は A-18-5(未配送の検出)が既に担っているため
+    #      トレーラ側に二重の様式を課さない(様式を増やすほど記入漏れで承継が落ちる副作用がある)
+    #   ② 承継を reviewed の祖先に限定。reviewed 後に積んだコミットは (b)・(c) のいずれでも救済しない
+    #   ③ 様式不備(40 桁 hex でない・リポジトリに存在しない reviewed)は承継の起点にしない(fail-safe)
+    #   ④ **移行方針の決定**: v1(reviewed 無し)は当面 violations にせず、承継の起点としても
+    #      **従来どおり扱う**。理由 = v1 を起点から外すと過去の全 PR 配下が一斉に違反化し、
+    #      「毎週赤いが誰も見ない」形骸化(05-governance §6-5)を招く。代わりに承継件数を
+    #      notes と embed(「様式 v1(範囲=マージ時点のブランチ全体)」)に毎週開示する
+    #   ⑤ PR 実在照合を統合(a18-github-pr-verification を done に)
+    status: done # 2026-08-04 実装(様式 v2 + PR 実在照合)
+
+  - id: trailer-v1-sunset
+    what: "Approved トレーラ v1(reviewed 無し)承継の打ち切り — v2 必須化(定款 C-5 改訂 = L1)。期限の無い経過措置は恒久仕様である(独立審査 2026-08-04 重大-2)"
+    conditions:
+      - type: date_after
+        date: "2026-09-01"
+    action:
+      type: issue_create
+      title: "Approved トレーラ v1 の承継を打ち切り、reviewed=<sha40> を必須にする"
+      labels: [governance]
+      body: "2026-08-04 の様式 v2 導入時、既存 PR の一斉違反化(05-governance §6-5 の形骸化)を避けるため v1(reviewed 無し)の承継を経過措置として残した。独立役員審査は『期限の無い経過措置は経過措置ではなく恒久仕様』『任意の統制は統制でない(実測採用率 0/4)』と指摘し、期限設定を統合条件とした。本リマインダーの発火時に以下を行う: ①`src/ryza/audit/a18.py` の `_v1_inheritance_notes` を注記から**警告(has_findings 寄与)**へ格上げする、②さらに実弾移行前に v1 承継そのものを廃止(reviewed 無しの PR マージは承継の起点にしない)、③定款第5条 C-5 の様式に reviewed を必須として明記する(L1 手続 = 独立役員審査 → #承認 通知)。判断材料として、発火時点の A-18 報告で v2 採用率(inherited のうち reviewed_scoped の割合)を確認すること。出典: docs/reviews/g-a18-protect-independent-review.md「トレーラ v2 審査記録」重大-2・反対意見書①。"
+    status: pending
+
+  - id: decision-reviewed-sha
+    what: "承認記録(governance.decisions)に審査対象 SHA を持たせ、Approved トレーラの reviewed と突合する — reviewed の自己申告性の解消(独立審査 2026-08-04 重要-3)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "governance.decisions に審査対象 SHA を追加し A-18 の reviewed と突合する"
+      labels: [impl]
+      body: "様式 v2 の `reviewed=<sha40>` はトレーラの書き手の申告であり、『独立審査が実際にその SHA を見た』ことを A-18 は独立に確認できない。現在の機械検査は『reviewed が当該マージの第2親の祖先であること』までで、`reviewed=<マージ直前のブランチ head>` と書けば被覆は v1 と同じになる(独立役員審査 PoC 再現済み)。恒久対策は照合先を作ること: ①`governance.decisions`(または新テーブル)に審査対象コミット SHA 列を追加するマイグレーション(保護領域 — schema)、②独立審査エージェント/承認フロー(`src/ryza/governance/notices.py`・`src/ryza/bot/approvals.py`)が審査対象 SHA を記録する、③A-18-1 が `reviewed` と承認記録の SHA を突合し、不一致は承継の起点にしない(fail-safe)。②の記録主体が人間の手作業のままなら申告性は解消されないため、審査エージェントの出力から機械的に埋まる経路にすること。出典: docs/reviews/g-a18-protect-independent-review.md「トレーラ v2 審査記録」重要-3。"
     status: pending
 
   - id: risk-limits-state-freshness-gate
@@ -622,7 +665,19 @@ reminders:
       type: issue_create
       title: "ledger: replay_position の as_of 対応 → 再締めで過去日の評価替えを再適用する"
       labels: [impl, ledger, risk]
-      body: "再締め(`ledger.closing.reclose_stale`)は記帳済み仕訳の**集計だけ**をやり直し、評価替え(MTM)は打ち直さない。`_util.replay_position`(src/ryza/ledger/_util.py:215-264)が `entry_date` で絞らず全期間を再生するため、`post_mark_to_market`(src/ryza/ledger/posting.py:298-316)を過去日付で呼ぶと**その日に存在しなかった建玉**を過去日付の仕訳として書いてしまうからである。帰結として遅延約定のあった日の建玉は取得原価のまま残り、**恒久的な偽リターン**が立つ(独立審査の実測: 市場価格 1200 の日に 1000 で 1000 株を遅延記帳 → 真値 `[0.0]` に対し観測 `[+0.020]`、翌日以降も訂正されない)。振幅は『約定日の値洗い差 × 数量 / NAV』に限られ ±50% 級ではないが、`ewma_vol` を経由して重要-1 と同じ経路(誤 vol_exceeded)に乗る。是正: `replay_position` に `as_of`(`entry_date <= as_of` で絞る)を追加し、再締めが過去日の評価替えを**その日の建玉と終値**で再適用できるようにする。移動平均法の原価計算・`securities_book_value` の as_of との整合、既存呼び出し(post_fill の実現損益計算)への影響を確認すること。当面の防御として当該日は `detail.recon_invalidated` / `positions_stale` で名指しされている。**src/ryza/ledger/ は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 新-3。"
+      body: "(実装済み)`_util.replay_position` に `as_of` を追加し、`reclose_stale` が遅延仕訳に建玉行を含む日(= `recon_invalidated` と同集合)について、その日時点の建玉を as_of リプレイで復元しその日の終値(`market.bars` — 当日の締めと同じソース)で評価替えを**集計内で**再適用するようにした。仕訳は書かない(過去日付への新規記帳は水位を進めて自分自身を stale にするため)。終値が欠ける日は再適用せず `detail.mtm_not_reapplied` を維持する縮退。**src/ryza/ledger/ は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 新-3。"
+    status: done # 2026-08-04 実装(branch mtm-replay)。審査実測 +2% → 0% を回帰テストで固定
+
+  - id: mtm-zero-qty-residue
+    what: "【優先度高】全売却後の評価残渣が NAV を恒久的に過大にする(MTM リプレイ審査 新-10 — 新-3 と構造的に同一の偽リターン)"
+    conditions:
+      - type: date_after
+        date: "2026-08-08"
+    action:
+      type: issue_create
+      title: "ledger: qty==0 の銘柄も評価替えを打つ(全売却後の securities 残渣で NAV が恒久過大)"
+      labels: [impl, ledger, risk]
+      body: "建玉を全売却した銘柄の `securities` 勘定に前日 MTM の残渣が残り、NAV が**恒久的に過大**になる。`ledger.closing.run_daily_close`(`closing.py` の held_instruments ループ)も `ledger.closing._reapply_mtm` も、`qty == 0` を評価替えの**前**にスキップするため、建玉ゼロの銘柄が時価ゼロへ洗い替えられないからである。売却時の `post_fill` は取得原価ぶん(`cost_released`)しか `securities` を取り崩さないので、評価益ぶんが資産に残る。**独立審査の実測(origin/main でも同一 — 本 PR の回帰ではない)**: 1000株@1000 買い → 終値 1200 で評価替え → 翌日 1200 で全売り → `securities` 残高 200,000・数量 0、NAV 10,200,000→10,400,000、`book_returns` は `[+0.0196, 0.0]`(真値 `[0.0, 0.0]`)。これは新-3 と構造的に同一の恒久的偽リターンであり、`ewma_vol` 経由で誤 `vol_exceeded` の経路に乗る。**本 PR(mtm-replay)固有の害**: 遅延全売り日の再締めが `mtm_reapplied=True` と『その日の終値で評価替えして NAV に反映した』注記を付けながら 1 銘柄も評価替えしない(`positions={}` で残渣は資産に残る)。是正: `qty == 0` でも評価替えを打つ(delta = 0 − 帳簿価額)。**run_daily_close と _reapply_mtm の両呼び出し口を同時に**直すこと(片方だけだと当日と再締めで NAV が食い違う)。売り約定の残渣そのものを post_fill 側で消す設計(時価で取り崩す)も代替として検討し、移動平均法の実現損益計算への影響を評価すること。**src/ryza/ledger/ は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。別 PR とする。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md MTM リプレイ審査記録 新-10。"
     status: pending
 
   - id: close-stage-failure-visibility
@@ -813,4 +868,16 @@ reminders:
       title: "議事録の話者復元をラベル辞書から切り離す(ラベル凍結または構造化保存)"
       labels: [governance]
       body: "boardroom.parse_speaker_sequence は表示用ラベル辞書 _SPEAKER_LABELS の逆写像で議事録本文から話者を復元する。決議精緻化審査 2026-08-03 懸念6 は、『代表』→『代表取締役』のような表示上の改称だけで、同一の過去本文の判定が『要確認』→『鮮度あり』へ**反転**する(fail-open)ことを実測した。証憑(minutes.body_md)は追記オンリーで書き換えられないのに、その解釈がコード側の可変な辞書に依存している。対処の選択肢: (a) 復元専用のラベル表を凍結し(過去の表記も含む追記オンリーの表として持つ)、表示用辞書と分離した上で回帰テストで固定する、(b) 議事録保存時に話者列を構造化して残す(governance.minutes への列追加 = 保護領域の migration。本文と冗長になるが解釈をコードから外せる)、(c) 本文の話者行に役職キー(英字)を機械可読な形で併記する。(b) が最も堅いが保護領域の手続を要する。いずれの場合も、既存行(旧表記)の解釈が変わらないことをテストで固定すること。"
+    status: pending
+
+  - id: mtm-bar-arrival-revisit
+    what: "MTM 未再適用日(mtm_pending)のバー到着後の自動再訪"
+    conditions:
+      - type: date_after
+        date: "2026-08-12"
+    action:
+      type: issue_create
+      title: "MTM 再適用: 当日バーが後から取り込まれた日の自動再訪"
+      labels: [impl, ledger]
+      body: "MTM リプレイ審査(新-6 裁定)で門を「その日のバー」に限定した結果、当日バー欠測のまま再締めされた日は以後 stale でないため、後からバーが取り込まれても自動では再訪されない(mtm_pending のまま取得原価で恒久)。安全側の縮退だが新-3 の害が当該日に限り残る。是正案: 再締めの stale 検出に「mtm_pending かつ当日バーが現在は存在する日」を加える(水位方式と同型の1クエリ)。ledger は保護領域 — 独立審査手続を要する。"
     status: pending

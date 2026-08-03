@@ -213,7 +213,11 @@ def cash_account(bt: str) -> str:
 
 
 def replay_position(
-    conn: psycopg.Connection, book_id: str, instrument_id: int
+    conn: psycopg.Connection,
+    book_id: str,
+    instrument_id: int,
+    *,
+    as_of: _date | None = None,
 ) -> tuple[Decimal, Decimal]:
     """記帳済みの約定(broker_fill 証憑)を再生し、移動平均法の (保有数量, 取得原価合計) を返す。
 
@@ -221,24 +225,34 @@ def replay_position(
     - sell: 数量を減らし、取得原価を平均原価分だけ取り崩す
     逆仕訳(reversal_of)された約定と、逆仕訳エントリ自体は除外する。
     MTM(price_snapshot)は原価に影響しないため、ここでは対象外。
+
+    ``as_of`` を渡すと ``entry_date <= as_of`` の約定だけを再生する(既定 None = 全期間 —
+    従来挙動)。**なぜ必要か**(独立審査 新-3): 全期間再生の数量を使って過去日付の評価替えを
+    打つと「その日に存在しなかった建玉」を過去日付で記帳してしまうため、再締めは MTM を
+    打ち直せず、遅延約定のあった日の建玉が取得原価のまま残って恒久的な偽リターンを立てる。
+    ``as_of`` はその日時点の建玉を point-in-time(不変原則4)で復元する手段である。
+
+    逆仕訳の除外も ``as_of`` で切る(``r.entry_date <= as_of``)。``securities_book_value``
+    の as_of は逆仕訳の**明細**を日付で落とすので、数量側だけ日付を無視して取り消すと
+    「時価 − 帳簿価額」の差分が両者の非対称から生じる — 評価替えの差分計算が壊れる。
+    """
+    sql = """
+        SELECT je.evidence_id, e.payload_ref
+        FROM ledger.journal_entries je
+        JOIN ledger.evidence e ON e.evidence_id = je.evidence_id
+        WHERE je.book_id = %s
+          AND e.kind = 'broker_fill'
+          AND je.reversal_of IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM ledger.journal_entries r
+              WHERE r.reversal_of = je.entry_id
+                AND (%s::date IS NULL OR r.entry_date <= %s)
+          )
+          AND (%s::date IS NULL OR je.entry_date <= %s)
+        ORDER BY je.entry_id
     """
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT je.evidence_id, e.payload_ref
-            FROM ledger.journal_entries je
-            JOIN ledger.evidence e ON e.evidence_id = je.evidence_id
-            WHERE je.book_id = %s
-              AND e.kind = 'broker_fill'
-              AND je.reversal_of IS NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM ledger.journal_entries r
-                  WHERE r.reversal_of = je.entry_id
-              )
-            ORDER BY je.entry_id
-            """,
-            (book_id,),
-        )
+        cur.execute(sql, (book_id, as_of, as_of, as_of, as_of))
         rows = cur.fetchall()
 
     qty = Decimal(0)
