@@ -1,6 +1,9 @@
 """週次運用ジョブ ops-weekly(経営管理部ジョブ第1号)。
 
-アプリ本体や DB セッションに依存せず GCP 上(Cloud Run Job + Cloud Scheduler)で毎週動く:
+GCE VM(ryza-bot)上の systemd timer で毎週動く(``ops/deploy-ops-weekly.sh``)。
+2026-08-04 まで Cloud Run Job + Cloud Scheduler だったが、下記 7 の形骸化監査が
+VM 内 PostgreSQL を読むため実行環境を VM へ移した(決議精緻化審査 懸念4 の配線)。
+本モジュール自身はアプリ本体に依存せず、DB は opt-in の監査だけが触る:
 
 1. ``ops/reminders.yaml``(v2)と ``docs/tasks/`` を GitHub Contents API で取得
 2. 各リマインダーの conditions(OR)を評価し、``only_if``(AND ゲート)も満たせば action を発火
@@ -19,7 +22,8 @@
   GITHUB_TOKEN  fine-grained PAT(DRY_RUN=1 以外では必須)
   GITHUB_REPO   owner/name
   DRY_RUN       "1" で書き込み抑止
-  BOARDROOM_AUDIT "1" で決議の形骸化監査を有効化(DB へ届く実行環境でのみ設定する)
+  BOARDROOM_AUDIT "1" で決議の形骸化監査を有効化(DB へ届く実行環境でのみ設定する。
+                VM 経路では ``ops/deploy-ops-weekly.sh`` が /etc/ryza/ops-weekly.env に置く)
 """
 
 from __future__ import annotations
@@ -361,9 +365,12 @@ def run_a18_if_configured(*, dry_run: bool) -> str:
     """A-18 監査(規則⇔実装トレーサビリティ)を週次で実行し、実行状態の1行を返す(opt-in)。
 
     A-18 は git 履歴(ローカル checkout)と DB(press.outbox)を必要とするため、両方に届く
-    実行環境(GCE VM 等)で ``A18_REPO_PATH`` を設定したときだけ走る。Cloud Run 版 ops-weekly
-    (checkout も DB も無い)では未設定のまま = スキップ。監査の失敗は握って週次ジョブ本体は
-    継続するが、返す状態行(→週次ダイジェスト)とログに必ず残す(沈黙を多義的にしない)。
+    実行環境で ``A18_REPO_PATH`` を設定したときだけ走る。**現行の VM 経路では意図的に未設定**
+    (= スキップ)である: A-18 は ``ops/deploy-a18.sh`` が設置する専用 timer が監査専用 clone
+    ``/opt/ryza-audit`` から独立に実行し、結果は press.outbox 経由で #運営 へ出る。週次から
+    稼働コード(/opt/ryza)を対象に走らせ直すと「デプロイ経路の改変が監査を無害化する」経路を
+    再び開けてしまうため、ここでは配線しない。監査の失敗は握って週次ジョブ本体は継続するが、
+    返す状態行(→週次ダイジェスト)とログに必ず残す(沈黙を多義的にしない)。
     """
     repo_path = os.environ.get("A18_REPO_PATH")
     if not repo_path:
@@ -399,11 +406,13 @@ def resolution_audit_status() -> str:
     達するか、走査窓内の累積が ``boardroom.CONFIRMATION_COUNT_ALERT`` 件に達した週は
     行頭が ⚠ になる(交互に確認を外す運用は連続数だけでは検出できない)。
 
-    DB(``governance.minute_resolutions``)を読むため、DB へ届く実行環境
-    (GCE VM 等)で ``BOARDROOM_AUDIT=1`` を設定したときだけ走る。現行の Cloud Run 版
-    ops-weekly は DB に届かないため未設定 = スキップであり、その事実も1行として
-    ダイジェストに出す(A-18 と同じ流儀 — 沈黙を多義的にしない)。失敗は握って週次ジョブ
-    本体は継続する(監査の失敗でリマインダー発火まで止めない)。
+    DB(``governance.minute_resolutions``)を読むため、DB へ届く実行環境で
+    ``BOARDROOM_AUDIT=1`` を設定したときだけ走る。現行の VM 経路(ryza-bot の
+    systemd timer)は VM 内 PostgreSQL に届くため ``ops/deploy-ops-weekly.sh`` が
+    ``/etc/ryza/ops-weekly.env`` で 1 を設定する。ローカル実行や DB の無い環境では
+    未設定 = スキップになり、その事実も1行としてダイジェストに出す(A-18 と同じ流儀 —
+    沈黙を多義的にしない)。失敗は握って週次ジョブ本体は継続する(監査の失敗で
+    リマインダー発火まで止めない)。
     """
     if os.environ.get("BOARDROOM_AUDIT") != "1":
         log.info("決議の形骸化監査はスキップ(BOARDROOM_AUDIT 未設定)")

@@ -754,7 +754,19 @@ reminders:
       type: issue_create
       title: "BOARDROOM_AUDIT を ops-weekly の実行環境に配線する(形骸化監査の独立した検出点)"
       labels: [impl, governance]
-      body: "src/ryza/ops/weekly.resolution_audit_status は BOARDROOM_AUDIT=1 のときだけ DB を読み、批判を経ない決議(confirmed_without_critic が true または NULL)の直近件数・連続数を週次ダイジェストに出す。しかし現状 BOARDROOM_AUDIT はどのデプロイスクリプトにも設定されておらず、週次側は恒久的に『スキップ(BOARDROOM_AUDIT 未配線)』になる(決議精緻化審査 2026-08-03 懸念4)。残る表出先はダッシュボードの決議欄=**チェックを外す当人**であり、独立した検出点になっていない。実装内容: ①ops/deploy-ops-weekly.sh の JOB_ENV に BOARDROOM_AUDIT を足すか、DB へ届く実行環境(GCE VM の systemd timer 側 — ops/deploy-daily.sh と同じ経路)で週次を回すかを決める。Cloud Run 版は VM 内 PostgreSQL に届かないため、前者を選ぶなら Cloud SQL 移行が前提になる。②配線後、確認付き決議を1件作って実際に ⚠ 行が Issue に出ることを実測で確認する。**ops/deploy-ops-weekly.sh は保護領域(deploy_path)のため、変更は独立役員審査+承認記録の手続を経ること。**"
+      body: "(完了済み)2026-08-04 に ops/deploy-ops-weekly.sh を Cloud Run Job + Cloud Scheduler から GCE VM(ryza-bot)の systemd timer 経路へ移し、/etc/ryza/ops-weekly.env に BOARDROOM_AUDIT=1 を配線した。Cloud Run に env を足す案は DB(VM 内 PostgreSQL)に届かず毎週『失敗: 接続不能』になるだけのため採らなかった(Cloud SQL 移行が前提)。旧 Cloud Scheduler / Cloud Run Job は同スクリプトが撤去する — 残置すると当週ダイジェストの冪等マーカーを DB 無し版が先に確定させ、本配線が静かに無効化されるため。実デプロイの実行と実 Issue での確認は ops-weekly-vm-cutover-verify に引き継いだ。"
+    status: done # 2026-08-04 実装(VM systemd 経路へ移設 + BOARDROOM_AUDIT=1)。実デプロイ確認は後続リマインダー
+
+  - id: ops-weekly-vm-cutover-verify
+    what: "ops-weekly の VM 移設を実デプロイし、週次ダイジェストに『決議の批判経由』の実値が出ることを実測する"
+    conditions:
+      - type: date_after
+        date: "2026-08-11"
+    action:
+      type: issue_create
+      title: "ops-weekly の VM 移設を実デプロイし、形骸化監査の行を実測で確認する"
+      labels: [impl, governance]
+      body: "boardroom-audit-wiring の実装分(2026-08-04)は**コードとデプロイスクリプトまで**であり、GCP への適用は未実施である(gcloud 実行は設計リード担当)。実施内容: ①`GITHUB_REPO=klonyapin/ryza ./ops/deploy-ops-weekly.sh` を実行する(guard_git_state により作業ツリー clean かつ HEAD == origin/main が必要)。②旧 Cloud Scheduler `ops-weekly-trigger` と Cloud Run Job `ops-weekly` が削除されたことを確認する — 残っていると DB 無し版が先に当週ダイジェストを確定させ、配線が静かに無効化される。③`sudo systemctl start ryza-ops-weekly.service` を手動実行し、週次ダイジェスト Issue のコメントに `### 決議の批判経由:` が『スキップ(BOARDROOM_AUDIT 未配線)』ではなく実値(件数・連続数、閾値到達時は ⚠)で出ることを確認する。④`journalctl -u ryza-ops-weekly` に Secret 取得・DB 接続の失敗が無いことを確認する。⑤失敗経路の確認として `ryza-ops-weekly-fail.service` を1回手動起動し、#運営 へ通知が届くこと(press.outbox 経由)を確認する。確認できたら本リマインダーを done にし、site/data.js と config/roadmap.yaml の稼働記述が VM 経路になっていることを見直すこと。"
     status: pending
 
   - id: critic-input-window-decision-visibility

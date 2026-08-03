@@ -28,6 +28,13 @@ tests/ops/
 
 ## デプロイ(スクリプト化して ops/deploy-ops-weekly.sh に)
 
+> **2026-08-04 追記(構成変更)**: 実行環境は Cloud Run Job + Cloud Scheduler から
+> **GCE VM(ryza-bot)の systemd timer**(`ryza-ops-weekly.timer`)へ移した。理由は
+> 週次ダイジェストの「決議の批判経由」(`BOARDROOM_AUDIT`)が VM 内 PostgreSQL の
+> `governance.minute_resolutions` を読むためで、Cloud Run からは届かない
+> (決議精緻化審査 2026-08-03 懸念4 の配線)。以下の Cloud Run 記述は**旧構成の記録**であり、
+> 正は `ops/deploy-ops-weekly.sh` 冒頭の構成判断。Cloud SQL 移行後に再検討する。
+
 - プロジェクト `ryza-main`。イメージは Artifact Registry(repo: `ryza`, region us-west1)
 - Cloud Run Job `ops-weekly`(region us-west1、SA はデフォルト。BigQuery データ閲覧ロールを付与)
 - Secret `github-token` を env 経由でマウント(値の投入はユーザー作業 — Issue 参照)

@@ -11,12 +11,19 @@ from __future__ import annotations
 
 import base64
 import json
+import re
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from ryza.db.conn import connect
+from ryza.governance.boardroom import CONFIRMATION_STREAK_ALERT
 from ryza.ops import weekly
 from ryza.ops.github import GitHubClient
+from ryza.provenance import start_run
 
 NOW = datetime(2026, 8, 2, 1, 0, tzinfo=UTC)
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -441,3 +448,118 @@ def test_resolution_audit_status_failure_is_reported(monkeypatch):
 
     monkeypatch.setattr("ryza.db.conn.connect", _boom)
     assert weekly.resolution_audit_status().startswith("失敗: OSError")
+
+
+# ── 実配線の検証(reminders `boardroom-audit-wiring` / 決議精緻化審査 懸念4)──────
+# 「行が必ず載る」ことは上のフェイクで既に固定されているが、それは
+# ``resolution_status`` 引数を渡した場合の話でしかない。ここで固定するのは
+# **env → DB → ダイジェスト本文**の一本の鎖である: BOARDROOM_AUDIT=1 の実行環境で
+# 実 DB の決議を読み、⚠ 行がダイジェストに出ること。懸念4 が問題にしたのは
+# 「週次側が恒久的にスキップになる」ことなので、検証もこの鎖に対して行う。
+@pytest.fixture
+def conn(migrated_db):
+    """テスト DB への接続(rollback で巻き戻す — 決議は追記オンリーで DELETE 不可)。"""
+    c = connect()
+    try:
+        yield c
+    finally:
+        c.rollback()
+        c.close()
+
+
+@pytest.fixture
+def db_reachable(conn, monkeypatch):
+    """``ryza.db.conn.connect`` をテストのトランザクションに差し替える。
+
+    実 DB へ commit してしまうと、追記オンリー(0013 のトリガ)の決議は二度と
+    消せずテスト DB を恒久的に汚す。監査が読む SQL は本物のまま、可視性だけを
+    テストのトランザクションに閉じる。
+    """
+
+    @contextmanager
+    def _connect(*_args: object, **_kwargs: object):
+        yield conn
+
+    monkeypatch.setattr("ryza.db.conn.connect", _connect)
+
+
+def _seed_bypassed_resolutions(conn, count: int) -> None:
+    """「批判を経ない決議」(confirmed_without_critic=true)を count 件積む。"""
+    run = start_run("test.ops.weekly", conn=conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO governance.minutes (meeting, held_at, attendees, body_md, run_id)"
+            " VALUES ('investment_committee', now(), %s, '自由記述の議事録', %s)"
+            " RETURNING minute_id",
+            (["representative"], run.run_id),
+        )
+        minute_id = cur.fetchone()[0]
+        for i in range(count):
+            cur.execute(
+                "INSERT INTO governance.minute_resolutions"
+                " (minute_id, seq, title, resolution_md, resolved_by,"
+                "  confirmed_without_critic)"
+                " VALUES (%s, %s, %s, '本文', 'representative', true)",
+                (minute_id, i + 1, f"確認付き決議{i}"),
+            )
+
+
+def test_resolution_audit_status_reads_real_db(conn, db_reachable, monkeypatch):
+    """BOARDROOM_AUDIT=1 の実行環境では実 DB を読んで実値の1行を返す。"""
+    _seed_bypassed_resolutions(conn, CONFIRMATION_STREAK_ALERT)
+    monkeypatch.setenv("BOARDROOM_AUDIT", "1")
+    status = weekly.resolution_audit_status()
+    # 直近が全て「批判を経ない決議」なので連続が閾値に達し、行頭が ⚠ になる。
+    # (テスト DB を他ワークツリーと共有していても、連続は最新から数えるため影響を受けない)
+    assert status.startswith("⚠ 形骸化の疑い")
+    assert status != weekly.RESOLUTION_STATUS_UNWIRED
+
+
+def test_main_puts_real_resolution_line_into_digest(conn, db_reachable, monkeypatch):
+    """env → DB → 週次ダイジェスト本文まで、実際に ⚠ 行が届くこと(エンドツーエンド)。"""
+    _seed_bypassed_resolutions(conn, CONFIRMATION_STREAK_ALERT)
+    digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
+    stub = StubClient(issues=[digest_issue])
+    monkeypatch.setattr(weekly, "GitHubClient", lambda *_a, **_k: stub)
+    monkeypatch.setenv("GITHUB_REPO", "owner/name")
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setenv("BOARDROOM_AUDIT", "1")
+    monkeypatch.delenv("DRY_RUN", raising=False)
+    monkeypatch.delenv("A18_REPO_PATH", raising=False)  # A-18 は専用 timer 側(意図的に未配線)
+
+    weekly.main()
+
+    bodies = [body for number, body in stub.comments_posted if number == digest_issue["number"]]
+    assert len(bodies) == 1
+    assert "### 決議の批判経由: ⚠ 形骸化の疑い" in bodies[0]
+    # A-18 の行は VM 経路でも「スキップ」のまま(専用 timer が独立に報告する)。
+    assert f"### A-18 監査: {weekly.A18_STATUS_UNWIRED}" in bodies[0]
+
+
+# ── デプロイ経路の配線(ドリフト防止。tests/ops/test_deploy_guards.py と同じ流儀)──
+DEPLOY_WEEKLY = REPO_ROOT / "ops" / "deploy-ops-weekly.sh"
+
+
+def test_deploy_script_wires_boardroom_audit() -> None:
+    """週次の実行環境に BOARDROOM_AUDIT=1 と DB URL が入っていること。"""
+    text = DEPLOY_WEEKLY.read_text(encoding="utf-8")
+    assert "BOARDROOM_AUDIT=1" in text, "BOARDROOM_AUDIT が実行環境に配線されていない"
+    assert "RYZA_DATABASE_URL=" in text, "DB へ届く実行環境になっていない"
+    assert "ryza-ops-weekly.service" in text
+
+
+def test_deploy_script_has_no_cloud_run_path() -> None:
+    """DB を持たない Cloud Run 経路が復活していないこと。
+
+    残置すると当週ダイジェストの冪等マーカーを Cloud Run 側が先に確定させ、
+    「スキップ」行のまま VM 側の投稿が消える(= 本配線の静かな無効化)。
+    """
+    text = DEPLOY_WEEKLY.read_text(encoding="utf-8")
+    assert "gcloud run jobs deploy" not in text
+    assert "gcloud scheduler jobs delete" in text  # 旧トリガの撤去が残っていること
+
+
+def test_deploy_script_does_not_wire_a18_from_deployed_code() -> None:
+    """A18_REPO_PATH は週次側で設定しない(監査は専用 clone から独立に走る)。"""
+    text = DEPLOY_WEEKLY.read_text(encoding="utf-8")
+    assert not re.search(r"^\s*A18_REPO_PATH=", text, re.MULTILINE)
