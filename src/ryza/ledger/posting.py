@@ -300,23 +300,68 @@ def post_mark_to_market(
     *,
     book_id: str,
     instrument_id: int,
-    price: Any,
+    price: Any | None,
     entry_date: _date,
     run_id: int,
     currency: str = "JPY",
-    posted_by: str = "ledger.posting",
+    posted_by: str = _util.MTM_POSTED_BY[0],
 ) -> int | None:
     """評価替え(未実現損益の洗い替え)。securities 帳簿価額を時価に一致させる。
 
     delta = 時価総額(保有数量×price) − 現在の securities 帳簿価額。
     delta>0: Dr securities / Cr unrealized_pnl、delta<0: 逆。
     差分計上のため unrealized_pnl の累計は常に (時価 − 取得原価) に一致する(洗い替えと等価)。
-    delta=0(または保有ゼロで時価ゼロ)なら記帳せず None を返す。
+    delta=0(または保有ゼロで帳簿価額もゼロ)なら記帳せず None を返す。
+
+    **``price=None`` は「数量ゼロの銘柄」専用の経路**(独立審査 新-10)。全売却した銘柄の
+    時価は価格に依らずゼロなので、終値を引かずに残渣(= 売却時に取り崩されなかった評価益
+    ぶんの帳簿価額)をゼロへ洗い替えられる。建玉が無い銘柄の終値を要求すると、上場廃止や
+    バー欠測で締めそのものが落ちる(``execution.close._make_price_source`` は終値が無ければ
+    例外)。数量が残っている銘柄に ``None`` を渡すのは呼び出し側の誤りなので ValueError。
+
+    なぜ残渣が出るか: ``post_fill`` の売りは **取得原価ぶん**(移動平均法の
+    ``cost_released``)しか securities を取り崩さず、差額を realized_pnl に振る。評価替えで
+    積んだ「時価 − 取得原価」は securities に残ったままなので、ここでゼロへ落として
+    unrealized_pnl を戻さないと NAV が恒久的に過大になる(残った未実現益が消えない)。
+
+    **数量ゼロで消すのは ``mtm_book_value``(評価替えが作った残高)だけ**で、securities の
+    総額ではない。``replay_position`` は broker_fill しか再生しないので、約定を経ずに建った
+    securities(現物拠出・資産振替)は数量ゼロに見える。総額を消すと実在の資産を帳簿から
+    消してしまう(実測: 現物拠出 1,000,000 の日の NAV が丸ごと戻る)。
+
+    **数量も帳簿価額も同じ ``as_of=entry_date`` で切る**(独立審査 新-13)。数量だけ全期間
+    再生にすると、**将来日付の売りが先に記帳されている日**の締めが「数量ゼロ ⇒ 残渣」と
+    誤判定し、その日に実在する建玉の評価額を消す(審査実測: d2 付けの全売りを先に記帳した
+    状態で d1 を締めると NAV 10,200,000 → 10,000,000、returns ``[-0.019608]`` ← 真値
+    ``[0.0]``。符号が逆なだけで新-10 と同じ恒久的偽リターン)。時価と帳簿価額を別の
+    日付境界で測ること自体が差分計算の前提を壊す。
+
+    ``posted_by`` は ``_util.MTM_POSTED_BY`` に限る(新-14): 後で「評価替えが作った残高」を
+    同定する判定子がこの列なので、それ以外の値で書くと自分が書いた評価替えを自分で
+    認識できなくなる。
     """
-    qty, _cost = _util.replay_position(conn, book_id, instrument_id)
-    p = _util.to_decimal(price)
-    market_value = qty * p
-    book_value = _util.securities_book_value(conn, book_id, instrument_id, as_of=entry_date)
+    if posted_by not in _util.MTM_POSTED_BY:
+        raise ValueError(
+            f"評価替えの posted_by は {_util.MTM_POSTED_BY} のいずれか"
+            f"(mtm_book_value の判定子): {posted_by!r}"
+        )
+    qty, _cost = _util.replay_position(conn, book_id, instrument_id, as_of=entry_date)
+    if price is None:
+        if qty != 0:
+            raise ValueError(
+                f"price=None は数量ゼロの銘柄のみ(全売却後の残渣の洗い替え): "
+                f"銘柄{instrument_id} qty={qty}"
+            )
+        p = None
+        market_value = Decimal(0)
+        # 評価替えが作った残高 = 消すべき残渣。約定外の securities には触れない。
+        book_value = _util.mtm_book_value(conn, book_id, instrument_id, as_of=entry_date)
+    else:
+        p = _util.to_decimal(price)
+        market_value = qty * p
+        book_value = _util.securities_book_value(
+            conn, book_id, instrument_id, as_of=entry_date
+        )
     delta = market_value - book_value
     if delta == 0:
         return None
@@ -326,10 +371,15 @@ def post_mark_to_market(
         kind="price_snapshot",
         payload={
             "instrument_id": int(instrument_id),
-            "price": str(p),
+            # 数量ゼロの洗い替えは終値を引いていない。存在しない価格を "0" と書くと
+            # 「終値 0 円で評価した」証憑になるため、null + 理由を明示する(新-6 の教訓)。
+            "price": None if p is None else str(p),
             "qty": str(qty),
             "market_value": str(market_value),
             "as_of": entry_date.isoformat(),
+            # 数量ゼロのときの book_value は「評価替えが作った残高」= 洗い替える額。
+            **({"zero_qty_writeoff": True, "mtm_book_value": str(book_value)}
+               if p is None else {}),
         },
         source="price_source",
     )
@@ -347,11 +397,14 @@ def post_mark_to_market(
              "instrument_id": int(instrument_id)},
         ]
 
+    desc = f"評価替え 銘柄{instrument_id} 時価{market_value}"
+    if p is None:
+        desc += "(建玉ゼロ — 全売却後の残渣を洗い替え)"
     return post_entry(
         conn,
         book_id=book_id,
         entry_date=entry_date,
-        description=f"評価替え 銘柄{instrument_id} 時価{market_value}",
+        description=desc,
         lines=lines,
         evidence=evidence,
         run_id=run_id,

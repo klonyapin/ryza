@@ -517,6 +517,20 @@ def test_restatement_embed_surfaces_unsynced_nav_daily():
     assert "risk 側は未追随" in embed["fields"][0]["value"]
 
 
+def test_residue_embed_names_the_instruments():
+    """説明不能な残渣は専用 embed で名指しする(実行サマリに埋もれさせない — 新-15)。"""
+    embed = daily._build_residue_embed(
+        {"1001": {"book_value": "-1000000"}},
+        book_id="DEMO_FUND", day="2026-08-03",
+        as_of=datetime(2026, 8, 4, 10, 0, tzinfo=UTC),
+    )
+    assert embed["color"] == COLOR_FLASH
+    assert "1 件" in embed["description"]
+    assert embed["fields"][0] == {
+        "name": "銘柄 1001", "value": "帳簿価額 -1000000", "inline": True
+    }
+
+
 # ── 失敗許容: 一段が落ちても後段は走る ──────────────────────────────────────────
 def test_daily_stage_failure_tolerance(conn, run, llm_config, make_daily_llms, insert_enriched_doc):
     _seed(insert_enriched_doc)
