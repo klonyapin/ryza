@@ -48,7 +48,8 @@ def test_close_zero_balance_and_bs_identity(conn, run_id):
     assert t["assets"] == t["liabilities"] + t["equity"] + t["net_income"]
     assert t["nav"] == t["assets"] - t["liabilities"]
 
-    # 具体値: 未実現 = +10000(1001) -5000(1002) = 5000、手数料 100、NAV = 10,000,000(0006+0011 出資)+ 4900
+    # 具体値: 未実現 = +10000(1001) -5000(1002) = 5000、手数料 100
+    # NAV = 出資 10,000,000(0006+0011)+ 4900
     assert t["net_income"] == D(4900)
     assert t["nav"] == D(10004900)
     assert result["nav"] == D(10004900)
