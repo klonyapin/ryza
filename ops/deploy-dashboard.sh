@@ -7,6 +7,13 @@
 # 本スクリプトは保護領域 deploy_path(定款第5条)。独立役員審査(2026-08-03・
 # docs/reviews/dashboard-deploy-independent-review.md)の差し戻しを受けて是正済み。
 #
+# 統制ゲートの所在(再審査「次回 PR 対応」で切り出し。保護領域の一部):
+#   ops/lib/deploy-guards.sh  … git ゲート・公開バインディング検査(gcloud を使う)
+#   ops/lib/pg_hba_check.sh   … pg_hba のアドレス列検査(base64 で VM へ運ぶ)
+#   ロール権限ゲートは本ファイル内の生成 SQL 末尾 `DO $ryza_gate$`(値が想定外なら中断)
+#   いずれも tests/ops/test_deploy_guards.py / test_deploy_role_gate.py が
+#   「実際に中断すること」を CI で検証している(統制コードは壊れても静かに通るため)。
+#
 # 構成判断:
 #   - **稼働コード = 承認済み main**(定款第5条)。作業ツリーが clean かつ
 #     HEAD == origin/main でなければ**何もせず中断**する(重大-1)。イメージタグは
@@ -23,8 +30,10 @@
 #   - **DB は 2 ロール構成**(重大-2 / 反対意見書2の代替案):
 #       ryza_dashboard … 読取専用。ryza のメンバーシップを持たず(IN ROLE 廃止)、
 #                        全スキーマに SELECT のみ+default_transaction_read_only = on。
-#       ryza_boardroom … 役員室の書込専用。governance.minutes / minute_resolutions /
-#                        stances の INSERT と meta.runs の INSERT/UPDATE のみ。
+#       ryza_boardroom … 役員室・開発室の書込専用。governance.minutes /
+#                        minute_resolutions / stances の INSERT、meta.runs の
+#                        INSERT/UPDATE、ops.org_icon_overrides(0020)と
+#                        ops.dev_chat(0024・SELECT と列レベル INSERT (sender, body) のみ)。
 #     それぞれ別 Secret の接続 URL を別 env で Cloud Run に注入する。
 #   - **既存サービスを壊さない**: bot/daily は postgresql://ryza:ryza@localhost のまま。
 #     role `ryza` のパスワードは変更しない(変更すると localhost の scram 認証で bot/daily が
@@ -75,47 +84,32 @@ LLM_KEY_SECRET="${LLM_KEY_SECRET:-anthropic-api-key}"              # 役員室�
 AR_REPO="${AR_REPO:-ryza}"
 RUNTIME_SA_ID="${RUNTIME_SA_ID:-ryza-dashboard}"                   # 専用実行 SA(中-4)
 PGVER="${PGVER:-17}"
+
 # 承認済みコードの出所。origin がこれ以外を指していたらデプロイしない(再審査 条件4)。
-EXPECTED_ORIGIN="${EXPECTED_ORIGIN:-https://github.com/klonyapin/ryza}"
+# **env で上書きできない**(第3回審査 C-5)。上書きできる限り、攻撃者は origin を
+# 自分のリモートに差し替え EXPECTED_ORIGIN を同じ値にするだけでゲートを満たせてしまい、
+# 「origin URL の照合」という統制そのものが成立しない。許可するのは本リポジトリの
+# 3表記(https の .git 有無 + SSH)だけで、比較時に末尾 .git を落として突き合わせる。
+ALLOWED_ORIGINS=(
+  "https://github.com/klonyapin/ryza"
+  "git@github.com:klonyapin/ryza.git"
+)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SSH=(gcloud compute ssh "${VM}" --zone "${ZONE}" --project "${PROJECT}")
+
+# 統制ゲートは ops/lib/deploy-guards.sh の関数に切り出してある(CI でテストするため —
+# tests/ops/test_deploy_guards.py)。ここでの呼び出しに `|| exit 1` を付け忘れると
+# ゲートが無効化されるので注意。
+# shellcheck source=lib/deploy-guards.sh
+. "${ROOT}/ops/lib/deploy-guards.sh"
 
 echo "== ryza-dashboard deploy (Cloud Run + IAP) =="
 echo "project=${PROJECT} region=${REGION} vm=${VM} service=${SERVICE} user=${DASHBOARD_USER}"
 
 # ── 0. 承認済みコード一致の検証(重大-1・定款第5条)────────────────────────────
-# デプロイできるのは「レビュー・CI・マージを通った main の実物」だけ。ローカルの
-# 未コミット変更や未 push のコミットが本番へ入る経路をここで塞ぐ。
-# 抜け道(--force 等)は意図的に用意しない — 用意すると統制目的が消えるため。
 echo "-- 稼働コードの検証: 作業ツリー clean かつ HEAD == origin/main"
-if ! git -C "${ROOT}" rev-parse --git-dir >/dev/null 2>&1; then
-  echo "ERROR: ${ROOT} は git リポジトリではない。デプロイは承認済み main の checkout から行う。" >&2
-  exit 1
-fi
-# origin が本物のリポジトリを指すことを確認する。HEAD == origin/main だけでは、
-# origin を攻撃者のリモートに差し替えれば任意コードが「承認済み」を騙れる(再審査 条件4)。
-ORIGIN_URL="$(git -C "${ROOT}" remote get-url origin 2>/dev/null || true)"
-if [ "${ORIGIN_URL%.git}" != "${EXPECTED_ORIGIN%.git}" ]; then
-  echo "ERROR: origin が想定と違う(取得='${ORIGIN_URL}' 期待='${EXPECTED_ORIGIN}')。" >&2
-  echo "       origin を差し替えれば HEAD==origin/main は容易に満たせるため、ここで中断する。" >&2
-  echo "       SSH リモート(git@github.com:...)を使っている場合は EXPECTED_ORIGIN で明示すること。" >&2
-  exit 1
-fi
-DIRTY="$(git -C "${ROOT}" status --porcelain)"
-if [ -n "${DIRTY}" ]; then
-  echo "ERROR: 作業ツリーに未コミット/未追跡の変更がある。デプロイ対象は承認済み main のみ(定款第5条)。" >&2
-  printf '%s\n' "${DIRTY}" >&2
-  exit 1
-fi
-git -C "${ROOT}" fetch origin main --quiet
-CODE_VERSION="$(git -C "${ROOT}" rev-parse HEAD)"
-ORIGIN_MAIN="$(git -C "${ROOT}" rev-parse origin/main)"
-if [ "${CODE_VERSION}" != "${ORIGIN_MAIN}" ]; then
-  echo "ERROR: HEAD(${CODE_VERSION}) が origin/main(${ORIGIN_MAIN})と一致しない。" >&2
-  echo "       PR をマージし、main を checkout してから再実行すること(全変更 PR 経由)。" >&2
-  exit 1
-fi
+CODE_VERSION="$(guard_git_state "${ROOT}" "${ALLOWED_ORIGINS[@]}")" || exit 1
 echo "-- code_version=${CODE_VERSION}(origin/main と一致)"
 
 # イメージタグはコミット SHA(:latest は使わない — どのコードが動いているかを不変にする)。
@@ -284,48 +278,221 @@ SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON ops.org_icon_overrides TO
 SELECT format('GRANT INSERT ON ops.org_icon_override_log TO %I', '__BR_ROLE__')
  WHERE to_regclass('ops.org_icon_override_log') IS NOT NULL;
 \gexec
+-- 開発室(0024・代表指示 2026-08-03)。ダッシュボードの開発室ページが代表の連絡を
+-- **追記**し、スレッドを読み返すための権限。
+--
+-- **INSERT は列レベル (sender, body) に限定する**(独立役員審査 重大-1)。表レベルの
+-- INSERT では created_at・relayed_at・inserted_by を任意指定でき、
+--   * created_at の遡及(存在しなかった時点の指示を捏造する)
+--   * relayed_at の事前設定(Discord に出ないのに「中継済み」の行を作り、中継ループに
+--     永久に拾わせない)
+--   * inserted_by の詐称(書込主体の証跡を偽る)
+-- が可能になる。0024 のガードトリガは BEFORE UPDATE OR DELETE で、**INSERT には
+-- 発火しない**ため、この入口を塞げるのは権限だけである。
+-- 残余: sender は付与列に含まれるので、このロールでも sender='design_lead' の行は
+-- 作れる(代表が UI から設計リードを騙る操作)。これは inserted_by との矛盾として
+-- 検出する設計で、権限では止めない — 止めると代表自身の投稿も書けなくなる。
+--
+-- UPDATE を与えないのは意図的で、relayed_at は Bot だけが立てる状態だからである。
+-- DELETE も与えない(表は追記オンリー)。
+SELECT format('GRANT SELECT, INSERT (sender, body) ON ops.dev_chat TO %I', '__BR_ROLE__')
+ WHERE to_regclass('ops.dev_chat') IS NOT NULL;
+\gexec
 -- meta.runs は開始 INSERT → 終了時に status/finished_at/cost を UPDATE する。UPDATE は
 -- **列レベル**に限定し、job_name / code_version / started_at / params の事後改竄を防ぐ
 -- (リネージの証跡性。再審査 条件3)。列名は migrations/0001_meta.sql に一致させること。
 GRANT INSERT, UPDATE (finished_at, status, cost) ON meta.runs TO "__BR_ROLE__";
 
--- ── 3) 証跡(デプロイログに残す)─────────────────────────────────────────────
+-- ── 3) 権限の全経路を束ねた一時ビュー(第3回審査 C-3)────────────────────────
+-- information_schema.role_table_grants だけを見ると**列レベル GRANT が見えない**。
+-- `GRANT UPDATE (state) ON ops.trading_state TO ryza_boardroom` は role_table_grants に
+-- 1行も現れないため、Kill Switch を書き換えられる権限が証跡にもゲートにも映らず
+-- 素通りする(実測で確認済み — tests/ops/test_deploy_role_gate.py)。
+-- column_privileges は列レベル GRANT を見せ、かつ表レベル GRANT も列へ展開する。
+-- ただし DELETE / TRUNCATE は列権限に存在しないため、両者の UNION が必要。
+CREATE OR REPLACE TEMP VIEW ryza_gate_grants AS
+  SELECT grantee::text AS grantee, table_schema::text AS table_schema,
+         table_name::text AS table_name, privilege_type::text AS privilege_type
+    FROM information_schema.role_table_grants
+  UNION
+  SELECT grantee::text, table_schema::text, table_name::text, privilege_type::text
+    FROM information_schema.column_privileges;
+
+-- ── 3.1) 証跡(デプロイログに残す)───────────────────────────────────────────
 \echo '-- ロール属性(rolsuper/rolinherit は false、memberships は 0 であること)'
 SELECT r.rolname, r.rolcanlogin, r.rolsuper, r.rolinherit,
        (SELECT count(*) FROM pg_auth_members m WHERE m.member = r.oid) AS memberships
   FROM pg_roles r WHERE r.rolname IN ('__DASH_ROLE__', '__BR_ROLE__') ORDER BY 1;
-\echo '-- 読取専用ロールの非 SELECT 権限(0 であること)'
+\echo '-- 読取専用ロールの非 SELECT 権限(0 であること。列レベル GRANT を含む)'
 SELECT count(*) AS dashboard_write_grants
-  FROM information_schema.role_table_grants
+  FROM ryza_gate_grants
  WHERE grantee = '__DASH_ROLE__' AND privilege_type <> 'SELECT';
 \echo '-- 読取専用ロールの秘密テーブルへの権限(0 であること)'
 SELECT count(*) AS dashboard_secret_grants
-  FROM information_schema.role_table_grants
+  FROM ryza_gate_grants
  WHERE grantee = '__DASH_ROLE__'
    AND table_schema || '.' || table_name IN ('ops.discord_webhooks');
 
 -- 役員室ロールの ops スキーマ権限(独立役員審査 0020 C-5)。上の GRANT は
 -- to_regclass ガード付きで、0020 未適用の DB では**黙ってスキップ**される。GRANT が
 -- 効いたか/余計な表に広がっていないかを、デプロイのたびにログへ残して検証する。
-\echo '-- 役員室ロールが ops で権限を持つ表(org_icon_overrides と org_icon_override_log の2表のみであること)'
+\echo '-- 役員室ロールが ops で権限を持つ表(org_icon_overrides / org_icon_override_log / dev_chat の3表のみであること)'
 SELECT table_name, string_agg(privilege_type, ',' ORDER BY privilege_type) AS privileges
-  FROM information_schema.role_table_grants
+  FROM ryza_gate_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
  GROUP BY table_name ORDER BY table_name;
-\echo '-- 役員室ロールの ops 権限の表数(2 であること。0 なら 0020 未適用で GRANT がスキップされた)'
+\echo '-- 役員室ロールの ops 権限の表数(3 であること。2 なら 0024 未適用で dev_chat の GRANT がスキップされた)'
 SELECT count(DISTINCT table_name) AS boardroom_ops_tables
-  FROM information_schema.role_table_grants
+  FROM ryza_gate_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops';
 \echo '-- 役員室ロールが ops の想定外テーブルに持つ権限(0 であること — trading_state/flags/discord_webhooks 等)'
 SELECT count(*) AS boardroom_unexpected_ops_grants
-  FROM information_schema.role_table_grants
+  FROM ryza_gate_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
-   AND table_name NOT IN ('org_icon_overrides', 'org_icon_override_log');
+   AND table_name NOT IN ('org_icon_overrides', 'org_icon_override_log', 'dev_chat');
 \echo '-- 履歴表への非 INSERT 権限(0 であること — 追記オンリー。UPDATE/DELETE/TRUNCATE を持たない)'
 SELECT count(*) AS boardroom_log_mutation_grants
-  FROM information_schema.role_table_grants
+  FROM ryza_gate_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
    AND table_name = 'org_icon_override_log' AND privilege_type <> 'INSERT';
+-- 開発室は**列レベル**で INSERT を絞っているため、表レベルの検査だけでは足りない
+-- (列だけの GRANT は role_table_grants に現れない)。両方を見る(独立役員審査 重大-1)。
+\echo '-- 開発室の表レベル権限(SELECT のみであること — INSERT/UPDATE/DELETE が表レベルで付いていない)'
+SELECT count(*) AS boardroom_dev_chat_table_grants
+  FROM information_schema.role_table_grants
+ WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+   AND table_name = 'dev_chat' AND privilege_type <> 'SELECT';
+\echo '-- 開発室の列レベル権限(INSERT は sender/body の 2 列だけであること)'
+SELECT column_name, privilege_type
+  FROM information_schema.role_column_grants
+ WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+   AND table_name = 'dev_chat' AND privilege_type <> 'SELECT'
+ ORDER BY privilege_type, column_name;
+\echo '-- 開発室で書込可能な列数(2 であること。0 なら 0024 未適用で GRANT がスキップされた)'
+SELECT count(*) AS boardroom_dev_chat_writable_columns
+  FROM information_schema.role_column_grants
+ WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+   AND table_name = 'dev_chat' AND privilege_type <> 'SELECT';
+\echo '-- 開発室の想定外の列権限(0 であること — created_at/relayed_at/inserted_by/id への書込)'
+SELECT count(*) AS boardroom_dev_chat_unexpected_column_grants
+  FROM information_schema.role_column_grants
+ WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+   AND table_name = 'dev_chat' AND privilege_type <> 'SELECT'
+   AND (privilege_type <> 'INSERT' OR column_name NOT IN ('sender', 'body'));
+
+-- ── 4) ゲート(想定外ならデプロイを中断する)──────────────────────────────────
+-- 上の SELECT はログに残す**証跡**にすぎず、値が想定外でもデプロイは進んでいた
+-- (独立役員 再審査「次回 PR 対応」第1項)。同じ条件をここで**強制**する。
+-- psql は -v ON_ERROR_STOP=1 で起動しており、RAISE EXCEPTION は非ゼロ終了となって
+-- 呼び出し側(set -e のリモートシェル)ごとデプロイを止める。
+DO $ryza_gate$
+DECLARE
+  n bigint;
+  bad text;
+  expected_ops_tables int;
+BEGIN
+  -- 4.1 両ロールが揃っていること
+  SELECT count(*) INTO n FROM pg_roles WHERE rolname IN ('__DASH_ROLE__', '__BR_ROLE__');
+  IF n <> 2 THEN
+    RAISE EXCEPTION 'ロールが揃っていない(__DASH_ROLE__ / __BR_ROLE__ の期待 2 に対し実際 %)', n;
+  END IF;
+
+  -- 4.2 ロール属性が最小権限であること(superuser 不可・INHERIT 不可・他ロールの
+  --     メンバーシップ 0・LOGIN 必須)。旧版の IN ROLE 継承が残っていればここで落ちる。
+  SELECT string_agg(
+           format('%s(super=%s inherit=%s login=%s memberships=%s)',
+                  r.rolname, r.rolsuper, r.rolinherit, r.rolcanlogin,
+                  (SELECT count(*) FROM pg_auth_members m WHERE m.member = r.oid)),
+           ', ' ORDER BY r.rolname)
+    INTO bad
+    FROM pg_roles r
+   WHERE r.rolname IN ('__DASH_ROLE__', '__BR_ROLE__')
+     AND (r.rolsuper OR r.rolinherit OR NOT r.rolcanlogin
+          OR EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid));
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION 'ロール属性が想定外(super/inherit/継承メンバーシップは不可・LOGIN 必須): %', bad;
+  END IF;
+
+  -- 4.3 読取専用ロールに非 SELECT 権限が無いこと(列レベル GRANT を含む — C-3)
+  SELECT count(*) INTO n FROM ryza_gate_grants
+   WHERE grantee = '__DASH_ROLE__' AND privilege_type <> 'SELECT';
+  IF n <> 0 THEN
+    RAISE EXCEPTION '読取専用ロール __DASH_ROLE__ に非 SELECT 権限が % 件ある(列レベル GRANT を含む)', n;
+  END IF;
+
+  -- 4.4 秘密テーブルへの権限が無いこと(ops.discord_webhooks — 0017 冒頭)
+  SELECT count(*) INTO n FROM ryza_gate_grants
+   WHERE grantee = '__DASH_ROLE__'
+     AND table_schema || '.' || table_name IN ('ops.discord_webhooks');
+  IF n <> 0 THEN
+    RAISE EXCEPTION '読取専用ロール __DASH_ROLE__ が秘密テーブル ops.discord_webhooks に権限を持つ(% 件)', n;
+  END IF;
+
+  -- 4.5 役員室ロールの ops 権限が対象3表ちょうどであること。
+  --     上の GRANT は to_regclass ガード付きで 0020 / 0024 未適用の DB では黙って
+  --     スキップされるため、まず**対象表が実在すること自体**を要求する(C-4)。実在数を
+  --     そのまま期待値にすると、未適用の DB(実在 0・GRANT 0)が「一致」と判定され、
+  --     役員室が何も書けないダッシュボードを正常として本番化してしまう。
+  expected_ops_tables := (to_regclass('ops.org_icon_overrides') IS NOT NULL)::int
+                       + (to_regclass('ops.org_icon_override_log') IS NOT NULL)::int
+                       + (to_regclass('ops.dev_chat') IS NOT NULL)::int;
+  IF expected_ops_tables <> 3 THEN
+    RAISE EXCEPTION
+      '役員室の書込先(ops.org_icon_overrides / ops.org_icon_override_log / ops.dev_chat)が揃っていない(実在 % / 期待 3)。migrations 0020 または 0024 が未適用の DB へデプロイしようとしている',
+      expected_ops_tables;
+  END IF;
+  SELECT count(DISTINCT table_name) INTO n FROM ryza_gate_grants
+   WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops';
+  IF n <> 3 THEN
+    RAISE EXCEPTION
+      '役員室ロールの ops 権限表数が想定外(期待 3, 実際 %)。GRANT が効いていないか余計な表に広がっている', n;
+  END IF;
+
+  -- 4.6 想定外の ops 表への権限が無いこと(trading_state / flags / discord_webhooks 等)
+  SELECT count(*) INTO n FROM ryza_gate_grants
+   WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+     AND table_name NOT IN ('org_icon_overrides', 'org_icon_override_log', 'dev_chat');
+  IF n <> 0 THEN
+    RAISE EXCEPTION '役員室ロールが ops の想定外テーブルに権限を持つ(% 件・列レベル GRANT を含む)', n;
+  END IF;
+
+  -- 4.7 履歴表は追記オンリー(非 INSERT 権限を持たない)
+  SELECT count(*) INTO n FROM ryza_gate_grants
+   WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+     AND table_name = 'org_icon_override_log' AND privilege_type <> 'INSERT';
+  IF n <> 0 THEN
+    RAISE EXCEPTION 'ops.org_icon_override_log への非 INSERT 権限がある(% 件・追記オンリー違反)', n;
+  END IF;
+
+  -- 4.8 開発室 ops.dev_chat に**表レベル**の書込権限が無いこと(独立役員審査 重大-1)。
+  --     表レベル INSERT があると created_at の遡及・relayed_at の事前設定・inserted_by の
+  --     詐称ができる。0024 のガードトリガは INSERT に発火しないため、止められるのは権限だけ。
+  SELECT count(*) INTO n FROM information_schema.role_table_grants
+   WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+     AND table_name = 'dev_chat' AND privilege_type <> 'SELECT';
+  IF n <> 0 THEN
+    RAISE EXCEPTION 'ops.dev_chat に表レベルの非 SELECT 権限がある(% 件)。INSERT は列レベル (sender, body) に限ること', n;
+  END IF;
+
+  -- 4.9 開発室の書込可能列が sender / body の INSERT ちょうど2件であること。
+  --     0 なら 0024 未適用で GRANT がスキップされ、多ければ証跡列へ書ける。
+  SELECT count(*) INTO n FROM information_schema.role_column_grants
+   WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+     AND table_name = 'dev_chat' AND privilege_type <> 'SELECT';
+  IF n <> 2 THEN
+    RAISE EXCEPTION 'ops.dev_chat の書込可能列数が想定外(期待 2, 実際 %)', n;
+  END IF;
+  SELECT count(*) INTO n FROM information_schema.role_column_grants
+   WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
+     AND table_name = 'dev_chat' AND privilege_type <> 'SELECT'
+     AND (privilege_type <> 'INSERT' OR column_name NOT IN ('sender', 'body'));
+  IF n <> 0 THEN
+    RAISE EXCEPTION 'ops.dev_chat に想定外の列権限がある(% 件 — created_at/relayed_at/inserted_by/id への書込)', n;
+  END IF;
+
+  RAISE NOTICE 'ロール権限ゲート: 全項目 OK(4.1〜4.9)';
+END
+$ryza_gate$;
 """
 
 sql = (
@@ -341,6 +508,11 @@ PY
 )"
 
 # ── 5. VM 側 PostgreSQL 設定(冪等。localhost 接続の bot/daily は変更しない) ─────
+# pg_hba の検査ロジックは ops/lib/pg_hba_check.sh に切り出し、base64 で VM へ運んで
+# eval で読み込む(ヒアドキュメントに直書きするとローカルシェルが $1 等を展開して壊れる)。
+# 同じ関数を CI が tests/ops/test_deploy_guards.py から直接叩いて検証している。
+PG_HBA_LIB_B64="$(base64 < "${ROOT}/ops/lib/pg_hba_check.sh" | tr -d '\n')"
+
 echo "-- VM 上の PostgreSQL を VPC サブネットからの接続に対応させる(冪等)"
 "${SSH[@]}" --command "sudo bash -s" <<REMOTE
 set -euo pipefail
@@ -364,18 +536,21 @@ fi
 # 5.2 pg_hba: 既存の non-localhost host 行を検査してから追記する。
 #     pg_hba は**先勝ち**のため、既存の広い host 行があると本行は無効化される。
 #     想定外の行を見つけたら中断し、人間に判断させる(自動で消さない)。
+#     判定は**アドレス列のみ**(ops/lib/pg_hba_check.sh)。行全体の文字列マッチは
+#     コメントや DB 名の 'localhost' で誤判定するため使わない(再審査 次回 PR 対応)。
+eval "\$(printf '%s' '${PG_HBA_LIB_B64}' | base64 -d)"
+# eval が失敗しても set -e は素通りしうる(base64 の出力が空でも eval は成功する)。
+# 関数が定義されていないまま進むと以降の検査呼び出しが「コマンドなし」で終わり、
+# 統制が沈黙する。読み込めたことをここで明示的に確かめる(第3回審査 C-2)。
+declare -F pg_hba_unexpected_lines >/dev/null || exit 1
+declare -F pg_hba_has_line >/dev/null || exit 1
+declare -F pg_hba_guard >/dev/null || exit 1
 DESIRED_HBA="host    ${DB_NAME}    ${DB_ROLE},${BOARDROOM_ROLE}    ${SUBNET_CIDR}    scram-sha-256"
-HOST_LINES="\$(grep -E '^[[:space:]]*host(ssl|nossl)?[[:space:]]' "\${HBA}" || true)"
-UNEXPECTED="\$(printf '%s\n' "\${HOST_LINES}" \
-  | grep -vE '127\.0\.0\.1/32|::1/128|samehost|localhost' \
-  | grep -vF "\${DESIRED_HBA}" || true)"
-if [ -n "\${UNEXPECTED}" ]; then
-  echo "ERROR: pg_hba.conf に想定外の non-localhost host 行がある(先勝ち規則で本設定が無効化される)。" >&2
-  printf '%s\n' "\${UNEXPECTED}" >&2
-  echo "       内容を確認し、不要な行を削除してから再実行すること(自動削除はしない)。" >&2
-  exit 1
-fi
-if ! grep -qF "\${DESIRED_HBA}" "\${HBA}"; then
+# pg_hba_guard は 0=想定外なし / 1=想定外あり / その他=検査自体の失敗 を3分岐し、
+# 後ろ2つを中断に倒す(検査できない状態を「安全」と混同しない)。
+pg_hba_guard "\${HBA}" "\${DESIRED_HBA}" || exit 1
+# 追記の要否は検査と**同一の正規化**で判定する(空白ゆらぎでの重複追記を防ぐ — C-7)。
+if ! pg_hba_has_line "\${HBA}" "\${DESIRED_HBA}"; then
   printf '%s\n' "\${DESIRED_HBA}" >> "\${HBA}"
   NEED_RELOAD=1
   echo "pg_hba に追記: \${DESIRED_HBA}"
@@ -510,72 +685,15 @@ gcloud beta iap web get-iam-policy --project "${PROJECT}" --resource-type=cloud-
   --service="${SERVICE}" --region="${REGION}" \
   --flatten="bindings[].members" --format="value(bindings.role,bindings.members)" || true
 
-# ── 12. 公開バインディングの検査と除去(重大-3)──────────────────────────────────
-# 2026-08-02 の無認証 Cloud Run 公開版と同名サービスの場合、allUsers の run.invoker が
-# 残っていると IAP を有効化しても直接 URL で全世界に公開されたままになる。
-#
-# **失敗は「公開なし」ではない**(再審査 条件1)。get-iam-policy が権限不足・API 断で
-# 落ちたときに「検出ゼロ」と同じ扱いにすると、検査自体が沈黙して公開を見逃す。
-# 取得の終了コードを見て、失敗なら中断する。
+# ── 12. 公開バインディングの検査と除去(重大-3・再審査 条件1)──────────────────────
+# 実装は ops/lib/deploy-guards.sh(取得失敗を「公開なし」と混同しない・除去後に再取得して
+# 確認する)。tests/ops/test_deploy_guards.py が中断挙動を検証している。
 echo "-- 公開バインディング(allUsers / allAuthenticatedUsers)を検査"
-service_iam_policy() {  # 失敗時は非ゼロで返る(呼び出し側が中断する)
-  gcloud run services get-iam-policy "${SERVICE}" --project "${PROJECT}" --region "${REGION}" \
-    --flatten="bindings[].members" --format="value(bindings.role,bindings.members)"
-}
-public_members_in() {  # $1=ポリシーのテキスト
-  printf '%s\n' "$1" | grep -E '[[:space:]](allUsers|allAuthenticatedUsers)$' || true
-}
-
-if ! POLICY="$(service_iam_policy)"; then
-  echo "ERROR: ${SERVICE} の IAM ポリシーを取得できなかった。公開状態を確認できないため中断する。" >&2
-  echo "       (取得失敗を『公開なし』とみなすと検査が沈黙する — 再審査 条件1)" >&2
-  exit 1
-fi
-FOUND="$(public_members_in "${POLICY}")"
-if [ -n "${FOUND}" ]; then
-  echo "WARNING: 公開バインディングを検出したため除去する:" >&2
-  printf '%s\n' "${FOUND}" >&2
-  while IFS=$'\t ' read -r role member; do
-    [ -n "${role:-}" ] && [ -n "${member:-}" ] || continue
-    # </dev/null: gcloud に while の入力(残りの行)を食わせない
-    gcloud run services remove-iam-policy-binding "${SERVICE}" \
-      --project "${PROJECT}" --region "${REGION}" \
-      --member="${member}" --role="${role}" --quiet >/dev/null </dev/null
-  done <<< "${FOUND}"
-  if ! POLICY="$(service_iam_policy)"; then
-    echo "ERROR: 除去後の IAM ポリシーを再取得できなかった。公開のままの可能性がある。" >&2
-    exit 1
-  fi
-  STILL="$(public_members_in "${POLICY}")"
-  if [ -n "${STILL}" ]; then
-    echo "ERROR: 公開バインディングを除去できなかった。サービスは全世界公開のままの可能性がある。" >&2
-    printf '%s\n' "${STILL}" >&2
-    exit 1
-  fi
-  echo "-- 公開バインディングを除去した(現在は無し)"
-else
-  echo "-- サービスレベルの公開バインディングは無し"
-fi
+guard_service_public_bindings "${SERVICE}" "${PROJECT}" "${REGION}" || exit 1
 
 # ── 12.5 プロジェクトレベル IAM の公開バインディング(再審査 条件1)────────────────
-# roles/run.invoker がプロジェクト全体で allUsers に付いていると、サービス側の
-# ポリシーが清潔でも全 Cloud Run サービスが無認証で叩ける。ここは**自動で消さない** —
-# 他サービスへの影響が読めないため、検出したら中断して人間に判断させる。
 echo "-- プロジェクトレベル IAM の公開バインディングを検査"
-if ! PROJ_POLICY="$(gcloud projects get-iam-policy "${PROJECT}" \
-    --flatten="bindings[].members" --format="value(bindings.role,bindings.members)")"; then
-  echo "ERROR: プロジェクトの IAM ポリシーを取得できなかった。公開状態を確認できないため中断する。" >&2
-  exit 1
-fi
-PROJ_PUBLIC="$(printf '%s\n' "${PROJ_POLICY}" \
-  | grep -E '^roles/run\.[a-zA-Z]+[[:space:]]+(allUsers|allAuthenticatedUsers)$' || true)"
-if [ -n "${PROJ_PUBLIC}" ]; then
-  echo "ERROR: プロジェクトレベルで Cloud Run の公開バインディングがある(全サービスが無認証で到達可能):" >&2
-  printf '%s\n' "${PROJ_PUBLIC}" >&2
-  echo "       他サービスへの影響があるため自動では消さない。手動で除去してから再実行すること。" >&2
-  exit 1
-fi
-echo "-- プロジェクトレベルの公開バインディングは無し"
+guard_project_public_bindings "${PROJECT}" || exit 1
 
 URL="$(gcloud run services describe "${SERVICE}" --project "${PROJECT}" --region "${REGION}" \
   --format='value(status.url)')"

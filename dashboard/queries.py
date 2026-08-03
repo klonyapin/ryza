@@ -37,6 +37,7 @@ import yaml
 
 from ryza.db.conn import connect
 from ryza.ingest.freshness import DEFAULT_SLAS, FreshnessSLA, _latest_as_of
+from ryza.risk import navflow
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -62,12 +63,13 @@ def connect_readonly() -> psycopg.Connection:
 
 
 def connect_boardroom() -> psycopg.Connection:
-    """役員室専用の**書込可**接続(autocommit)。
+    """役員室・開発室の**書込可**接続(autocommit)。
 
     Cloud Run では ``RYZA_BOARDROOM_DATABASE_URL``(Secret ``ryza-boardroom-db-url``)が
     最小権限ロール ``ryza_boardroom`` を指す。このロールが書けるのは
     ``governance.minutes`` / ``governance.minute_resolutions`` / ``governance.stances``
-    の INSERT と ``meta.runs`` の INSERT/UPDATE だけで、帳簿・取引状態・監査対象への
+    の INSERT、``meta.runs`` の INSERT/UPDATE、``ops.org_icon_overrides``(0020)、
+    ``ops.dev_chat``(0024・SELECT/INSERT のみ)だけで、帳簿・取引状態・監査対象への
     経路を持たない(``ops/deploy-dashboard.sh``)。
 
     autocommit なのは実ジョブの Run と同じ流儀(即時永続化)。書込先は追記オンリーの
@@ -184,40 +186,57 @@ def fetch_outbox_pending(conn: psycopg.Connection) -> list[dict[str, Any]]:
 DEFAULT_BOOK_ID = "DEMO_FUND"
 
 
-def fetch_nav_series(
+def fetch_nav_data(
     conn: psycopg.Connection, *, book_id: str = DEFAULT_BOOK_ID
-) -> list[dict[str, Any]]:
-    """帳簿の日次 NAV 系列(日付昇順)と当日の外部フロー純額。
+) -> dict[str, list[dict[str, Any]]]:
+    """NAV 系列と未反映フローを**1 クエリ**で返す(``{"series", "pending"}``)。
 
     NAV の正は ``ledger.nav_snapshots``(``ryza.risk.daily.load_nav_series`` と同じ選択。
     ``risk.nav_daily`` は執行照合を重ねた risk 用ビューであり、正ではない)。
 
-    外部フロー(出資・払戻)は ``ledger.accounts.category='equity'`` かつ
-    ``account_id <> 'retained'``(拠出資本勘定)への仕訳の日次合算で、これを引かないと
-    増資日のリターンが跳ねる。集計式も risk エンジンと同一にしてある。
+    外部フロー(出資・払戻)の突合は ``ryza.risk.navflow`` に**一本化**してある
+    (独立審査 T-018 重要-5: 同じ定義を 2 箇所に持ったことが、休日フローの取りこぼしを
+    片方だけ直せば済むように見せていた)。フローは entry_date 完全一致ではなく
+    「その日以降の最初の snap_date」へ寄せ、当日仕訳を ``flow_eop``・区間内仕訳を
+    ``flow_bop`` に分ける(重要-1 — リターンは分母 ``nav_{t−1} + flow_bop`` で測る)。
+
+    系列と未反映フローを 1 回で返すのは、別々に取ると両者が別時点の DB を映しうる
+    ため(独立審査 中-6)。表示用に ``net_flow = flow_eop + flow_bop`` も付ける。
+    **系列先頭点の ``net_flow`` は「設定来の累計」**である — 系列の起点より前の
+    出資はすべて先頭点に寄る(起点 NAV が既にそれを含むため測定には使われない)。
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT s.snap_date AS day, s.nav, s.status,
-                   coalesce(f.net_flow, 0) AS net_flow
-            FROM ledger.nav_snapshots s
-            LEFT JOIN (
-                SELECT je.entry_date AS d, sum(jl.credit - jl.debit) AS net_flow
-                FROM ledger.journal_lines jl
-                JOIN ledger.journal_entries je ON je.entry_id = jl.entry_id
-                JOIN ledger.accounts a
-                  ON a.book_id = jl.book_id AND a.account_id = jl.account_id
-                WHERE jl.book_id = %(book)s
-                  AND a.category = 'equity' AND a.account_id <> 'retained'
-                GROUP BY je.entry_date
-            ) f ON f.d = s.snap_date
-            WHERE s.book_id = %(book)s
-            ORDER BY s.snap_date
-            """,
-            {"book": book_id},
-        )
-        return _rows(cur)
+    data = navflow.load_nav_flow_data(conn, book_id)
+    series = [
+        {
+            "day": p.day,
+            "nav": p.nav,
+            "status": p.status,
+            "flow_eop": p.flow_eop,
+            "flow_bop": p.flow_bop,
+            "net_flow": p.net_flow,
+        }
+        for p in data.points
+    ]
+    pending = [{"day": p.entry_date, "amount": p.amount} for p in data.pending]
+    return {"series": series, "pending": pending}
+
+
+def fetch_nav_series(
+    conn: psycopg.Connection, *, book_id: str = DEFAULT_BOOK_ID
+) -> list[dict[str, Any]]:
+    """帳簿の日次 NAV 系列(日付昇順・フロー帰属済み)。:func:`fetch_nav_data` の一部。"""
+    return fetch_nav_data(conn, book_id=book_id)["series"]
+
+
+def fetch_pending_flows(
+    conn: psycopg.Connection, *, book_id: str = DEFAULT_BOOK_ID
+) -> list[dict[str, Any]]:
+    """NAV スナップショットがまだ無い日の外部フロー(``[{"day", "amount"}]``)。
+
+    系列最終日より後の出資・払戻は NAV 系列のどの点にも載らない。黙って落とすと
+    「次の締めで NAV が跳ねる理由」が画面から消えるため、別枠で返して UI が注記する。
+    """
+    return fetch_nav_data(conn, book_id=book_id)["pending"]
 
 
 # ── リスク ────────────────────────────────────────────────────────────────────
@@ -457,19 +476,26 @@ def load_site_status(path: Path | None = None) -> dict[str, Any] | None:
 
 # ── 承認・通知(組織サイト化 — 2026-08-03 代表指示)────────────────────────────
 def fetch_decisions(conn: psycopg.Connection, *, limit: int = 50) -> list[dict[str, Any]]:
-    """承認フローの決定履歴(``governance.decisions``・0007)。
+    """承認フローの現決定(``governance.current_decisions`` view・0021)。
 
-    みなし承認(定款第3条 v0.4)は ``decision='deemed'`` で記録される設計
-    (governance.yaml deemed_approval)。現行スキーマの CHECK は
-    approve|reject|question のみのため deemed 行はまだ存在しないが、UI 側は
-    decision 値で「みなし/明示」を区別する(スキーマ拡張時に自動追随)。
+    **``governance.decisions`` を直読しない**(独立役員審査 0021 C-5): 直読すると
+    代表が否認した承認が「承認済み」のまま表示され、ダッシュボードが定款第3条の
+    否認権が行使された事実を隠す。view は否認履歴を合成し、否認中の決定に
+    ``effective_decision='vetoed'`` / ``is_vetoed=true`` を返す。
+
+    みなし承認(定款第3条 v0.4)は ``recorded_decision='deemed'``(0019)。
+    明示承認との区別は監査部門の deemed_ratio(形骸化アラート)の前提であり、
+    UI 側もこの値で「みなし/明示」を出し分ける。
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, proposal_ref, kind, decision, decided_by, note, decided_at
-            FROM governance.decisions
-            ORDER BY id DESC
+            SELECT decision_id AS id, proposal_ref, kind,
+                   recorded_decision AS decision, effective_decision, is_vetoed,
+                   decided_by, note, decided_at,
+                   veto_kind, vetoed_by, veto_reason, revert_commit, vetoed_at
+            FROM governance.current_decisions
+            ORDER BY decision_id DESC
             LIMIT %s
             """,
             (limit,),

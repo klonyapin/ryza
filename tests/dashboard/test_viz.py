@@ -208,8 +208,15 @@ def test_viz_never_hardcodes_hex_colors():
 
 
 # ── underwater / NAV ─────────────────────────────────────────────────────────
-def _nav(day: int, nav: float, flow: float = 0.0) -> dict:
-    return {"day": date(2026, 1, day), "nav": Decimal(str(nav)), "net_flow": Decimal(str(flow))}
+def _nav(day: int, nav: float, flow: float = 0.0, bop: float = 0.0) -> dict:
+    """NAV 行。``flow`` は当日仕訳(EOP)、``bop`` は区間内仕訳(BOP — 分母に足す)。"""
+    return {
+        "day": date(2026, 1, day),
+        "nav": Decimal(str(nav)),
+        "flow_eop": Decimal(str(flow)),
+        "flow_bop": Decimal(str(bop)),
+        "net_flow": Decimal(str(flow + bop)),
+    }
 
 
 def test_underwater_frame_is_non_positive_and_zero_at_peak():
@@ -238,6 +245,17 @@ def test_flow_adjusted_returns_excludes_capital_flows():
     """出資 ¥50 で NAV が 100→150 でもリターンは 0%(TWR)。"""
     rows = [_nav(1, 100), _nav(2, 150, flow=50)]
     assert viz.flow_adjusted_returns(rows) == [(date(2026, 1, 2), 0.0)]
+
+
+def test_flow_adjusted_returns_bop_flow_is_working_capital():
+    """区間内の出資は分母に入る(審査シナリオ B: 100 + BOP 50 → 157.5 は +5%)。
+
+    期末仮定だと +7.5% になる。engine.book_returns と同じ BOP/EOP 分離であること。
+    """
+    rows = [_nav(1, 100), _nav(2, 157.5, bop=50)]
+    out = viz.flow_adjusted_returns(rows)
+    assert [d for d, _ in out] == [date(2026, 1, 2)]
+    assert [r for _, r in out] == pytest.approx([0.05])
 
 
 def test_period_return_compounds():

@@ -9,12 +9,15 @@ from types import SimpleNamespace
 import pytest
 
 from ryza.gate.orders import gate_and_record
+from ryza.ips import IPSConfig
 from ryza.risk.daily import (
+    build_risk_embed,
     load_instrument_returns,
     load_nav_series,
     load_positions,
     run_risk_daily,
 )
+from ryza.risk.engine import book_returns
 
 _AS_OF = datetime(2030, 2, 1, 0, 0, tzinfo=UTC)
 
@@ -40,8 +43,27 @@ def _seed_nav(conn, navs, *, book="DEMO_FUND", start=date(2030, 1, 1)):
             )
 
 
+def _seed_nav_days(conn, navs: dict, *, book="DEMO_FUND"):
+    """日付を明示して NAV を入れる(休日で穴の空いた系列を組むため)。"""
+    with conn.cursor() as cur:
+        for day, nav in navs.items():
+            cur.execute(
+                """
+                INSERT INTO ledger.nav_snapshots (book_id, snap_date, nav, status, detail)
+                VALUES (%s, %s, %s, 'provisional', '{}')
+                ON CONFLICT (book_id, snap_date)
+                DO UPDATE SET nav = EXCLUDED.nav
+                """,
+                (book, day, Decimal(str(nav))),
+            )
+
+
 def _seed_capital_flow(conn, run_id, *, amount, entry_date, book="DEMO_FUND"):
-    """出資仕訳(cash / capital)を直接記帳する(0011 と同型)。"""
+    """出資仕訳(cash / capital)を直接記帳する(0011 と同型)。
+
+    ``amount`` が負なら払戻(cash 貸方 / capital 借方)として貸借を入れ替える。
+    """
+    debit_cash, credit_cash = (amount, 0) if amount >= 0 else (0, -amount)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -65,10 +87,13 @@ def _seed_capital_flow(conn, run_id, *, amount, entry_date, book="DEMO_FUND"):
             """
             INSERT INTO ledger.journal_lines
                 (entry_id, line_no, book_id, account_id, debit, credit, currency)
-            VALUES (%s, 1, %s, 'cash', %s, 0, 'JPY'),
-                   (%s, 2, %s, 'capital', 0, %s, 'JPY')
+            VALUES (%s, 1, %s, 'cash', %s, %s, 'JPY'),
+                   (%s, 2, %s, 'capital', %s, %s, 'JPY')
             """,
-            (entry_id, book, amount, entry_id, book, amount),
+            (
+                entry_id, book, debit_cash, credit_cash,
+                entry_id, book, credit_cash, debit_cash,
+            ),
         )
 
 
@@ -102,14 +127,167 @@ def _run(run_id):
 
 
 # ── NAV 系列の読出し(フロー調整)──────────────────────────────────────────────
+def _net_flows(conn, book="DEMO_FUND"):
+    """``{snap_date: net_flow}``。系列先頭点には seed の開始仕訳(0006/0011 — 2026 年)が
+    寄るため、テストは**増分**で判定する(先頭点のフローはリターンに使われない)。"""
+    return {p.day: p.net_flow for p in load_nav_series(conn, book).points}
+
+
 def test_load_nav_series_with_capital_flow(conn, run_id):
     _clear_nav(conn)
     _seed_nav(conn, [1_000_000, 2_000_000], start=date(2030, 1, 4))
+    before = _net_flows(conn)
     _seed_capital_flow(conn, run_id, amount=1_000_000, entry_date=date(2030, 1, 5))
-    series = load_nav_series(conn, "DEMO_FUND")
+    series = load_nav_series(conn, "DEMO_FUND").points
+    after = _net_flows(conn)
     assert [p.nav for p in series] == [Decimal(1_000_000), Decimal(2_000_000)]
-    assert series[1].net_flow == Decimal(1_000_000)  # 出資はフロー(損益ではない)
-    assert series[0].net_flow == Decimal(0)
+    # 出資はフロー(損益ではない)。当日のスナップショットに載る。
+    assert after[date(2030, 1, 5)] - before[date(2030, 1, 5)] == Decimal(1_000_000)
+    assert after[date(2030, 1, 4)] == before[date(2030, 1, 4)]
+
+
+def test_load_nav_series_rolls_forward_holiday_flow(conn, run_id):
+    """休日(スナップショット無し)に付いた出資が次の測定日に載る(重要-5 の回帰)。
+
+    修正前は entry_date 完全一致で結合していたため 1/3 の出資が net_flow に載らず、
+    1/2 → 1/5 のリターンが +50%(実際の運用損益は 0%)になっていた。
+    """
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_500_000})
+    _seed_capital_flow(conn, run_id, amount=500_000, entry_date=date(2030, 1, 3))
+    series = load_nav_series(conn, "DEMO_FUND").points
+    assert [p.day for p in series] == [date(2030, 1, 2), date(2030, 1, 5)]
+    assert series[1].net_flow == Decimal(500_000)  # 土曜の出資が 1/5 に寄る
+    assert series[1].flow_bop == Decimal(500_000)  # 区間内の仕訳 → 分母に足す(BOP)
+    assert series[1].flow_eop == Decimal(0)
+    assert book_returns(series) == [0.0]  # 運用損益はゼロ(修正前は +0.5)
+
+
+def test_load_nav_series_splits_bop_and_eop(conn, run_id):
+    """当日仕訳は EOP、区間内の仕訳は BOP に振り分ける(重要-1)。
+
+    1/2 ¥100万 → 1/3(休日)+¥50万 → 1/5 当日 +¥20万・市場 +5% の想定。
+    真値は +5.0%(BOP 50 万は区間の運用元本、EOP 20 万は当日の入金)。
+    """
+    _clear_nav(conn)
+    nav_15 = 1_000_000 + 500_000  # 区間元本
+    _seed_nav_days(
+        conn,
+        {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): int(nav_15 * 1.05) + 200_000},
+    )
+    _seed_capital_flow(conn, run_id, amount=500_000, entry_date=date(2030, 1, 3))
+    _seed_capital_flow(conn, run_id, amount=200_000, entry_date=date(2030, 1, 5))
+    series = load_nav_series(conn, "DEMO_FUND").points
+    assert series[1].flow_bop == Decimal(500_000)
+    assert series[1].flow_eop == Decimal(200_000)
+    assert book_returns(series) == [pytest.approx(0.05)]
+
+
+def test_load_nav_series_rollforward_sums_multiple_flows(conn, run_id):
+    """同じスナップショットに寄る複数フロー(出資+払戻)は純額で合算する。"""
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_300_000})
+    _seed_capital_flow(conn, run_id, amount=500_000, entry_date=date(2030, 1, 3))
+    _seed_capital_flow(conn, run_id, amount=-200_000, entry_date=date(2030, 1, 4))
+    series = load_nav_series(conn, "DEMO_FUND").points
+    assert series[1].net_flow == Decimal(300_000)
+    assert book_returns(series) == [0.0]
+
+
+def test_load_nav_series_flow_before_series_start(conn, run_id):
+    """系列先頭より前のフローは先頭点に寄る(先頭 NAV が既に含む — リターンに影響しない)。"""
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 5): 1_000_000, date(2030, 1, 6): 1_100_000})
+    before = _net_flows(conn)
+    _seed_capital_flow(conn, run_id, amount=400_000, entry_date=date(2030, 1, 1))
+    loaded = load_nav_series(conn, "DEMO_FUND")
+    assert loaded.points[0].net_flow - before[date(2030, 1, 5)] == Decimal(400_000)
+    assert loaded.pending_flows == ()  # 先頭より前でもスナップショットはある → 未反映ではない
+    assert book_returns(loaded.points) == [pytest.approx(0.1)]
+
+
+def test_load_nav_series_pending_flow_after_last_snapshot(conn, run_id):
+    """系列最終日より後のフローは捨てず pending として返す(黙って落とさない)。"""
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_000_000})
+    before = _net_flows(conn)
+    _seed_capital_flow(conn, run_id, amount=500_000, entry_date=date(2030, 1, 6))
+    loaded = load_nav_series(conn, "DEMO_FUND")
+    assert {p.day: p.net_flow for p in loaded.points} == before  # 点は変わらない
+    assert [(p.entry_date, p.amount) for p in loaded.pending_flows] == [
+        (date(2030, 1, 6), Decimal(500_000))
+    ]
+
+
+def test_run_risk_daily_reports_pending_flow(conn, run_id):
+    """未反映フローは独立フィールドで注記し、締めを跨いでいれば urgent(重要-4・中-5)。"""
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_000_000})
+    _seed_capital_flow(conn, run_id, amount=500_000, entry_date=date(2030, 1, 6))
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF)  # 測定日 2030-02-01
+    assert detail["DEMO_FUND"]["pending_flows"] == 1
+    assert detail["DEMO_FUND"]["pending_urgent"] is True
+    embed, urgent = _reports(conn)[0]
+    assert urgent is True
+    pend = [f for f in embed["fields"] if f["name"] == "未反映フロー"]
+    assert pend and "スナップショット未生成の外部フロー" in pend[0]["value"]
+    assert "締めを跨いだ" in pend[0]["value"]
+    notes = [f for f in embed["fields"] if f["name"] == "注記"]
+    assert notes and notes[0]["value"].startswith("【要確認】")  # 注記の先頭(切られない)
+
+
+def test_run_risk_daily_pending_same_day_immaterial_is_not_urgent(conn, run_id):
+    """当日仕訳・NAV 比 0.5% 未満の未反映フローは注記のみ(毎日 urgent にしない)。"""
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_000_000})
+    _seed_capital_flow(conn, run_id, amount=1_000, entry_date=date(2030, 1, 6))  # 0.1%
+    as_of = datetime(2030, 1, 6, 12, 0, tzinfo=UTC)  # JST でも 1/6(締め前)
+    detail = run_risk_daily(conn, _run(run_id), as_of=as_of)
+    assert detail["DEMO_FUND"]["pending_flows"] == 1
+    assert detail["DEMO_FUND"]["pending_urgent"] is False
+    embed, urgent = _reports(conn)[0]
+    assert urgent is False
+    assert [f for f in embed["fields"] if f["name"] == "未反映フロー"]  # 注記は必ず出す
+
+
+def test_run_risk_daily_pending_same_day_material_is_urgent(conn, run_id):
+    """当日でも NAV 比 0.5% 以上なら urgent(材料性しきい値)。"""
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_000_000})
+    _seed_capital_flow(conn, run_id, amount=50_000, entry_date=date(2030, 1, 6))  # 5%
+    as_of = datetime(2030, 1, 6, 12, 0, tzinfo=UTC)
+    detail = run_risk_daily(conn, _run(run_id), as_of=as_of)
+    assert detail["DEMO_FUND"]["pending_urgent"] is True
+    _, urgent = _reports(conn)[0]
+    assert urgent is True
+
+
+def test_build_risk_embed_pending_note_survives_note_truncation():
+    """注記欄が 1024 字で切られても未反映フローの理由は消えない(重要-4)。"""
+    state = SimpleNamespace(
+        drawdown=Decimal("0.01"),
+        nav=Decimal(1_000_000),
+        peak_nav=Decimal(1_010_000),
+        ewma_vol_annual=0.1,
+        es95=SimpleNamespace(adopted=0.01, historical=0.01, parametric=0.005),
+        n_returns=30,
+        as_of_day=date(2030, 1, 5),
+        notes=tuple(f"注記{i} " + "あ" * 200 for i in range(20)),  # 1024 字を大きく超える
+    )
+    embed = build_risk_embed(
+        "DEMO_FUND",
+        state,
+        {"dd_soft": False},
+        {},
+        IPSConfig.load(),
+        as_of=_AS_OF,
+        pending_note="NAV スナップショット未生成の外部フロー 1 件: 2030-01-06 出資 ¥500,000",
+    )
+    notes = [f for f in embed["fields"] if f["name"] == "注記"][0]
+    assert len(notes["value"]) == 1024  # 切り詰めは起きている
+    assert "スナップショット未生成" not in notes["value"]  # そこには残っていない
+    pend = [f for f in embed["fields"] if f["name"] == "未反映フロー"][0]
+    assert "2030-01-06 出資 ¥500,000" in pend["value"]  # 独立フィールドには残る
 
 
 # ── 日次サイクル ──────────────────────────────────────────────────────────────

@@ -69,6 +69,8 @@ NAV_SECTIONS: dict[str, list[tuple[str, str, str]]] = {
         ("役員室", "boardroom", "役員室"),
     ],
     "開発": [
+        # 開発室(#68)は代表 → 設計リードの連絡窓口。役員室(経営審議)とは場が違う。
+        ("開発室", "dev-chat", "開発室"),
         ("計画", "plan", "計画"),
         ("開発ステータス", "dev-status", "開発・運用ステータス"),
     ],
@@ -184,6 +186,20 @@ def _seed(conn, run, *, sufficient: bool = True) -> None:
             """,
             (Jsonb({"title": "承認依頼: T-018"}), run.run_id),
         )
+        # 開発室(0024)。追記オンリーのため残留行はトリガを外して消す(rollback で復元)。
+        cur.execute("ALTER TABLE ops.dev_chat DISABLE TRIGGER USER")
+        cur.execute("DELETE FROM ops.dev_chat")
+        cur.execute("ALTER TABLE ops.dev_chat ENABLE TRIGGER USER")
+        # 1 件目は 10 分前の未中継(中継が止まっている状態 — 独立役員審査 中-7 の
+        # 滞留警告の系統)。残り 2 件は直近の会話。
+        cur.execute(
+            """
+            INSERT INTO ops.dev_chat (sender, body, created_at) VALUES
+                ('representative', '滞留している連絡', now() - interval '10 minutes'),
+                ('representative', '代表からの連絡', now()),
+                ('design_lead', '設計リードの返信', now())
+            """
+        )
 
 
 def _app_factory(conn, monkeypatch):
@@ -253,7 +269,7 @@ def test_every_page_renders_without_exception(app, page):
 
 @pytest.mark.parametrize("page", ALL_PAGES)
 def test_every_page_is_reachable_by_its_url_path(app, page):
-    """ナビ再構成後も全 14 ページに到達できること(受け入れ基準)。
+    """ナビ再構成後も全 15 ページ(開発室を含む)に到達できること(受け入れ基準)。
 
     ``st.navigation`` は指名されたハッシュが未登録なら**黙って既定ページへ落とす**。
     「例外が出ない」だけでは url_path のタイプミスを検出できないため、そのページ
@@ -399,7 +415,7 @@ def test_navigation_sections_match_the_declared_structure():
 
 def test_navigation_url_paths_are_unique():
     """url_path はページのハッシュそのもの。重複すると片方が到達不能になる。"""
-    assert len(ALL_PAGES) == len(set(ALL_PAGES)) == 14
+    assert len(ALL_PAGES) == len(set(ALL_PAGES)) == 15
 
 
 def test_every_page_declares_the_question_it_answers(app):
@@ -589,3 +605,44 @@ def test_approvals_summary_row_counts_and_oldest_age(app):
     text = _texts(app("approvals"))
     assert "未配送の通知" in text
     assert "最古" in text
+
+
+# ── 開発室(0024・代表指示 2026-08-03)────────────────────────────────────────
+def test_dev_chat_declares_the_asynchronous_contract(app):
+    """ページ冒頭で「非同期・実働はセッション側」を明示する(代表の期待値管理)。"""
+    captions = [str(c.value) for c in app("dev-chat").caption]
+    notice = next((c for c in captions if "設計リードへの連絡窓口" in c), None)
+    assert notice is not None, captions
+    assert "非同期" in notice and "セッション側" in notice
+
+
+def test_dev_chat_renders_thread_in_chronological_order(conn, app):
+    bodies = [str(m.value) for m in app("dev-chat").markdown]
+    assert "代表からの連絡" in bodies and "設計リードの返信" in bodies
+    # 代表 → 設計リードの順(新しい順にしない)。
+    assert bodies.index("代表からの連絡") < bodies.index("設計リードの返信")
+
+
+def test_dev_chat_shows_relay_state_of_representative_messages(app):
+    captions = [str(c.value) for c in app("dev-chat").caption]
+    assert any("中継待ち" in c for c in captions), captions
+
+
+def test_dev_chat_warns_when_relay_is_stalled(app):
+    """独立役員審査 中-7: 中継が止まっていることを「中継待ち」で沈黙させない。"""
+    at = app("dev-chat")
+    warnings = [str(w.value) for w in at.warning]
+    stalled = next((w for w in warnings if "中継されていない" in w), None)
+    assert stalled is not None, warnings
+    assert "1 件" in stalled and "bot.devchat.relay" in stalled
+    # 個々の吹き出しにも滞留を出す(赤字)。
+    assert any(":red[" in str(c.value) for c in at.caption)
+
+
+def test_dev_chat_input_appends_to_the_thread(conn, app):
+    at = app("dev-chat")
+    at.chat_input[0].set_value("追加の連絡").run()
+    assert not at.exception
+    from ryza.governance import devchat
+
+    assert devchat.fetch_thread(conn)[-1].body == "追加の連絡"
