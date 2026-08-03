@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ryza import org
 from ryza.press.images import ImageResult
 from ryza.press.linter import Topic
 
@@ -16,6 +17,9 @@ from ryza.press.linter import Topic
 COLOR_NORMAL = 0x5B54C7  # 紫（朝刊・通常）
 COLOR_FLASH = 0xC24E3A  # 赤（速報）
 COLOR_APPROVAL = 0x2E7D5B  # 緑（承認）
+
+# 報道部 embed の発信者（config/org.yaml の台帳 id — 名前・役職はハードコードしない）。
+PRESS_MEMBER_ID = "aya"  # v2: 射命丸 文（報道部アナリスト）
 
 # 免責フッター（全投稿・§6 / 00-system-design §7）。
 DISCLAIMER = "本投稿は自己運用システムの内部記録であり投資助言ではない（完全非公開）"
@@ -78,9 +82,13 @@ def build_morning_embed(
             {"name": "ポートフォリオ概況", "value": _nav_line(nav)[:1024], "inline": False}
         )
 
+    # 発信者 = 玲音（報道部アナリスト）。author と色は台帳（org.yaml）から
+    # （代表指示 2026-08-03「役職名と一緒にキャラクターを使う」— §6）。
+    press = org.get_member(PRESS_MEMBER_ID)
     embed: dict[str, Any] = {
         "title": title,
-        "color": COLOR_NORMAL,
+        "color": press.color_int,
+        "author": org.embed_author(PRESS_MEMBER_ID),
         "fields": fields,
         "footer": {"text": _footer_text(image)},
     }
@@ -108,10 +116,13 @@ def build_flash_embed(
         body += (
             f"\n\n― 予測ラベル ―\n確度: {pr.confidence:.0%} ／ 検証期限: {pr.verify_by}\n{pr.claim}"
         )
+    # author は玲音、色は速報の赤を維持（§6: 赤=速報の緊急度表示。urgent 配送でも
+    # Bot 側が赤へ上書きするため、キャラクター色より緊急度シグナルを優先する）。
     embed: dict[str, Any] = {
         "title": title[:256],
         "description": body[:4096],
         "color": COLOR_FLASH,
+        "author": org.embed_author(PRESS_MEMBER_ID),
         "footer": {"text": _footer_text(image)},
     }
     if mention:
@@ -139,6 +150,7 @@ def build_digest_embed(
         "title": f"【まとめ速報】{len(topics)}件",
         "description": "\n".join(lines)[:4096],
         "color": COLOR_FLASH,
+        "author": org.embed_author(PRESS_MEMBER_ID),
         "footer": {"text": _footer_text(image)},
     }
     if timestamp:

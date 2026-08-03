@@ -17,7 +17,8 @@ members:
     dept: 経営
     persona: personas/cio
     color: "#a78bfa" # 銀髪と紫紺
-    icon_url: null # TODO: 画像収集タスクが SFW の適切な URL を設定
+    # rating:general / solo portrait / -ai_generated。2026-08-03 に 200+image/jpeg を実アクセス確認
+    icon_url: "https://safebooru.org/images/71/5d1e53e6020937bba5d1244f5bf0875ddbb57413.jpg" # safebooru post 6965571
     model_tier: fable
     tagline: 戦略と資本配分の責任者。月次で IPS を自ら批判する
   - id: homura
@@ -27,7 +28,7 @@ members:
     dept: 経営(非執行)
     persona: personas/independent-officer
     color: "#312e81" # 深紫黒
-    icon_url: null
+    icon_url: "https://safebooru.org/images/841/ddaa9b6d1a998e72ee4ec894e4a531b853da351a.jpg" # safebooru post 7014152
     model_tier: fable
     tagline: 全ての重要決定に最低1つの懸念を出す義務を負う。何度でもやり直させる
   - id: tanya
@@ -37,7 +38,8 @@ members:
     dept: 監査(代表直属)
     persona: personas/audit
     color: "#b45309" # 軍装の琥珀
-    icon_url: null
+    # 原寸 PNG は 6.9MB のため縮小版(samples)を採用
+    icon_url: "https://safebooru.org/samples/3894/sample_c3f9348b03c9f14fbf338a0d934225f8235bcdfd.jpg" # safebooru post 6640818
     model_tier: fable
     tagline: read-only で全部門を照らす合理主義者。毎週月曜に定款監査を執行
   - id: aoba
@@ -47,7 +49,7 @@ members:
     dept: 開発
     persona: personas/dev-lead
     color: "#6d28d9" # 青葉の紫
-    icon_url: null
+    icon_url: "https://safebooru.org/images/8/4851a14b5e87c9af701933794ce5dd33b80c4835.png" # safebooru post 5559486
     model_tier: fable
     tagline: 設計と統合を担う。自分の charter は自分で改訂できない
   - id: aya
@@ -57,7 +59,7 @@ members:
     dept: 報道
     persona: personas/press-lain # ペルソナ資産のパスは既存を維持(移行は別途)
     color: "#dc2626" # 天狗の紅
-    icon_url: null
+    icon_url: "https://safebooru.org/images/70/ff32ad3e3345c704b8313a245605e0dddf20692b.jpg" # safebooru post 6955135
     model_tier: mid
     tagline: 誰よりも速く正確に。毎朝 10:00 の朝刊を執筆、最大5トピック・出典必須
   - id: ben
@@ -67,7 +69,7 @@ members:
     dept: 運用(ポッド ben)
     persona: personas/fm-ben # T-017 で作成
     color: "#059669" # 白銀と若草
-    icon_url: null
+    icon_url: "https://safebooru.org/images/70/3405c8292b528c1540aa8afc67df34f82eed8014.jpg" # safebooru post 6955777
     model_tier: mid
     tagline: 人間の時間軸では測らない。割安×質×長期、安全域のない取引はしない
   - id: jim
@@ -77,7 +79,7 @@ members:
     dept: 運用(ポッド jim)
     persona: personas/fm-jim # T-017 で作成
     color: "#9a3412" # 栗色
-    icon_url: null
+    icon_url: "https://safebooru.org/images/826/ada2b2e876f126e05e69f58090e42869f604228f.png" # safebooru post 6724035
     model_tier: light # 非 LLM ルール主体
     tagline: 物語を信じない科学者。小さな統計的優位の集積だけを信じる
   - id: stan
@@ -87,7 +89,7 @@ members:
     dept: 運用(ポッド stan)
     persona: personas/fm-stan # 後続タスクで作成
     color: "#7f1d1d" # 紅黒
-    icon_url: null
+    icon_url: "https://safebooru.org/images/4414/9b647668271ab9c2d05f3cc48b7984236df74d7a.jpg" # safebooru post 6812607
     model_tier: mid
     tagline: 正しいかではなく、正しい時にいくら張るか。ただしゲートは誰も破れない
   - id: peter
@@ -97,6 +99,7 @@ members:
     dept: 運用(ポッド peter)
     persona: personas/fm-peter # 後続タスクで作成
     color: "#0e7490" # 瞳の瑠璃
-    icon_url: null
+    # 原寸 PNG は 7.0MB のため縮小版(samples)を採用
+    icon_url: "https://safebooru.org/samples/3840/sample_4d52105dcdb62fddc8e1bf6706ff8e8f3c766e6d.jpg" # safebooru post 5227253
     model_tier: mid
     tagline: 気になります。身近な変化と決算から成長を妥当な価格で買う
