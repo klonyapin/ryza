@@ -4,7 +4,18 @@
 
 - **状態**: 全体設計 v3.2 確定(2026-08-02)。実装開始。当面は**デモ取引専念**
 - **デプロイ先**: GCP(月額 $0〜数ドル構成)
-- **開発ステータスサイト(ローカル)**: `python3 site/build.py && python3 -m http.server 8080 -d site` → http://localhost:8080 。運用フェーズで Streamlit ダッシュボードに統合予定
+- **開発ステータスサイト(ローカル)**: `python3 site/build.py && python3 -m http.server 8080 -d site` → http://localhost:8080 。同内容は運用ダッシュボードの「開発ステータス」ページでも閲覧可(下記)
+
+## 運用ダッシュボード(ローカル専用)
+
+Streamlit 製の閲覧用ダッシュボード(概況 / 取込 / 報道 / コスト / 市場観 / 開発ステータス)。**ローカル専用 — 公開ホスティングしない**(Cloud Run 公開版は 2026-08-02 に撤去済み)。**読み取り専用** — 書込・操作系 UI は無く、Kill Switch 等の操作は Discord Bot の管轄。
+
+```sh
+uv sync --extra dashboard          # 依存導入(streamlit。本体依存には含めない)
+.venv/bin/streamlit run dashboard/app.py
+```
+
+接続先 DB は環境変数 `RYZA_DATABASE_URL`(既定 `postgresql://ryza:ryza@localhost:5432/ryza`。`docker compose up -d db` で起動)。「開発ステータス」ページは `site/data.js` を表示するため、更新するときは `python3 site/build.py` を先に実行する。
 - **設計書(図入り)**: [docs/design/00-system-design.md](docs/design/00-system-design.md) — mermaid 図は GitHub 上でそのまま描画される
 
 ## ドキュメント地図

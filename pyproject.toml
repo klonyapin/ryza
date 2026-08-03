@@ -26,6 +26,12 @@ bot = [
     "discord.py>=2.6,<3.0",
     "google-cloud-secret-manager>=2.20",
 ]
+# 運用ダッシュボード(Issue #10)。ローカル専用・読み取り専用の Streamlit UI。
+# 本体依存に入れない(VM・ジョブには不要)。閲覧するローカル環境でのみ .[dashboard] を入れる。
+# テスト(tests/dashboard)は DB 層(dashboard/queries.py)のみ検証し streamlit を import しない。
+dashboard = [
+    "streamlit>=1.37",
+]
 # 階層0前処理（T-010）の埋め込みモデル実行時依存。torch が重いため本体依存に入れず隔離する。
 # テスト（tests/preprocess）は実モデルをロードせずダミー埋め込みを注入するため dev には含めない。
 # 本番/実測時のみ .[preprocess] を入れる（初回はモデルの重みダウンロードが発生する）。
