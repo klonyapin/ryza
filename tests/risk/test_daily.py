@@ -8,9 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from ryza.bot import COLOR_FLASH
 from ryza.gate.orders import gate_and_record
 from ryza.ips import IPSConfig
 from ryza.risk.daily import (
+    CLOSE_FAILED_NOTE,
     build_risk_embed,
     load_instrument_returns,
     load_nav_series,
@@ -120,6 +122,20 @@ def _reports(conn, channel="ops"):
             (channel,),
         )
         return cur.fetchall()
+
+
+def _last_metrics(conn, book="DEMO_FUND") -> dict:
+    """直近の engine_update イベントの metrics(測定値スナップショット)。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT metrics FROM risk.limits_state_events
+            WHERE book_id = %s AND event = 'engine_update'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (book,),
+        )
+        return cur.fetchone()[0]
 
 
 def _run(run_id):
@@ -372,6 +388,118 @@ def test_build_risk_embed_pending_note_survives_note_truncation():
     assert "2030-01-06 出資 ¥500,000" in pend["value"]  # 独立フィールドには残る
 
 
+# ── 締め失敗日の可視化(独立審査 再々審査 起草者の留意点 (a))────────────────────
+def test_run_risk_daily_warns_when_close_failed(conn, run_id):
+    """締めが落ちた日は測定より先に警告を出し、必ず urgent にする(黙って測らない)。"""
+    _clear_nav(conn)
+    _seed_nav(conn, [10_000_000, 9_990_000])
+    detail = run_risk_daily(
+        conn, _run(run_id), as_of=_AS_OF,
+        close_ok=False, close_error="RuntimeError: close boom",
+    )
+    assert detail["DEMO_FUND"]["close_ok"] is False
+    embed, urgent = _reports(conn)[0]
+    assert urgent is True  # フラグは 1 つも立っていないが urgent(前提が崩れている)
+    assert embed["fields"][0]["name"] == "本日の締め"  # 先頭表示
+    assert embed["fields"][0]["value"].startswith(CLOSE_FAILED_NOTE)
+    assert "close boom" in embed["fields"][0]["value"]
+    assert embed["description"].startswith(f"【要確認】{CLOSE_FAILED_NOTE}")
+    assert embed["color"] == COLOR_FLASH
+    notes = [f for f in embed["fields"] if f["name"] == "注記"][0]["value"]
+    assert notes.startswith(f"【要確認】{CLOSE_FAILED_NOTE}")  # 注記でも最先頭
+
+
+def test_run_risk_daily_records_close_failure_in_state_metrics(conn, run_id):
+    """締めの成否は測定の前提として metrics に残る(不変原則3 — 事後監査)。"""
+    _clear_nav(conn)
+    _seed_nav(conn, [10_000_000, 9_990_000])
+    run_risk_daily(
+        conn, _run(run_id), as_of=_AS_OF, close_ok=False, close_error="Boom: x"
+    )
+    assert _last_metrics(conn)["close_ok"] is False
+    assert _last_metrics(conn)["close_error"] == "Boom: x"
+
+
+def test_run_risk_daily_quiet_when_close_succeeded(conn, run_id):
+    """締め成功時は従来どおり — 締めフィールドを出さず urgent にもしない。"""
+    _clear_nav(conn)
+    _seed_nav(conn, [10_000_000, 9_990_000])
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF)
+    assert detail["DEMO_FUND"]["close_ok"] is True
+    embed, urgent = _reports(conn)[0]
+    assert urgent is False
+    assert not [f for f in embed["fields"] if f["name"] == "本日の締め"]
+    assert not embed["description"].startswith("【要確認】")
+    assert _last_metrics(conn)["close_ok"] is True
+
+
+def test_run_risk_daily_no_nav_still_reports_close_failure(conn, run_id):
+    """NAV 系列すら無い日でも締め失敗は明記する(no_nav の説明と混ぜて消さない)。"""
+    _clear_nav(conn)
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF, close_ok=False)
+    assert detail["DEMO_FUND"]["close_ok"] is False
+    embed, urgent = _reports(conn)[0]
+    assert urgent is True
+    assert embed["description"].startswith(f"【要確認】{CLOSE_FAILED_NOTE}")
+
+
+# ── 除外の機械可読化(独立審査 T-018 重大-3 の恒久対応)────────────────────────
+def test_missing_price_exclusion_reaches_state_metrics(conn, run_id):
+    """時価欠測で評価から外れた銘柄が metrics に構造化されて残る。
+
+    ES の採用値が「観測不足以外の理由」でも動くことを、読み手が notes の日本語文
+    ではなくキーで読めるようにする(重大-3 の恒久対応)。
+    """
+    _clear_nav(conn)
+    _seed_nav(conn, [10_000_000, 9_990_000])
+    with conn.cursor() as cur:  # バーの無い銘柄を保有させる(時価が取れない)
+        cur.execute(
+            """
+            INSERT INTO market.instruments (symbol, asset_class, venue, currency, valid_from)
+            VALUES ('NOPRICE.T', 'equity', 'TSE', 'JPY', now())
+            RETURNING instrument_id
+            """
+        )
+        inst = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO trading.positions
+                (book_id, fm, instrument_id, asset_class, qty, avg_cost, run_id)
+            VALUES ('DEMO_FUND', 'ben', %s, 'equity_jp', 100, 1000, %s)
+            """,
+            (inst, run_id),
+        )
+    positions, notes, exclusions = load_positions(conn, "DEMO_FUND", as_of=_AS_OF)
+    assert [p.instrument_id for p in positions] == []  # 評価できず除外
+    assert notes and [(e.instrument_id, e.measure, e.reason) for e in exclusions] == [
+        (inst, "valuation", "missing_price")
+    ]
+
+    run_risk_daily(conn, _run(run_id), as_of=_AS_OF)
+    metrics = _last_metrics(conn)
+    assert {
+        "instrument_id": inst, "measure": "valuation", "reason": "missing_price",
+        "observed": None, "required": None,
+    } in metrics["excluded_instruments"]
+
+
+def test_state_metrics_carries_deferred_reasons(conn, run_id):
+    """帳簿リターン不足の日は、どの指標がなぜ保留かが metrics から読める。"""
+    _clear_nav(conn)
+    _seed_nav(conn, [10_000_000, 9_950_000, 9_960_000])  # リターン 2 件 < 20
+    run_risk_daily(conn, _run(run_id), as_of=_AS_OF)
+    metrics = _last_metrics(conn)
+    seen = {
+        (d["metric"], d["reason"], d["observed"], d["required"])
+        for d in metrics["deferred"]
+    }
+    assert seen == {
+        ("realized_vol", "insufficient_returns", 2, 20),
+        ("es95", "insufficient_returns", 2, 20),
+    }
+    assert metrics["sufficient"] is False  # 旧キーも従来どおり
+
+
 # ── 日次サイクル ──────────────────────────────────────────────────────────────
 def test_run_risk_daily_measures_and_reports(conn, run_id, ips):
     _clear_nav(conn)
@@ -461,10 +589,11 @@ def test_load_positions_ignores_future_bars(conn, run_id):
             datetime(2030, 2, 5, 6, tzinfo=UTC): 9999,  # as_of より未来
         },
     )
-    positions, notes = load_positions(conn, "DEMO_FUND", as_of=_AS_OF)
+    positions, notes, exclusions = load_positions(conn, "DEMO_FUND", as_of=_AS_OF)
     pos = next(p for p in positions if p.instrument_id == inst)
     assert pos.value == Decimal(100) * Decimal(1000)  # 未来バー(9999)を使わない
     assert notes == []
+    assert exclusions == []
 
 
 def test_load_instrument_returns_ignores_future_bars(conn, run_id):

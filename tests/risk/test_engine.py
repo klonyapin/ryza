@@ -13,6 +13,7 @@ from decimal import Decimal
 import pytest
 
 from ryza.risk.engine import (
+    Exclusion,
     NavPoint,
     RiskPosition,
     book_returns,
@@ -284,6 +285,84 @@ def test_es_partial_exclusion_still_flags_on_remainder(ips):
 def test_no_positions_no_es_flag(ips):
     state = evaluate(constant_growth_series(25, rate="1.001"), [], {}, ips)
     assert state.es95.adopted == 0.0 and not state.es_exceeded
+
+
+# ── 判定保留・除外の機械可読化(独立役員審査 T-018 重大-3 の恒久対応)──────────
+def test_deferred_is_empty_when_everything_is_measurable(ips):
+    """十分な系列・保有なしなら保留も除外もゼロ(「保留なし」を空で表現する)。"""
+    state = evaluate(constant_growth_series(25, rate="1.001"), [], {}, ips)
+    assert state.deferred == () and state.excluded == ()
+    assert state.deferred_metrics() == frozenset()
+
+
+def test_insufficient_returns_defers_both_vol_and_es(ips):
+    """帳簿リターン不足は vol と ES の**両方**を保留する(es_exceeded も sufficient 条件)。"""
+    state = evaluate(constant_growth_series(11, rate="1.05"), [], {}, ips)
+    assert state.deferred_metrics() == {"realized_vol", "es95"}
+    assert all(d.reason == "insufficient_returns" for d in state.deferred)
+    assert {(d.observed, d.required) for d in state.deferred} == {(10, 20)}
+
+
+def test_es_deferral_reason_distinguishes_no_observations(ips):
+    """保有ありで観測ゼロは「観測不足」ではなく測定空白として区別できる(重大-3)。"""
+    series = constant_growth_series(25, rate="1.001")
+    positions = [RiskPosition(1, "equity_jp", Decimal(1_000_000))]
+    state = evaluate(series, positions, {}, ips)
+    assert state.deferred_metrics() == {"es95"}  # 帳簿系列は十分なので vol は有効
+    (d,) = state.deferred
+    assert d.reason == "no_observations" and d.observed == 0
+
+
+def test_es_deferral_reason_distinguishes_majority_excluded(ips):
+    """除外過半の保留は、除外された銘柄まで含めて理由を復元できる。"""
+    series = constant_growth_series(25, rate="1.001")
+    positions = [RiskPosition(1, "equity_jp", Decimal(1_000_000))]
+    state = evaluate(series, positions, _returns_map(1, [-0.9] * 10), ips)
+    (d,) = state.deferred
+    assert d.reason == "majority_excluded"
+    assert [(e.instrument_id, e.measure, e.reason, e.observed, e.required)
+            for e in state.excluded] == [(1, "es95", "short_series", 10, 20)]
+
+
+def test_partial_exclusion_is_recorded_without_deferring(ips):
+    """残部で測れる除外は「保留ではないが採用値に含まれない銘柄」として残る。"""
+    series = constant_growth_series(25, rate="1.001")
+    positions = [
+        RiskPosition(1, "equity_jp", Decimal(1_000_000)),
+        RiskPosition(2, "equity_us", Decimal(100_000)),
+    ]
+    rets = _returns_map(1, [0.0] * 38 + [-0.9, -0.7])
+    rets.update(_returns_map(2, [0.0] * 5))
+    state = evaluate(series, positions, rets, ips)
+    assert state.deferred == ()  # 判定は有効
+    assert [(e.instrument_id, e.reason) for e in state.excluded] == [(2, "short_series")]
+
+
+def test_extra_exclusions_are_carried_through(ips):
+    """エンジン到達前の除外(時価欠測など)も同じ列に載る — 何を測っていないかを 1 か所で。"""
+    missing = Exclusion(instrument_id=9, measure="valuation", reason="missing_price")
+    state = evaluate(
+        constant_growth_series(25, rate="1.001"), [], {}, ips,
+        extra_exclusions=[missing],
+    )
+    assert state.excluded == (missing,)
+
+
+def test_es_insufficient_obs_is_its_own_reason(ips):
+    """観測が min_obs 未満でも除外過半でない場合は「ES 観測不足」として保留する。"""
+    series = constant_growth_series(25, rate="1.001")
+    positions = [
+        RiskPosition(1, "equity_jp", Decimal(1_000_000)),
+        RiskPosition(2, "equity_us", Decimal(1_000_000)),
+    ]
+    # 双方 20 観測(除外なし)だが共通日は 15 日 → n_obs=15 < 20。
+    rets = _returns_map(1, [0.0] * 20, start=date(2029, 1, 1))
+    rets.update(_returns_map(2, [0.0] * 20, start=date(2029, 1, 6)))
+    state = evaluate(series, positions, rets, ips)
+    assert state.excluded == () and not state.es95.deferred
+    (d,) = state.deferred
+    assert (d.metric, d.reason, d.observed, d.required) == ("es95", "insufficient_obs", 15, 20)
+    assert not state.es_exceeded
 
 
 # ── ガードレール消費率 ─────────────────────────────────────────────────────────

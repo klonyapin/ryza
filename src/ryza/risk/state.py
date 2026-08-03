@@ -50,9 +50,16 @@ def _record_event(
 def state_metrics(state: RiskState, extra: dict | None = None) -> dict:
     """イベント台帳・レポートに残す測定値スナップショット(監査再現性)。
 
-    ``extra`` は測定の**前提**に関する追加キー(例: 測定窓に含まれた照合無効日の数)。
-    フラグがどんな系列の上で立ったかを後から再現できるようにするためのもので
-    (不変原則3)、判定そのものには使わない。
+    ``extra`` は測定の**前提**に関する追加キー(例: 測定窓に含まれた照合無効日の数、
+    当日の会計締めが成功したか)。フラグがどんな系列の上で立ったかを後から再現
+    できるようにするためのもので(不変原則3)、判定そのものには使わない。
+
+    ``deferred`` / ``excluded_instruments`` は「どの指標がなぜ判定保留か」「採用値が
+    どの銘柄を含まないか」を機械可読で残す(独立役員審査 T-018 重大-3 の恒久対応)。
+    ``sufficient``(bool)と ``n_returns`` だけでは、観測不足以外の理由(時価欠測に
+    よる評価除外・短系列除外)を読み手が復元できず、ダッシュボードが粗い分岐で
+    保留理由を誤って説明していた。**既存キーは残す**(後方互換 — 過去のイベント行と
+    同じ読み方を壊さない)。
     """
     return {
         "as_of_day": state.as_of_day.isoformat(),
@@ -66,6 +73,28 @@ def state_metrics(state: RiskState, extra: dict | None = None) -> dict:
         "es95_parametric": state.es95.parametric,
         "es95_adopted": state.es95.adopted,
         "es95_n_obs": state.es95.n_obs,
+        # ES 単体の判定保留(観測空白・除外過半)。``deferred`` にも同じ事実が入るが、
+        # エンジンの生フラグとしても読めるようにしておく。
+        "es95_deferred": state.es95.deferred,
+        "deferred": [
+            {
+                "metric": d.metric,
+                "reason": d.reason,
+                "observed": d.observed,
+                "required": d.required,
+            }
+            for d in state.deferred
+        ],
+        "excluded_instruments": [
+            {
+                "instrument_id": e.instrument_id,
+                "measure": e.measure,
+                "reason": e.reason,
+                "observed": e.observed,
+                "required": e.required,
+            }
+            for e in state.excluded
+        ],
         "measured_dd_hard": state.dd_hard,
         "notes": list(state.notes),
         **(extra or {}),

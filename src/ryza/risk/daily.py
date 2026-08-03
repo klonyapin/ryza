@@ -22,6 +22,12 @@ snap_date」で、当日仕訳(EOP)と区間内仕訳(BOP)に分ける**(``ryza.
 T-018 重要-5・重要-1)。まだスナップショットの無いフローは ``NavSeries.pending_flows``
 として返し、レポートに独立フィールドで注記する(黙って落とさない)。
 
+締めの成否(``close_ok``): 呼び出し側(``ryza.jobs.daily``)は execution 段=締めの
+成否を渡す。締めが落ちた日は当日のスナップショットも再締め(``ledger.closing.
+reclose_stale``)も走らないため、ここで測るのは**遅延仕訳が入ったままの・前日までの
+系列**になる。その日は測定値の前に ``CLOSE_FAILED_NOTE`` を出し、必ず urgent にする
+(黙って古い系列を測らない — 独立審査 再々審査 起草者の留意点 (a))。
+
 CLI: ``python -m ryza.risk.daily``(冪等 — 同日再実行は limits_state を同値上書きし、
 イベント台帳とレポートが 1 件ずつ増えるのみ)。
 """
@@ -57,6 +63,11 @@ from ryza.risk.navflow import (
 from ryza.risk.state import upsert_limits_state
 
 _JST = ZoneInfo("Asia/Tokyo")
+
+#: 当日の会計締めが失敗した日にレポート先頭へ必ず出す警告(独立役員審査 再々審査
+#: 起草者の留意点 (a))。締めが落ちた日は当日スナップショットも再締めも走らないため、
+#: リスク日次は**前日までの・未再締めの系列**を測る。黙って古い系列を測らない。
+CLOSE_FAILED_NOTE = "⚠ 本日の締めが失敗 — 測定は前日までの系列に基づく"
 
 # 銘柄リターン系列の遡り日数(暦日)。ES のヒストリカル法「直近1年の日次リターン」
 # (指示書)を営業日で確保するための読出し窓。判定値ではなく読出し規約。
@@ -104,13 +115,17 @@ def load_nav_series(conn: psycopg.Connection, book_id: str) -> NavSeries:
 
 def load_positions(
     conn: psycopg.Connection, book_id: str, *, as_of: datetime
-) -> tuple[list[engine.RiskPosition], list[str]]:
+) -> tuple[list[engine.RiskPosition], list[str], list[engine.Exclusion]]:
     """帳簿の現在ポジション(全ポッド合算・銘柄単位)を時価評価する。
 
     時価は ``market.bars``(1d)の **as_of 以前の**最新終値×現行銘柄の乗数
     (point-in-time — 不変原則4。過去日付での再実行に未来バーを混入させない)。
     時価の無い銘柄は評価から除外し notes に明記する(fail-safe: 落とさず測れる
     範囲で測り、欠測は隠さない。発注時の欠測はゲート側が fail-closed で block する)。
+
+    返り値の 3 つ目は同じ除外の**機械可読版**(``engine.Exclusion``)。ES とガード
+    レールの採用値がどの銘柄を含まないかを、日本語の notes ではなく構造で残す
+    (独立役員審査 T-018 重大-3 — 保留・除外の理由は読み手側で復元できること)。
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -125,7 +140,7 @@ def load_positions(
         )
         rows = cur.fetchall()
         if not rows:
-            return [], []
+            return [], [], []
         ids = [r[0] for r in rows]
         cur.execute(
             """
@@ -151,10 +166,18 @@ def load_positions(
 
     positions: list[engine.RiskPosition] = []
     notes: list[str] = []
+    exclusions: list[engine.Exclusion] = []
     for instrument_id, asset_class, qty in rows:
         price = prices.get(instrument_id)
         if price is None:
             notes.append(f"時価欠落のため評価除外: instrument {instrument_id}")
+            exclusions.append(
+                engine.Exclusion(
+                    instrument_id=instrument_id,
+                    measure=engine.MEASURE_VALUATION,
+                    reason=engine.REASON_MISSING_PRICE,
+                )
+            )
             continue
         value = Decimal(qty) * price * multipliers.get(instrument_id, Decimal(1))
         positions.append(
@@ -162,7 +185,7 @@ def load_positions(
                 instrument_id=instrument_id, asset_class=asset_class, value=value
             )
         )
-    return positions, notes
+    return positions, notes, exclusions
 
 
 def load_instrument_returns(
@@ -232,6 +255,7 @@ def build_risk_embed(
     as_of: datetime,
     pending_note: str | None = None,
     recon_note: str | None = None,
+    close_note: str | None = None,
 ) -> dict[str, Any]:
     """日次リスクレポートの embed(00 §9「リスクレポート」— #運営 へ 1 通)。
 
@@ -239,6 +263,10 @@ def build_risk_embed(
     **独立フィールド**にする。注記欄は 1024 字で切り詰めるため、注記が多い日に
     「urgent だけ立って理由が消える」ことが起きうる(独立審査 重要-4)。測定に入って
     いない入出金と、照合が無効になった日の存在は切ってはならない。
+
+    ``close_note``(当日の締め失敗)は測定値**全体**の前提を崩す事象なので、
+    独立フィールドの中でも**先頭**に置き、description の先頭にも出す。個々の
+    測定値より先に「この数字は前日までの系列で出ている」を読ませる。
     """
     hl = ips.hard_limits
     flagged = [name for name, on in effective.items() if on]
@@ -298,13 +326,18 @@ def build_risk_embed(
         fields.append(
             {"name": "注記", "value": "\n".join(state.notes)[:1024], "inline": False}
         )
+    if close_note:
+        # 先頭固定(measure より前に読ませる)。他の注記と違い、これは**すべての**
+        # 測定値の as_of がずれていることの宣言なので、順序を譲らない。
+        fields.insert(0, {"name": "本日の締め", "value": close_note[:1024], "inline": False})
     return {
         "title": f"リスクレポート {book_id} {as_of.astimezone(_JST).strftime('%Y-%m-%d')}",
         "description": (
-            f"IPS v{ips.version} §3.2 ハードリミットの日次測定"
-            f"(データ {state.n_returns} 営業日 / 測定 as_of {state.as_of_day})。"
+            (f"【要確認】{close_note}\n" if close_note else "")
+            + f"IPS v{ips.version} §3.2 ハードリミットの日次測定"
+            + f"(データ {state.n_returns} 営業日 / 測定 as_of {state.as_of_day})。"
         ),
-        "color": COLOR_FLASH if (flagged or recon_note) else COLOR_NORMAL,
+        "color": COLOR_FLASH if (flagged or recon_note or close_note) else COLOR_NORMAL,
         "fields": fields,
         "footer": {"text": DISCLAIMER},
     }
@@ -318,6 +351,8 @@ def run_risk_daily(
     ips: IPSConfig | None = None,
     as_of: datetime | None = None,
     channel_ops: str = "ops",
+    close_ok: bool = True,
+    close_error: str | None = None,
 ) -> dict[str, Any]:
     """リスクエンジンの日次サイクルを 1 回実行する(帳簿は ``ips.books`` 全件)。
 
@@ -328,6 +363,14 @@ def run_risk_daily(
     スナップショット未生成の外部フローがある帳簿は、レポートに独立フィールドで必ず
     注記する。urgent にするのは材料性のあるもの(締めを跨いだ/NAV 比 0.5% 以上)に
     限る — ``navflow.urgent_pending``(重要-4・中-5 の裁定)。
+
+    ``close_ok`` は**当日の会計締め(execution 段)が成功したか**。締めが落ちた日は
+    当日のスナップショットも再締め(``ledger.closing.reclose_stale``)も走らないため、
+    ここで測るのは遅延仕訳を含んだままの・前日までの系列になる。その事実をレポート
+    先頭に出し、必ず urgent にする(黙って古い系列を測らない — 再々審査 (a))。
+    既定 ``True`` は「締めの失敗を知らされていない」= 単独 CLI 実行の意味であり、
+    締めの成否を知る呼び出し側(``ryza.jobs.daily``)は必ず実測値を渡す。
+    ``close_error`` は失敗時の例外要約(あれば注記に添える)。
     """
     ips = ips or IPSConfig.load()
     as_of = as_of or datetime.now(UTC)
@@ -335,6 +378,10 @@ def run_risk_daily(
         "classification": classify_current_instruments(conn, run_id=run.run_id)
     }
     as_of_day = as_of.astimezone(_JST).date()
+    close_note = (
+        None if close_ok
+        else CLOSE_FAILED_NOTE + (f"(execution 段: {close_error})" if close_error else "")
+    )
     for book_id in ips.books:
         loaded = load_nav_series(conn, book_id)
         series = loaded.points
@@ -353,7 +400,8 @@ def run_risk_daily(
                     f"リスクレポート {book_id} {as_of.astimezone(_JST).strftime('%Y-%m-%d')}"
                 ),
                 "description": (
-                    "NAV 系列なし(会計締め未実行)。リスク状態は未測定のため "
+                    (f"【要確認】{close_note}\n" if close_note else "")
+                    + "NAV 系列なし(会計締め未実行)。リスク状態は未測定のため "
                     "risk.limits_state は作成しない(fail-closed — 発注はゲートが block)。"
                     + (f"\n【要確認】{pending_note}" if pending_note else "")
                 ),
@@ -365,10 +413,11 @@ def run_risk_daily(
             detail[book_id] = {
                 "status": "no_nav",
                 "pending_flows": len(loaded.pending_flows),
+                "close_ok": close_ok,
                 "report_outbox_id": oid,
             }
             continue
-        positions, notes = load_positions(conn, book_id, as_of=as_of)
+        positions, notes, exclusions = load_positions(conn, book_id, as_of=as_of)
         returns = load_instrument_returns(
             conn, [p.instrument_id for p in positions], as_of=as_of
         )
@@ -384,7 +433,13 @@ def run_risk_daily(
             # 先頭に挿す(重要-4): notes は 1024 字で切られるため、測定に入っていない
             # 入出金の存在が末尾で消えないようにする。embed 側は独立フィールドで二重化。
             notes.insert(0, f"【要確認】{pending_note}")
-        state = engine.evaluate(series, positions, returns, ips, extra_notes=notes)
+        if close_note:
+            # さらに前(注記の最先頭): 測定値全体の as_of がずれている宣言のため。
+            notes.insert(0, f"【要確認】{close_note}")
+        state = engine.evaluate(
+            series, positions, returns, ips,
+            extra_notes=notes, extra_exclusions=exclusions,
+        )
         # 測定窓に照合無効日が何日入ったかを metrics に残す(不変原則3 — 独立審査の
         # 要求)。汚染系列で vol_exceeded が立った事実を事後監査で再現できるようにする。
         # 窓は EWMA 実現ボラの営業日数 +1 点(その区間のリターンを作る NAV 点の数)。
@@ -397,6 +452,9 @@ def run_risk_daily(
                     window_days.intersection(all_recon)
                 ),
                 "recon_invalidated_days_total": len(all_recon),
+                # 測定の前提: 当日の締めが走ったか(走っていなければ系列は前日まで)。
+                "close_ok": close_ok,
+                **({} if close_ok else {"close_error": close_error}),
             },
         )
         usage = engine.guardrail_usage(
@@ -406,10 +464,12 @@ def run_risk_daily(
             book_id, state, effective, usage, ips, as_of=as_of,
             pending_note=pending_note,
             recon_note=recon_note if fresh_recon else None,
+            close_note=close_note,
         )
         # urgent: フラグ到達に加え、保有ありの ES 測定空白(判定保留)と、材料性のある
-        # 未反映フロー(navflow.urgent_pending)、そして**当該再締めで新たに**照合結論が
-        # 無効化された日(breaks 相当 — 独立審査 再-2 の裁定)も要確認として上げる。
+        # 未反映フロー(navflow.urgent_pending)、**当該再締めで新たに**照合結論が
+        # 無効化された日(breaks 相当 — 独立審査 再-2 の裁定)、そして当日の締め失敗
+        # (測定が前日までの系列に基づく — 再々審査 (a))も要確認として上げる。
         oid = enqueue(
             conn,
             channel_ops,
@@ -420,12 +480,14 @@ def run_risk_daily(
                 or state.es95.deferred
                 or pending_urgent
                 or bool(fresh_recon)
+                or not close_ok
             ),
         )
         detail[book_id] = {
             "status": "measured",
             "pending_flows": len(loaded.pending_flows),
             "pending_urgent": pending_urgent,
+            "close_ok": close_ok,
             "recon_invalidated_new": len(fresh_recon),
             "recon_invalidated_total": len(all_recon),
             "drawdown": str(state.drawdown),

@@ -102,7 +102,31 @@ def _metrics(*, sufficient: bool) -> dict:
     }
 
 
-def _seed(conn, run, *, sufficient: bool = True) -> None:
+def _metrics_v2(**overrides) -> dict:
+    """``deferred`` / ``excluded_instruments`` を持つ**新スキーマ**の測定値。
+
+    ES だけが観測不足**以外**の理由(除外過半)で保留になっている系統。旧スキーマの
+    「sufficient が偽なら vol/ES を一律 unknown」では説明できない状態(重大-3 恒久)。
+    """
+    metrics = _metrics(sufficient=True)
+    metrics.update(
+        es95_deferred=True,
+        deferred=[
+            {"metric": "es95", "reason": "majority_excluded", "observed": 4, "required": 20}
+        ],
+        excluded_instruments=[
+            {"instrument_id": 42, "measure": "es95", "reason": "short_series",
+             "observed": 4, "required": 20},
+            {"instrument_id": 77, "measure": "valuation", "reason": "missing_price",
+             "observed": None, "required": None},
+        ],
+        close_ok=True,
+    )
+    metrics.update(overrides)
+    return metrics
+
+
+def _seed(conn, run, *, sufficient: bool = True, metrics: dict | None = None) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -141,7 +165,11 @@ def _seed(conn, run, *, sufficient: bool = True) -> None:
             VALUES ('DEMO_FUND', 'engine_update', true, false, false, false,
                     %s, 'risk.daily', %s, %s)
             """,
-            (Jsonb(_metrics(sufficient=sufficient)), _NOW, run.run_id),
+            (
+                Jsonb(metrics if metrics is not None else _metrics(sufficient=sufficient)),
+                _NOW,
+                run.run_id,
+            ),
         )
         cur.execute(
             """
@@ -595,6 +623,62 @@ def test_risk_vol_and_es_are_measured_when_sufficient(app):
     bars = [b.proto.text for b in app("risk").get("progress")]
     assert not any(b.startswith(":gray[") for b in bars)
     assert any("実現ボラ(EWMA 年率)" in b and "11.0%" in b for b in bars), bars
+
+
+def test_risk_insufficiency_note_falls_back_for_legacy_metrics(app_insufficient):
+    """後方互換: ``deferred`` キーの無い過去のイベント行は従来表示のまま。
+
+    metrics は追記されるだけで遡って書き換わらないため、旧行を読めなくしない。
+    """
+    bars = [b.proto.text for b in app_insufficient("risk").get("progress")]
+    unknown = [b for b in bars if b.startswith(":gray[")]
+    assert len(unknown) == 2 and all("観測不足で判定無効" in b for b in unknown)
+    assert not any("判定保留 —" in b for b in bars)  # 新表示は使われない
+
+
+# ── 判定保留・除外の機械可読キー(重大-3 恒久 — 新スキーマ優先)────────────────
+@pytest.fixture
+def app_es_deferred(conn, run, monkeypatch):
+    """新スキーマ(deferred / excluded_instruments)の系統。ES だけが保留。"""
+    _seed(conn, run, metrics=_metrics_v2())
+    yield _app_factory(conn, monkeypatch)
+    st.cache_data.clear()
+    st.cache_resource.clear()
+
+
+def test_risk_defers_only_the_metric_the_engine_deferred(app_es_deferred):
+    """観測不足でない保留(除外過半)は ES だけを unknown にし、理由を名指しする。
+
+    旧分岐(sufficient が偽か)では ES の保留理由を「観測不足」と誤って説明し、
+    かつ vol まで巻き添えで unknown にしていた(独立役員審査 T-018 重大-3)。
+    """
+    bars = [b.proto.text for b in app_es_deferred("risk").get("progress")]
+    unknown = [b for b in bars if b.startswith(":gray[")]
+    assert len(unknown) == 1, bars  # ES だけ
+    assert "日次 ES95(対 NAV)" in unknown[0]
+    assert "判定保留 — 除外銘柄が過半(4/20)" in unknown[0]
+    # 実現ボラは測れているので値を出す(帳簿リターンは十分)。
+    assert any("実現ボラ(EWMA 年率)" in b and "11.0%" in b for b in bars), bars
+
+
+def test_risk_names_excluded_instruments(app_es_deferred):
+    """採用値が含まない銘柄を画面で名指しする(使用率だけを独り歩きさせない)。"""
+    captions = [str(c.value) for c in app_es_deferred("risk").caption]
+    note = next((c for c in captions if "測定から除外した銘柄" in c), None)
+    assert note is not None, captions
+    assert "#42(es95: 短系列)" in note and "#77(valuation: 時価欠測)" in note
+
+
+def test_risk_warns_when_last_close_failed(conn, run, monkeypatch):
+    """締めが落ちた日の測定であることをリスクページでも明示する。"""
+    _seed(conn, run, metrics=_metrics_v2(close_ok=False))
+    try:
+        at = _app_factory(conn, monkeypatch)("risk")
+        warnings = [str(w.value) for w in at.warning]
+    finally:
+        st.cache_data.clear()
+        st.cache_resource.clear()
+    assert any("直近の締めが失敗した日の測定" in w for w in warnings), warnings
 
 
 # ── コスト: 累計 vanity を出さず比率で見せる ────────────────────────────────────

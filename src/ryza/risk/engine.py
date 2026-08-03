@@ -31,6 +31,12 @@
 - **データ不足時は fail-safe**(指示書): 帳簿リターン系列が N(=20)営業日に満たない
   間は vol/es フラグを立てず、``notes`` に「データ不足 n/N営業日」を明記する。
   DD はデータ1日目から有効
+- **保留・除外は機械可読で残す**(独立役員審査 T-018 重大-3 の恒久対応):
+  ``notes`` は人向けの日本語文であり、読み手側で「どの指標がなぜ判定保留か」を
+  復元できない。``RiskState.deferred``(``Deferral`` の列)と ``RiskState.excluded``
+  (``Exclusion`` の列)が同じ事実を構造化して持ち、``risk.limits_state_events.metrics``
+  経由でダッシュボードと監査が同じ理由を読む。``notes`` はこれらの表示形であって
+  正ではない
 """
 
 from __future__ import annotations
@@ -102,6 +108,54 @@ class ESResult:
     deferred: bool = False  # 判定保留(除外が過半/保有ありで観測ゼロ)
 
 
+# 判定保留の理由コード(``Deferral.reason``)。値は機械可読の識別子で、表示文言は
+# 読み手側(ダッシュボード・レポート)が持つ。
+REASON_INSUFFICIENT_RETURNS = "insufficient_returns"  # 帳簿リターンが N 営業日に満たない
+REASON_INSUFFICIENT_OBS = "insufficient_obs"  # ES のポートフォリオ観測が N 日に満たない
+REASON_NO_OBSERVATIONS = "no_observations"  # 保有はあるがリターン観測ゼロ(測定空白)
+REASON_MAJORITY_EXCLUDED = "majority_excluded"  # 除外銘柄が保有の過半
+
+# 測定から銘柄を外した理由(``Exclusion.reason``)。
+REASON_SHORT_SERIES = "short_series"  # リターン系列が min_obs 未満(ES の縮退)
+REASON_MISSING_PRICE = "missing_price"  # 時価が取れず評価自体ができない(daily 側)
+
+# 保留・除外が及ぶ測定の識別子(``Deferral.metric`` / ``Exclusion.measure``)。
+METRIC_REALIZED_VOL = "realized_vol"
+METRIC_ES95 = "es95"
+MEASURE_VALUATION = "valuation"  # 時価評価(= ES とガードレールの入力そのもの)
+
+
+@dataclass(frozen=True)
+class Deferral:
+    """判定を保留した測定と、その理由(機械可読 — 独立役員審査 T-018 重大-3)。
+
+    ``notes`` の日本語文と同じ事実を、読み手が分岐に使える形で持つ。1 つの測定に
+    複数の理由が並ぶことがある(例: 帳簿リターン不足 **かつ** ES 観測ゼロ)。
+    ``observed`` / ``required`` は判定に必要な観測数と実績(``0`` 起点の件数)。
+    """
+
+    metric: str  # METRIC_* のいずれか
+    reason: str  # REASON_* のいずれか
+    observed: int
+    required: int
+
+
+@dataclass(frozen=True)
+class Exclusion:
+    """測定から外した銘柄とその理由(採用値が「何を含まないか」の説明責任)。
+
+    ES は観測不足以外の理由(時価欠測による評価除外など)でも採用値が動くため、
+    除外の事実を ``sufficient``(bool)に潰さず銘柄単位で残す。``observed`` /
+    ``required`` は短系列除外のときだけ意味を持つ(それ以外は None)。
+    """
+
+    instrument_id: int
+    measure: str  # METRIC_ES95 / MEASURE_VALUATION
+    reason: str  # REASON_*
+    observed: int | None = None
+    required: int | None = None
+
+
 @dataclass(frozen=True)
 class RiskState:
     """リスクエンジンの出力(測定値+フラグ)。``risk.limits_state`` 更新の入力。"""
@@ -119,6 +173,14 @@ class RiskState:
     vol_exceeded: bool
     es_exceeded: bool
     notes: tuple[str, ...]  # データ不足・除外銘柄などの明記(fail-safe の説明責任)
+    #: 判定を保留した測定とその理由(``notes`` の機械可読版)。空なら全測定が有効。
+    deferred: tuple[Deferral, ...] = ()
+    #: 測定から外した銘柄とその理由(ES の短系列除外+呼び出し側の評価除外)。
+    excluded: tuple[Exclusion, ...] = ()
+
+    def deferred_metrics(self) -> frozenset[str]:
+        """判定保留になっている測定名の集合(``METRIC_*``)。"""
+        return frozenset(d.metric for d in self.deferred)
 
 
 def book_returns(series: Sequence[NavPoint]) -> list[float]:
@@ -227,12 +289,17 @@ def evaluate(
     ips: IPSConfig,
     *,
     extra_notes: Sequence[str] = (),
+    extra_exclusions: Sequence[Exclusion] = (),
 ) -> RiskState:
     """リスク状態を測定してフラグに変換する(純関数)。
 
     - DD フラグはデータ1日目から有効(到達 ≥ で発動)
     - vol/es フラグは帳簿リターンが ``realized_vol_ewma_days`` 営業日そろうまで
-      立てない(fail-safe)。その間は ``notes`` にデータ不足を明記する
+      立てない(fail-safe)。その間は ``notes`` にデータ不足を明記し、同じ事実を
+      ``deferred``(機械可読)に入れる
+    - ``extra_exclusions`` は**エンジンに届く前に**測定から外れた銘柄(時価欠測で
+      評価できなかった保有など)。エンジン自身の短系列除外と同じ列に載せて、
+      採用値が何を含まないかを 1 か所で読めるようにする
     """
     hl = ips.hard_limits
     dd, peak = drawdown(series)
@@ -244,8 +311,25 @@ def evaluate(
     es = es95(positions, series[-1].nav, instrument_returns, min_obs=days)
 
     notes = list(extra_notes)
+    deferred: list[Deferral] = []
+    excluded = list(extra_exclusions) + [
+        Exclusion(
+            instrument_id=i,
+            measure=METRIC_ES95,
+            reason=REASON_SHORT_SERIES,
+            observed=len(instrument_returns.get(i, {})),
+            required=days,
+        )
+        for i in es.excluded
+    ]
     if not sufficient:
         notes.append(f"データ不足 {n}/{days}営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)")
+        # 帳簿リターン不足は vol と ES の**両方**の判定を止める(es_exceeded も
+        # sufficient を条件にしている)。読み手が指標ごとに分岐できるよう 2 件に分ける。
+        deferred += [
+            Deferral(METRIC_REALIZED_VOL, REASON_INSUFFICIENT_RETURNS, n, days),
+            Deferral(METRIC_ES95, REASON_INSUFFICIENT_RETURNS, n, days),
+        ]
     if es.excluded:
         notes.append(
             f"ES: 短系列(<{days}営業日)のため測定から除外: "
@@ -253,12 +337,22 @@ def evaluate(
         )
     if es.deferred:
         # 保有があるのに測定空白/除外が過半 — 判定保留は urgent 注記(審査条件2)。
-        if es.n_obs == 0:
+        # 「観測ゼロ」と「短系列で除外され尽くした」は別の事象なので理由を分ける
+        # (どちらも n_obs=0 に潰れるが、後者はデータが**ある**のに使えていない)。
+        has_partial_data = any(
+            (e.observed or 0) > 0 for e in excluded if e.measure == METRIC_ES95
+        )
+        if es.n_obs == 0 and not has_partial_data:
             notes.append("【要確認】ES 測定不能(保有ありだがリターン系列なし)— 判定保留")
+            deferred.append(Deferral(METRIC_ES95, REASON_NO_OBSERVATIONS, 0, days))
         else:
             notes.append("【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)")
+            deferred.append(
+                Deferral(METRIC_ES95, REASON_MAJORITY_EXCLUDED, es.n_obs, days)
+            )
     elif es.n_obs and es.n_obs < days:
         notes.append(f"ES 観測 {es.n_obs}日 < {days}営業日 — ES フラグは判定保留(fail-safe)")
+        deferred.append(Deferral(METRIC_ES95, REASON_INSUFFICIENT_OBS, es.n_obs, days))
 
     dd_soft = dd >= Decimal(str(hl.dd_soft_limit))
     dd_hard = dd >= Decimal(str(hl.dd_hard_limit))
@@ -283,6 +377,8 @@ def evaluate(
         vol_exceeded=vol_exceeded,
         es_exceeded=es_exceeded,
         notes=tuple(notes),
+        deferred=tuple(deferred),
+        excluded=tuple(excluded),
     )
 
 
@@ -346,7 +442,18 @@ def guardrail_usage(
 
 __all__ = [
     "ESResult",
+    "Deferral",
+    "Exclusion",
+    "METRIC_ES95",
+    "METRIC_REALIZED_VOL",
+    "MEASURE_VALUATION",
     "NavPoint",
+    "REASON_INSUFFICIENT_OBS",
+    "REASON_INSUFFICIENT_RETURNS",
+    "REASON_MAJORITY_EXCLUDED",
+    "REASON_MISSING_PRICE",
+    "REASON_NO_OBSERVATIONS",
+    "REASON_SHORT_SERIES",
     "RiskPosition",
     "RiskState",
     "TRADING_DAYS",
