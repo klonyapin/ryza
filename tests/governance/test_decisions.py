@@ -6,6 +6,8 @@ commit せず rollback で隔離する。接続不可なら skip。
 
 from __future__ import annotations
 
+import json
+
 import psycopg
 import pytest
 
@@ -18,6 +20,8 @@ from ryza.governance.decisions import (
     ProposalRefMismatchError,
     ReservedMatterError,
     current_decision,
+    current_decision_by_id,
+    main,
     record_deemed_approval,
     record_revert_completion,
     record_veto,
@@ -333,6 +337,43 @@ def test_veto_requires_non_blank_fields(conn, field):
             expected_proposal_ref=kwargs["expected_proposal_ref"],
         )
     conn.rollback()
+
+
+# ── 現決定の ID 引き(A-18-1 のトレーラ突合の読み口)────────────────────────
+def test_current_decision_by_id_reflects_veto(conn):
+    """ID 引きでも否認が反映される(decisions 直読なら承認に見えてしまう)。"""
+    deemed = _deemed(conn, "by-id-ref")
+    assert current_decision_by_id(conn, deemed.id)["effective_decision"] == "deemed"
+    _veto(conn, deemed, "否認")
+    assert current_decision_by_id(conn, deemed.id)["effective_decision"] == "vetoed"
+    assert current_decision_by_id(conn, -1) is None
+    conn.rollback()
+
+
+# ── CLI(python -m ryza.governance.decisions --deemed ...)───────────────────
+def test_cli_dry_run_prints_notice_embed(capsys):
+    """--dry-run は DB に触れず、投稿される embed を出す(通知文面の事前確認)。"""
+    from ryza.governance.notices import parse_deemed_notice
+
+    rc = main([
+        "--deemed", "--proposal-ref", "https://x/pull/1",
+        "--kind", "pr", "--notice", "保護領域の変更", "--dry-run",
+    ])
+    assert rc == 0
+    embed = json.loads(capsys.readouterr().out)
+    assert parse_deemed_notice(embed) == "https://x/pull/1"
+
+
+def test_cli_requires_deemed_flag(capsys):
+    rc = main(["--proposal-ref", "x", "--kind", "pr", "--notice", "y", "--dry-run"])
+    assert rc == 2
+
+
+@pytest.mark.parametrize("kind", sorted(RESERVED_KINDS))
+def test_cli_rejects_reserved_kinds(kind):
+    """3専決事項は CLI の選択肢に存在しない(定款第3条 — 明示承認のみ)。"""
+    with pytest.raises(SystemExit):
+        main(["--deemed", "--proposal-ref", "x", "--kind", kind, "--notice", "y", "--dry-run"])
 
 
 def test_veto_is_append_only(conn):

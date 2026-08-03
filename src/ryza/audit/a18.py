@@ -25,8 +25,11 @@
 
 - PR 件名(``Merge pull request``)は自己申告であり GitHub API と未照合。件名偽装で承認を
   装える(実弾移行前提条件として API 照合を実装する — ops/reminders.yaml 登録済み)
-- 承認記録(Issue / governance.decisions)の実在までは照会しない(トレーラの存在検査まで)。
-  実在照合は governance.decisions 実装の拡充後に追加する
+- ``Approved:`` トレーラのうち **Issue URL 形式**は実在を照会しない(存在検査まで)。
+  ``governance.decisions`` の **ID 形式**(``123`` / ``decision:123``)は DB 接続がある実行に
+  限り ``governance.current_decisions`` と突合し、否認済み(``effective_decision='vetoed'``)・
+  却下・不在は承認として受理しない(独立役員審査 0021 C-5)。``--dry-run`` や conn 未指定の
+  呼び出しでは照合を行わず、その旨を notes に載せる
 - GitHub の squash マージ(``... (#N)`` 形式の単独コミット)は「マージ PR」と判定しない。
   本リポジトリの承認手続はマージコミット(``Merge pull request``)で行われている(批准 PR #32 が
   実例)。squash 併用を始める場合は判定の拡張が必要
@@ -74,7 +77,8 @@ GOVERNANCE_PATH = "config/governance.yaml"
 # 既知の限界の常時開示(独立役員審査条件)。報告 embed の notes に毎回載せる。
 STANDARD_DISCLOSURES: tuple[str, ...] = (
     "PR 件名(Merge pull request)は自己申告で GitHub API 未照合(照合実装は実弾移行前提条件)",
-    "Approved トレーラの参照先(Issue / governance.decisions)の実在は未照合",
+    "Approved トレーラの Issue URL は実在未照合(governance.decisions の ID は "
+    "current_decisions と突合し、否認済み・却下・不在を承認として受理しない)",
     "マージのコンフリクト解消差分(evil merge)は --cc で検査し、保護パスに触れる場合は"
     "マージ自身の Approved トレーラを要求",
     "A-18-4 のマージ判定は親数+PR 件名(A-18-1 と同一の検査)— 件名は自己申告で"
@@ -92,6 +96,13 @@ _PR_MERGE_RE = re.compile(r"^Merge pull request #\d+")
 
 # 見出し行のバージョン表記(例: 「# Ryza 投資方針書(IPS)v1.3」)。
 _DOC_VERSION_RE = re.compile(r"v(\d+(?:\.\d+)+)")
+
+# Approved トレーラの参照が governance.decisions の ID を指す表記(裸の数字 / decision:123)。
+_DECISION_REF_RE = re.compile(r"^(?:decision:)?(\d+)$")
+
+# 現決定 view の effective_decision のうち「発効している承認」。'vetoed' は含めない
+# (否認された承認をトレーラの参照先として受理しない — 独立役員審査 0021 C-5)。
+APPROVED_DECISIONS: frozenset[str] = frozenset({"approve", "deemed"})
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -174,10 +185,68 @@ def protected_patterns(gov: dict[str, Any]) -> list[re.Pattern[str]]:
 # ────────────────────────────────────────────────────────────────────────────
 # A-18-1 保護領域突合
 # ────────────────────────────────────────────────────────────────────────────
+def approval_trailer_refs(message: str, trailer: str = "Approved:") -> list[str]:
+    """``Approved: <参照>`` トレーラ行の参照値を全て返す(定款第5条 C-5 様式)。
+
+    参照は「GitHub Issue URL または ``governance.decisions`` の ID」
+    (config/governance.yaml の様式コメント)。1コミットに複数のトレーラを許すのは、
+    複数の承認記録にまたがる変更(例: 独立役員審査 + 代表の明示承認)を表現するため。
+    """
+    pat = re.compile(rf"^{re.escape(trailer)}\s*(\S+)", re.MULTILINE)
+    return [m.group(1) for m in pat.finditer(message)]
+
+
 def has_approval_trailer(message: str, trailer: str = "Approved:") -> bool:
-    """コミット本文に ``Approved: <参照>`` トレーラ行があるか(定款第5条 C-5 様式)。"""
-    pat = re.compile(rf"^{re.escape(trailer)}\s*\S+", re.MULTILINE)
-    return bool(pat.search(message))
+    """コミット本文に ``Approved: <参照>`` トレーラ行があるか(存在検査のみ)。"""
+    return bool(approval_trailer_refs(message, trailer))
+
+
+def decision_ref_id(ref: str) -> int | None:
+    """トレーラ参照が ``governance.decisions`` の ID 形式なら整数、違えば None。
+
+    受理する表記は裸の数字(``123``)と ``decision:123``。Issue URL 等は None を返し、
+    従来どおり存在検査までで扱う(URL の実在照合は GitHub API が必要 — 未実装)。
+    """
+    m = _DECISION_REF_RE.match(ref)
+    return int(m.group(1)) if m else None
+
+
+def verify_decision_refs(conn: Any, refs: list[str]) -> tuple[bool, list[str]]:
+    """トレーラ参照を ``governance.current_decisions`` と突合する。
+
+    Returns:
+        ``(承認として受理できるか, 受理できない理由)``。ID 形式の参照が1つも無ければ
+        照合対象が無いので ``(True, [])``(従来どおりトレーラの存在をもって受理)。
+        ID 形式が1つでもある場合は、**そのうち少なくとも1つが有効な承認**
+        (``effective_decision`` が ``approve`` / ``deemed``)であることを要求する。
+
+    **否認済みを受理しない**のが本関数の存在理由である(独立役員審査 0021 C-5)。
+    ``governance.decisions`` を直読すると、代表が否認した承認を A-18 が承認として受理し、
+    否認された変更(= 取消義務が発生している変更)が無承認変更として検出されない。
+    現決定 view は否認を反映して ``vetoed`` を返すため、view 経由でのみ突合する。
+    """
+    from ryza.governance.decisions import current_decision_by_id
+
+    ids = [i for i in (decision_ref_id(r) for r in refs) if i is not None]
+    if not ids:
+        return True, []
+    problems: list[str] = []
+    for decision_id in ids:
+        row = current_decision_by_id(conn, decision_id)
+        if row is None:
+            problems.append(f"承認記録 id={decision_id} が governance.decisions に存在しない")
+            continue
+        effective = str(row["effective_decision"])
+        if effective in APPROVED_DECISIONS:
+            return True, []
+        if effective == "vetoed":
+            problems.append(
+                f"承認記録 id={decision_id} は代表により否認済み"
+                f"(recorded={row['recorded_decision']} / 取消義務が発生している)"
+            )
+        else:
+            problems.append(f"承認記録 id={decision_id} は decision='{effective}' で承認ではない")
+    return False, problems
 
 
 def _find_introducing_merge(
@@ -195,13 +264,21 @@ def check_protected_commits(
     gov: dict[str, Any],
     *,
     since_commit: str | None = RATIFICATION_COMMIT,
+    conn: Any | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """A-18-1: 保護領域に触れた無承認コミットの一覧と、検査したコミット数を返す。
 
     承認とみなす条件(定款附則):
-      (a) コミット本文の ``Approved:`` トレーラ
+      (a) コミット本文の ``Approved:`` トレーラ。``conn`` が与えられ、参照が
+          ``governance.decisions`` の ID 形式なら :func:`verify_decision_refs` で実在照合し、
+          **否認済み・却下・不在は承認と見なさない**
       (b) GitHub マージ PR 経由 = ``Merge pull request`` マージコミットの配下で main に到達
     ``since_commit``(批准コミット)以前のコミットは ``rev-list since..HEAD`` により対象外。
+
+    **トレーラが無効なら (b) では救済しない**: 「この承認記録で承認された」と明示的に
+    主張しているコミットが、その記録の否認によって主張を失った場合、PR 経由であることを
+    理由に承認扱いへ戻すと否認が監査から見えなくなる。否認は取消義務(定款第3条)を
+    生じさせるので、取消されるまでは無承認変更として列挙されるのが正しい。
     """
     repo = str(repo_path)
     if since_commit and not _git_ok(repo, "cat-file", "-e", f"{since_commit}^{{commit}}"):
@@ -229,9 +306,17 @@ def check_protected_commits(
             continue
 
         message = _git(repo, "log", "-1", "--format=%B", sha)
-        if has_approval_trailer(message, trailer):
-            continue
-        if is_merge:
+        refs = approval_trailer_refs(message, trailer)
+        trailer_reason: str | None = None
+        if refs:
+            accepted, problems = (True, []) if conn is None else verify_decision_refs(conn, refs)
+            if accepted:
+                continue
+            trailer_reason = "Approved トレーラの承認記録が有効でない: " + "; ".join(problems)
+
+        if trailer_reason is not None:
+            reason = trailer_reason
+        elif is_merge:
             # マージ自身の差分は PR 件名では承認と見なさない(レビューはブランチ内容に対する
             # もので、マージ時に持ち込まれた差分をカバーしない)。トレーラ必須。
             reason = "マージ自身のコンフリクト解消差分(evil merge)で Approved トレーラなし"
@@ -401,10 +486,18 @@ def run_a18(
     since_commit: str | None = RATIFICATION_COMMIT,
     pr_since_commit: str | None = PR_RULE_BASELINE_COMMIT,
     version_pairs: tuple[tuple[str, str], ...] = VERSION_PAIRS,
+    conn: Any | None = None,
 ) -> dict[str, Any]:
-    """A-18 の4検査を実行して構造化 dict を返す(DB・Discord に依存しない純検査)。"""
+    """A-18 の4検査を実行して構造化 dict を返す(git と設定ファイルのみの検査)。
+
+    ``conn`` を渡すと A-18-1 が ``Approved:`` トレーラの参照先(``governance.decisions``
+    の ID 形式)を ``governance.current_decisions`` と突合する(read-only)。渡さない
+    場合は従来どおりトレーラの存在検査までで、その旨を notes に載せる。
+    """
     gov = load_governance(repo_path, governance_path)
-    violations, checked = check_protected_commits(repo_path, gov, since_commit=since_commit)
+    violations, checked = check_protected_commits(
+        repo_path, gov, since_commit=since_commit, conn=conn
+    )
     direct_pushes, fp_checked = check_direct_pushes(repo_path, since_commit=pr_since_commit)
     return {
         "as_of": datetime.now(UTC).isoformat(),
@@ -416,10 +509,14 @@ def run_a18(
         "pr_since_commit": pr_since_commit,
         "checked_first_parent": fp_checked,
         "direct_pushes": direct_pushes,
+        "decision_refs_verified": conn is not None,
         # 既知の限界は毎回開示する(独立役員審査条件)+ 個別の注記(登録漏れ・鮮度)。
         "notes": [
             *_coverage_notes(gov),
             *_staleness_note(repo_path),
+            *([] if conn is not None else [
+                "DB 接続なしの実行のため Approved トレーラの承認記録(否認済みか)は未照合"
+            ]),
             *STANDARD_DISCLOSURES,
         ],
     }
@@ -537,21 +634,23 @@ def run_and_report(
 ) -> dict[str, Any]:
     """A-18 を実行し、所見があれば(または ``always_report``)#運営 へ enqueue する。
 
-    ops-weekly など他ジョブからの呼び出し口。``dry_run`` では DB に接続せずログのみ。
+    ops-weekly など他ジョブからの呼び出し口。``dry_run`` では DB に接続せずログのみ
+    (このとき ``Approved:`` トレーラの承認記録との突合は行われない — notes に開示する)。
+
+    通常実行では**検査より先に接続を開き、その接続を検査へ渡す**。トレーラが指す
+    ``governance.decisions`` の ID を ``current_decisions`` と突合するため
+    (否認済みの承認を承認として受理しないため)であり、読取と警告投入を同一接続に
+    まとめることで、検査時点と報告時点で承認状態が食い違う窓も狭くなる。
     """
-    result = run_a18(repo_path, since_commit=since_commit, pr_since_commit=pr_since_commit)
-    report = has_findings(result) or always_report
     if dry_run:
+        result = run_a18(repo_path, since_commit=since_commit, pr_since_commit=pr_since_commit)
         log.info(
             "[DRY_RUN] A-18 結果: violations=%d mismatches=%d declarations=%d "
             "direct_pushes=%d(enqueue %s)",
             len(result["violations"]), len(result["mismatches"]), len(result["declarations"]),
             len(result["direct_pushes"]),
-            "対象" if report else "不要",
+            "対象" if (has_findings(result) or always_report) else "不要",
         )
-        return result
-    if not report:
-        log.info("A-18: 所見なし(enqueue しない)")
         return result
 
     from ryza.db.conn import connect
@@ -560,10 +659,16 @@ def run_and_report(
     run = start_run("audit.a18", {"repo": str(repo_path)})
     conn = connect()
     try:
-        oid = enqueue_alert(conn, result, run.run_id)
+        result = run_a18(
+            repo_path, since_commit=since_commit, pr_since_commit=pr_since_commit, conn=conn
+        )
+        if has_findings(result) or always_report:
+            oid = enqueue_alert(conn, result, run.run_id)
+            log.info("A-18 警告を enqueue: outbox_id=%s", oid)
+        else:
+            log.info("A-18: 所見なし(enqueue しない)")
         conn.commit()
         run.finish("success")
-        log.info("A-18 警告を enqueue: outbox_id=%s", oid)
     except Exception:
         conn.rollback()
         run.finish("failed")

@@ -197,6 +197,154 @@ def test_evil_merge_with_trailer_is_ok(repo):
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# A-18-1 Approved トレーラの実在照合(governance.current_decisions との突合)
+#
+# 「トレーラがある」で受理すると、代表が否認した承認を A-18 が承認として受理し、
+# 取消義務が生じている変更が無承認変更として検出されない(独立役員審査 0021 C-5)。
+# 照合は必ず現決定 view 経由で行い、否認済みは受理しない。
+# ────────────────────────────────────────────────────────────────────────────
+def test_decision_ref_id_parsing():
+    assert a18.decision_ref_id("123") == 123
+    assert a18.decision_ref_id("decision:45") == 45
+    assert a18.decision_ref_id("https://github.com/x/y/issues/1") is None
+    assert a18.decision_ref_id("#12") is None
+
+
+def test_approval_trailer_refs_collects_all():
+    msg = "fix: x\n\nApproved: 12\nApproved: https://github.com/x/y/issues/3\n"
+    assert a18.approval_trailer_refs(msg) == ["12", "https://github.com/x/y/issues/3"]
+
+
+def _deemed(conn, run_id, proposal_ref: str) -> int:
+    """みなし承認を1件記録し decision id を返す(通知と同一トランザクション)。"""
+    from ryza.governance import notices
+
+    return notices.announce_deemed_approval(
+        conn, proposal_ref, "pr", "保護領域の変更", run_id
+    ).decision.id
+
+
+def _commit_with_trailer(r: Path, ref: str) -> str:
+    return _commit(
+        r, "docs/protected.md", f"v-{ref}\n", f"docs: 保護領域変更\n\nApproved: {ref}"
+    )
+
+
+def test_deemed_decision_trailer_is_accepted(repo, conn, run_id):
+    """みなし承認(deemed)を指すトレーラは承認記録として受理される(0019 C-3 の⑤)。"""
+    r, since = repo
+    decision_id = _deemed(conn, run_id, "https://github.com/x/y/pull/101")
+    _commit_with_trailer(r, str(decision_id))
+    gov = a18.load_governance(r)
+    violations, _ = a18.check_protected_commits(r, gov, since_commit=since, conn=conn)
+    assert violations == []
+    conn.rollback()
+
+
+def test_vetoed_decision_trailer_is_violation(repo, conn, run_id):
+    """否認された承認を指すトレーラは受理しない(取消されるまで無承認変更)。"""
+    from ryza.governance import notices
+
+    r, since = repo
+    decision_id = _deemed(conn, run_id, "https://github.com/x/y/pull/102")
+    notices.apply_veto(
+        conn, "https://github.com/x/y/pull/102", "リスク上限を緩めるため",
+        vetoed_by="424242", owner_ids=("424242",), run_id=run_id,
+    )
+    _commit_with_trailer(r, str(decision_id))
+    gov = a18.load_governance(r)
+    violations, _ = a18.check_protected_commits(r, gov, since_commit=since, conn=conn)
+    assert len(violations) == 1
+    assert "否認済み" in violations[0]["reason"]
+    conn.rollback()
+
+
+def test_pr_merge_does_not_rescue_a_vetoed_trailer(repo, conn, run_id):
+    """PR マージ経由でも、トレーラが否認済みの承認を指すなら違反のまま。"""
+    from ryza.governance import notices
+
+    r, since = repo
+    decision_id = _deemed(conn, run_id, "https://github.com/x/y/pull/103")
+    notices.apply_veto(
+        conn, "https://github.com/x/y/pull/103", "否認",
+        vetoed_by="424242", owner_ids=("424242",), run_id=run_id,
+    )
+    _git(r, "checkout", "-q", "-b", "feature-vetoed")
+    sha = _commit(
+        r, "src/prot/ks.py", "x = 1\n", f"feat: 保護コード\n\nApproved: {decision_id}"
+    )
+    _git(r, "checkout", "-q", "main")
+    _git(r, "merge", "--no-ff", "-q", "feature-vetoed", "-m", "Merge pull request #7 from k/f")
+    gov = a18.load_governance(r)
+    violations, _ = a18.check_protected_commits(r, gov, since_commit=since, conn=conn)
+    assert [v["commit"] for v in violations] == [sha[:12]]
+    assert "否認済み" in violations[0]["reason"]
+    conn.rollback()
+
+
+def test_missing_decision_record_is_violation(repo, conn):
+    """存在しない決定 ID を指すトレーラは承認と見なさない(自己申告の空手形)。"""
+    r, since = repo
+    _commit_with_trailer(r, "999999999")
+    gov = a18.load_governance(r)
+    violations, _ = a18.check_protected_commits(r, gov, since_commit=since, conn=conn)
+    assert len(violations) == 1
+    assert "存在しない" in violations[0]["reason"]
+    conn.rollback()
+
+
+def test_rejected_decision_trailer_is_violation(repo, conn):
+    """却下された決定を指すトレーラも承認ではない。"""
+    from ryza.bot.approvals import record_decision
+
+    r, since = repo
+    got = record_decision(conn, "rejected-proposal", "reject", "424242", ("424242",), kind="pr")
+    _commit_with_trailer(r, str(got.id))
+    gov = a18.load_governance(r)
+    violations, _ = a18.check_protected_commits(r, gov, since_commit=since, conn=conn)
+    assert len(violations) == 1
+    assert "承認ではない" in violations[0]["reason"]
+    conn.rollback()
+
+
+def test_issue_url_trailer_is_accepted_without_lookup(repo, conn):
+    """Issue URL 形式は照合対象外(GitHub API 未実装 — 従来どおり存在検査まで)。"""
+    r, since = repo
+    _commit_with_trailer(r, "https://github.com/x/y/issues/1")
+    gov = a18.load_governance(r)
+    violations, _ = a18.check_protected_commits(r, gov, since_commit=since, conn=conn)
+    assert violations == []
+    conn.rollback()
+
+
+def test_without_conn_vetoed_trailer_is_not_detected(repo, conn, run_id):
+    """conn 無しでは照合できない。従来動作を保ちつつ、その限界を notes で開示する。"""
+    from ryza.governance import notices
+
+    r, since = repo
+    decision_id = _deemed(conn, run_id, "https://github.com/x/y/pull/104")
+    notices.apply_veto(
+        conn, "https://github.com/x/y/pull/104", "否認",
+        vetoed_by="424242", owner_ids=("424242",), run_id=run_id,
+    )
+    _commit_with_trailer(r, str(decision_id))
+    gov = a18.load_governance(r)
+    violations, _ = a18.check_protected_commits(r, gov, since_commit=since, conn=None)
+    assert violations == []  # 検出できない(= conn を渡さない実行の限界)
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert result["decision_refs_verified"] is False
+    assert any("未照合" in n for n in result["notes"])
+    conn.rollback()
+
+
+def test_run_a18_with_conn_marks_refs_verified(repo, conn):
+    r, since = repo
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since, conn=conn)
+    assert result["decision_refs_verified"] is True
+    conn.rollback()
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # glob 変換
 # ────────────────────────────────────────────────────────────────────────────
 def test_glob_to_regex_semantics():
