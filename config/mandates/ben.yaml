@@ -1,0 +1,13 @@
+# FM マンデート: Ben(承認: 2026-08-03 投資委員会 — 値の決定は設計リードへ委任)
+# 正: docs/design/81-fm-mandates.md §3。IPS(config/ips.yaml)に常に劣後 — 狭める方向のみ有効
+fm: ben
+version: "1"
+approved_at: "2026-08-03"
+universe: [jp_equity_cash, us_equity_cash]
+style_reference: {turnover: low, holding: long_term}
+capital_jpy: 2000000
+pod_dd_limit: 0.20
+pod_concentration_limit: 0.40
+additional_prohibitions: [derivatives, short_selling, margin]
+short: false
+benchmark: universe_equal_weight_buy_and_hold

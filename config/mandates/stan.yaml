@@ -1,0 +1,13 @@
+# FM マンデート: Stan(承認: 2026-08-03 投資委員会 — 値の決定は設計リードへ委任)
+# 正: docs/design/81-fm-mandates.md §3。IPS(config/ips.yaml)に常に劣後 — 狭める方向のみ有効
+fm: stan
+version: "1"
+approved_at: "2026-08-03"
+universe: [index_futures, index_etf, fx, rates]
+style_reference: {turnover: mid, holding: days_to_weeks}
+capital_jpy: 2000000
+pod_dd_limit: 0.25
+pod_concentration_limit: 0.50   # 指数・FX のみのため
+additional_prohibitions: [single_name_equity]
+short: true
+benchmark: universe_equal_weight_buy_and_hold

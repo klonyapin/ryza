@@ -1,0 +1,13 @@
+# FM マンデート: Jim(承認: 2026-08-03 投資委員会 — 値の決定は設計リードへ委任)
+# 正: docs/design/81-fm-mandates.md §3。IPS(config/ips.yaml)に常に劣後 — 狭める方向のみ有効
+fm: jim
+version: "1"
+approved_at: "2026-08-03"
+universe: [liquid_equity, etf, index_futures]
+style_reference: {turnover: high, holding: intraday_to_days}
+capital_jpy: 2000000
+pod_dd_limit: 0.15
+pod_concentration_limit: 0.20
+additional_prohibitions: [discretionary_trades_outside_signals]
+short: hedge_futures_only
+benchmark: universe_equal_weight_buy_and_hold
