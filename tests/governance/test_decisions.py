@@ -358,7 +358,8 @@ def test_cli_dry_run_prints_notice_embed(capsys):
 
     rc = main([
         "--deemed", "--proposal-ref", "https://x/pull/1",
-        "--kind", "pr", "--notice", "保護領域の変更", "--dry-run",
+        "--kind", "pr", "--notice", "保護領域の変更",
+        "--review", "docs/reviews/x-review.md", "--dry-run",
     ])
     assert rc == 0
     embed = json.loads(capsys.readouterr().out)
@@ -442,6 +443,61 @@ def test_cli_deemed_for_pr_requires_a_review_reference(fake_gh, capsys):
     rc = main(["--deemed-for-pr", "99", "--dry-run"])
     assert rc == 1
     assert "--review" in capsys.readouterr().err
+
+
+# ── --review の必須性(後続配線審査 後-1)────────────────────────────────────
+# 旧実装の条件は `not (args.review or args.notice)` で、--notice を渡せば審査参照ゼロで
+# rc=0 になった(審査が実証コマンドで再現)。--notice は --review の代替にならない。
+def test_cli_deemed_for_pr_rejects_notice_without_review(fake_gh, capsys):
+    """**審査の実証コマンド**: `--deemed-for-pr 99 --notice x` は拒否される。"""
+    fake_gh(PR_JSON)
+    rc = main(["--deemed-for-pr", "99", "--notice", "審査なしで発効", "--dry-run"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "--review" in err and "--notice で文面を差し替えても免除されない" in err
+
+
+def test_cli_deemed_pr_kind_requires_review(capsys):
+    """**審査の実証コマンド**: 旧来形 `--deemed --kind pr --notice x` も拒否される。"""
+    rc = main([
+        "--deemed", "--proposal-ref", "https://github.com/klonyapin/ryza/pull/1",
+        "--kind", "pr", "--notice", "審査なしで発効", "--dry-run",
+    ])
+    assert rc == 1
+    assert "--review" in capsys.readouterr().err
+
+
+def test_cli_deemed_non_pr_kind_does_not_require_review(capsys):
+    """PR 以外の kind には課さない — 独立役員審査が前置されない手続を塞がないため。"""
+    rc = main([
+        "--deemed", "--proposal-ref", "ips-2026-09", "--kind", "other",
+        "--notice", "IPS 月次改訂", "--dry-run",
+    ])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["fields"]
+
+
+def test_cli_review_reference_reaches_the_notice_body(capsys):
+    """--review を渡した手書き文面にも審査参照の行が残る(引数を渡させるだけにしない)。"""
+    rc = main([
+        "--deemed", "--proposal-ref", "https://github.com/klonyapin/ryza/pull/2",
+        "--kind", "pr", "--notice", "保護領域 X の変更",
+        "--review", "docs/reviews/x-review.md", "--dry-run",
+    ])
+    assert rc == 0
+    body = json.loads(capsys.readouterr().out)["description"]
+    assert "保護領域 X の変更" in body and "独立役員審査: docs/reviews/x-review.md" in body
+
+
+def test_cli_review_line_is_not_duplicated(capsys):
+    """文面に既に審査参照が書かれていれば二重に足さない。"""
+    rc = main([
+        "--deemed", "--proposal-ref", "https://github.com/klonyapin/ryza/pull/3",
+        "--kind", "pr", "--notice", "独立役員審査: docs/reviews/x-review.md で完了",
+        "--review", "docs/reviews/x-review.md", "--dry-run",
+    ])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["description"].count("docs/reviews/x-review.md") == 1
 
 
 def test_cli_deemed_for_pr_refuses_a_closed_pr(fake_gh, capsys):
@@ -531,7 +587,10 @@ def test_cli_records_and_notifies_on_a_fresh_connection(migrated_db, monkeypatch
     ref = "https://github.com/klonyapin/ryza/pull/9911"
     run_id = None
     try:
-        rc = main(["--deemed", "--proposal-ref", ref, "--kind", "pr", "--notice", "保護領域の変更"])
+        rc = main([
+            "--deemed", "--proposal-ref", ref, "--kind", "pr", "--notice", "保護領域の変更",
+            "--review", "docs/reviews/deemed-wiring-independent-review.md",
+        ])
         with inner.cursor() as cur:
             cur.execute(
                 "SELECT channel_msg_id FROM governance.decisions WHERE proposal_ref = %s", (ref,)

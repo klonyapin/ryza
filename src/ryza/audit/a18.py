@@ -32,12 +32,15 @@
                           ``CONFIRMATION_COUNT_ALERT`` 件で警告する。DB 接続がある実行でのみ動く
   A-18-7 承認記録漏れ    … ``DEEMED_RECORD_BASELINE_COMMIT`` 以降の first-parent 上の PR マージ
                           (親2・件名が ``Merge pull request``)で保護領域に触れたもののうち、
-                          ``Approved:`` トレーラの参照でも PR 番号(``proposal_ref`` の
-                          ``.../pull/<N>``)でも承認記録が引けないものを列挙する。みなし承認の
-                          発効通知は ``python -m ryza.governance.decisions --deemed`` を人が
-                          叩くことでしか出ず(自動起票は未実装 — 独立役員審査 中-7)、叩き忘れは
-                          「通知なき発効」になる。A-18-5 が「記録はあるが未配送」を見るのに対し、
-                          本検査は「記録そのものが無い」を見る。DB 接続がある実行でのみ動く
+                          **その PR に帰属する**承認記録(``proposal_ref`` が
+                          ``https://github.com/<slug>/pull/<N>`` に完全一致)が無いものを
+                          列挙する。トレーラの参照は、指す決定の ``proposal_ref`` がこの PR
+                          である場合にのみ帰属と認める(別 PR の記録の複写で緑にしない)。
+                          みなし承認の発効通知は ``python -m ryza.governance.decisions
+                          --deemed`` を人が叩くことでしか出ず(自動起票は未実装 — 独立役員審査
+                          中-7)、叩き忘れは「通知なき発効」になる。A-18-5 が「記録はあるが
+                          未配送」を見るのに対し、本検査は「記録そのものが無い」を見る。
+                          緑には必ず分母(検査対象 PR 数)を出す。DB 接続がある実行でのみ動く
 
 **A-18-6 をここに置く理由**(ops-weekly VM 移設審査 2026-08-04 の代替案(d)・設計リード裁定):
 この指標は決議精緻化審査(2026-08-03)が新設した統制で、当初は週次ジョブ ops-weekly の
@@ -1436,44 +1439,82 @@ def check_resolution_bypass(conn: Any) -> dict[str, Any]:
 # いない」を検出するが、**そもそも記録が無い**ケースはどの検査にも掛からなかった。
 # 本検査はその穴を塞ぐ: 保護領域に触れた PR マージに対応する承認記録が DB に無ければ列挙する。
 # ────────────────────────────────────────────────────────────────────────────
-def _decision_exists(conn: Any, ref: str) -> bool:
-    """トレーラ参照に対応する承認記録が実在するか(否認済みでも「ある」と数える)。
+@dataclass(frozen=True)
+class UnrecordedPRScan:
+    """A-18-7 の走査結果。
 
-    本検査が見るのは**記録の有無**であって有効性ではない。否認済みの承認を参照する
-    コミットは A-18-1 が既に無承認変更として列挙しており、ここで二重に鳴らすと
-    「CLI の叩き忘れ」という本検査の信号が別種の違反に埋もれる。
+    ``checked`` は**緑の分母**(検査した保護領域 PR マージ数)である。件数を持たない緑は
+    「漏れが無い」と「そもそも1件も見ていない」を同じ表示にする —— squash マージへ移行して
+    ``Merge pull request`` 件名が消えれば、検査は静かに 0 件走査の ✅ を出し続ける
+    (後続配線審査 後-4。PR 実在照合が縮退件数を必ず出す流儀と同じ)。
+
+    ``repo_slug`` が None の実行は ``proposal_ref`` のリポジトリ部分を照合できず、
+    PR 番号の末尾一致までしか見ていない。黙って緑にせず notes に開示する。
+    """
+
+    findings: list[dict[str, Any]]
+    checked: int
+    repo_slug: str | None
+
+
+def pr_proposal_ref(slug: str, pr_number: int) -> str:
+    """``--deemed`` が記録する PR の ``proposal_ref``(= GitHub の ``html_url``)。"""
+    return f"https://github.com/{slug}/pull/{pr_number}"
+
+
+def _same_ref(a: Any, b: Any) -> bool:
+    """``proposal_ref`` の同一性(末尾スラッシュと大小文字の揺れだけ吸収する)。"""
+    return str(a or "").strip().rstrip("/").lower() == str(b or "").strip().rstrip("/").lower()
+
+
+def _resolve_trailer_decision(conn: Any, ref: str) -> dict[str, Any] | None:
+    """トレーラ参照から決定行を引く(引けなければ None)。
+
+    否認済みでも行は返す。本検査が見るのは**記録の有無と帰属**であって有効性ではない
+    —— 否認済みの承認を参照するコミットは A-18-1 が既に無承認変更として列挙しており、
+    ここで二重に鳴らすと「CLI の叩き忘れ」という本検査の信号が別種の違反に埋もれる。
     """
     from ryza.governance.decisions import current_decision, current_decision_by_id
 
     decision_id = decision_ref_id(ref)
     if decision_id is not None:
-        return current_decision_by_id(conn, decision_id) is not None
+        return current_decision_by_id(conn, decision_id)
     if _BARE_NUMBER_RE.match(ref):
-        return False  # 裸の数字は決定 ID として解釈しない(重要-2)
-    return current_decision(conn, ref) is not None
+        return None  # 裸の数字は決定 ID として解釈しない(重要-2)
+    return current_decision(conn, ref)
 
 
-def decision_for_pr_number(conn: Any, pr_number: int) -> dict[str, Any] | None:
-    """PR 番号に対応する承認記録を ``proposal_ref`` の末尾一致で引く。
+def _attributed_to_pr(row: dict[str, Any], expected: str | None, pr_number: int) -> bool:
+    """決定行がこの PR に帰属するか。
 
-    ``--deemed`` CLI が書く ``proposal_ref`` は PR URL(``.../pull/<N>``)であり、
-    マージコミットの件名から復元できるのは PR 番号だけである。トレーラが無い PR
-    (= そもそも承認記録を指していないマージ)でも、番号から記録の有無を確かめられる
-    ようにするための読み口。``LIKE '%/pull/<N>'`` は末尾固定なので ``/pull/1`` が
-    ``/pull/12`` に誤一致しない。
+    ``expected``(自リポの PR URL)が分かる実行では**完全一致のみ**を帰属とする。
+    ``origin`` を解決できない実行(remote の無い一時リポジトリ等)は末尾一致まで落とし、
+    リポジトリ部分を照合できていないことを報告の notes に開示する。
+    """
+    if expected is not None:
+        return _same_ref(row["proposal_ref"], expected)
+    return str(row["proposal_ref"] or "").rstrip("/").endswith(f"/pull/{pr_number}")
+
+
+def decisions_for_pr_number(conn: Any, pr_number: int) -> list[dict[str, Any]]:
+    """``proposal_ref`` の末尾が ``/pull/<N>`` の決定を全て返す(リポジトリ部分は問わない)。
+
+    **末尾一致は帰属の判定ではなく所見の材料である**(後続配線審査 後-5)。他リポジトリの
+    ``/pull/610`` の記録で自リポ #610 を緑にすると、fail-closed の検査に fail-open が
+    1箇所入る。帰属は :func:`pr_proposal_ref` との完全一致で判定し、末尾だけ一致する行は
+    「別リポジトリの記録」として所見の理由に出す。``LIKE '%%/pull/<N>'`` は末尾固定なので
+    ``/pull/1`` が ``/pull/12`` に誤一致しない。
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT decision_id, proposal_ref, recorded_decision, effective_decision "
             "FROM governance.current_decisions "
-            "WHERE proposal_ref LIKE %s ORDER BY decision_id LIMIT 1",
+            "WHERE proposal_ref LIKE %s ORDER BY decision_id",
             (f"%/pull/{pr_number}",),
         )
-        row = cur.fetchone()
-        if row is None:
-            return None
+        rows = cur.fetchall()
         columns = [d.name for d in cur.description]
-    return dict(zip(columns, row, strict=True))
+    return [dict(zip(columns, row, strict=True)) for row in rows]
 
 
 def check_unrecorded_protected_prs(
@@ -1482,17 +1523,31 @@ def check_unrecorded_protected_prs(
     conn: Any,
     *,
     since_commit: str | None = DEEMED_RECORD_BASELINE_COMMIT,
-) -> list[dict[str, Any]]:
-    """A-18-7: 保護領域に触れた PR マージのうち、承認記録が DB に無いものを列挙する。
+    repo_slug: str | None = None,
+) -> UnrecordedPRScan:
+    """A-18-7: 保護領域 PR のうち、**その PR に帰属する**承認記録が DB に無いものを列挙する。
 
-    判定は2段構え。マージコミットの ``Approved:`` トレーラが指す参照に対応する記録が
-    あれば良し、無ければ **PR 番号**(``proposal_ref`` の ``.../pull/<N>``)で引き直す。
-    どちらでも見つからなければ「``--deemed`` が実行されていない」= #承認 への発効通知が
-    出ていない疑いとして列挙する。
+    帰属の判定は ``proposal_ref == https://github.com/<slug>/pull/<N>`` の完全一致1本である。
+    トレーラの参照は、そこから引いた決定の ``proposal_ref`` がこの PR を指すときだけ帰属と
+    認める —— 「参照先の決定が実在するか」だけを見ると、**別 PR の承認記録で緑になる**
+    (後続配線審査 後-3: PR #601 だけ ``--deemed`` して #601/#602 に同じトレーラを複写すると
+    #602 が所見ゼロで通る)。追い PR へのトレーラ複写は事故で起きやすい経路であり、
+    「承認記録がある」ではなく「**この変更の**承認記録がある」を検査の意味にする。
 
     検査対象は first-parent 上の PR マージ(件名が ``Merge pull request``・**親2**)で、
     ``-m --first-parent`` の差分(= main に持ち込まれた内容)が保護領域に触れるもの。
     非 PR マージ・直 push は A-18-4 の担当なのでここでは扱わない。
+
+    Args:
+        repo_slug: ``owner/name``。省略時は ``origin`` remote から解決する
+            (:func:`origin_slug`)。解決できない実行は PR 番号の末尾一致までしか
+            照合できず、``UnrecordedPRScan.repo_slug=None`` として報告に開示する
+
+    **件名偽装は本検査では封じられない**(後続配線審査 後-6): ``--deemed`` は
+    ``proposal_ref`` を無検証で受けるため、架空の PR 番号を指す記録は作れる。したがって
+    「件名が偽なら記録も引けない」という関係は成立せず、偽装の封鎖は A-18-1 の
+    :class:`PRVerifier`(GitHub API による実在+マージ照合。**API 不達時は fail-open** で
+    縮退し、その件数は報告に出る)が担う。A-18-7 はその照合に依存する。
 
     **限界**: 承認記録が DB の外(Issue 決議など)にある PR は記録なしと判定される。
     定款第3条の発効要件は ``#承認`` への通知であり、その通知は ``governance.decisions``
@@ -1504,14 +1559,15 @@ def check_unrecorded_protected_prs(
     if since_commit and not _git_ok(repo, "cat-file", "-e", f"{since_commit}^{{commit}}"):
         raise ValueError(f"承認記録照合の基準コミットがリポジトリに存在しない: {since_commit}")
 
+    slug = repo_slug or origin_slug(repo)
     patterns = protected_patterns(gov)
     trailer = str(gov.get("approval_trailer") or "Approved:")
     findings: list[dict[str, Any]] = []
+    checked = 0
     for sha in _rev_list(repo, since_commit, "--first-parent", "--merges"):
         subject = _git(repo, "log", "-1", "--format=%s", sha).strip()
         # 件名からの PR 番号抽出は A-18-1/4 と同じ読み口を使う(件名は自己申告という限界も
-        # 共有する)。**実在照合(PRVerifier)は掛けない** — 件名が偽なら対応する承認記録も
-        # 引けず、本検査は「記録が無い」として拾うため、偽装は追加の照合なしに検出される。
+        # 共有する。偽装の封鎖は A-18-1 の PRVerifier — 上記 docstring)。
         pr_number = pr_number_from_subject(subject)
         if pr_number is None:
             continue
@@ -1528,17 +1584,37 @@ def check_unrecorded_protected_prs(
         touched = match_protected(files, patterns)
         if not touched:
             continue
+        checked += 1
 
+        expected = pr_proposal_ref(slug, pr_number) if slug else None
         refs = approval_trailer_refs(_git(repo, "log", "-1", "--format=%B", sha), trailer)
-        if any(_decision_exists(conn, ref) for ref in refs):
+        trailer_rows = [(ref, _resolve_trailer_decision(conn, ref)) for ref in refs]
+        by_number = decisions_for_pr_number(conn, pr_number)
+
+        candidates = by_number + [row for _ref, row in trailer_rows if row is not None]
+        if any(_attributed_to_pr(row, expected, pr_number) for row in candidates):
             continue
-        if decision_for_pr_number(conn, pr_number) is not None:
-            continue
-        reason = (
-            f"Approved トレーラの参照({', '.join(refs)})に対応する承認記録が無い"
-            if refs
-            else "Approved トレーラも PR 番号に対応する承認記録も無い"
+
+        # ここから先は所見。「なぜ帰属する記録が無いのか」を切り分けられる形で残す。
+        other_proposals = sorted(
+            {f"{ref} → {row['proposal_ref']}" for ref, row in trailer_rows if row is not None}
         )
+        other_repos = sorted({str(row["proposal_ref"]) for row in by_number})
+        unresolved = sorted({ref for ref, row in trailer_rows if row is None})
+        parts: list[str] = []
+        if other_proposals:
+            parts.append(
+                "Approved トレーラが別提案の承認記録を指している"
+                f"({', '.join(other_proposals)})"
+            )
+        if other_repos:
+            parts.append(f"PR 番号は一致するが別リポジトリの記録({', '.join(other_repos)})")
+        if unresolved:
+            parts.append(
+                f"Approved トレーラの参照({', '.join(unresolved)})に対応する承認記録が無い"
+            )
+        if not parts:
+            parts.append("Approved トレーラも当該 PR を指す承認記録も無い")
         findings.append(
             {
                 "merge": sha[:12],
@@ -1547,13 +1623,14 @@ def check_unrecorded_protected_prs(
                 "pr_number": pr_number,
                 "files": touched,
                 "trailer_refs": refs,
+                "expected_ref": expected,
                 "reason": (
-                    f"{reason} — みなし承認の発効通知(python -m ryza.governance.decisions "
-                    "--deemed)が実行されていない疑い"
+                    f"{'; '.join(parts)} — この PR に帰属する承認記録が無い"
+                    "(python -m ryza.governance.decisions --deemed-for-pr が未実行の疑い)"
                 ),
             }
         )
-    return findings
+    return UnrecordedPRScan(findings=findings, checked=checked, repo_slug=slug)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1602,12 +1679,14 @@ def run_a18(
     untracked_deemed = 0
     resolution_bypass: dict[str, Any] | None = None
     unrecorded_prs: list[dict[str, Any]] = []
+    deemed_scan: UnrecordedPRScan | None = None
     if conn is not None:
         unnotified, untracked_deemed = check_unnotified_deemed(conn)
         resolution_bypass = check_resolution_bypass(conn)
-        unrecorded_prs = check_unrecorded_protected_prs(
+        deemed_scan = check_unrecorded_protected_prs(
             repo_path, gov, conn, since_commit=deemed_since_commit
         )
+        unrecorded_prs = deemed_scan.findings
     return {
         "as_of": datetime.now(UTC).isoformat(),
         "since_commit": since_commit,
@@ -1634,6 +1713,9 @@ def run_a18(
         "resolution_bypass": resolution_bypass,
         "deemed_since_commit": deemed_since_commit,
         "unrecorded_prs": unrecorded_prs,
+        # 緑の分母(後-4)。検査した保護領域 PR マージ数と、リポジトリ部分を照合できたか。
+        "checked_protected_prs": deemed_scan.checked if deemed_scan else 0,
+        "deemed_repo_slug": deemed_scan.repo_slug if deemed_scan else None,
         # 既知の限界は毎回開示する(独立役員審査条件)+ 個別の注記(登録漏れ・鮮度)。
         "notes": [
             *_coverage_notes(gov),
@@ -1649,6 +1731,11 @@ def run_a18(
                 "DB 接続なしの実行のため Approved トレーラの承認記録(否認済みか)と"
                 "みなし承認の通知配送(A-18-5)・決議の批判経由(A-18-6)・"
                 "保護領域 PR の承認記録(A-18-7)は未照合"
+            ]),
+            *([] if deemed_scan is None or deemed_scan.repo_slug else [
+                "A-18-7 は origin remote から owner/repo を解決できず、承認記録の帰属を"
+                "PR 番号の末尾一致までしか照合していない(別リポジトリの /pull/<N> の記録が"
+                "救済しうる — 後続配線審査 後-5)"
             ]),
             *_trailer_notes(trailer_findings),
             *([] if not untracked_deemed else [
@@ -1918,6 +2005,7 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
     # A-18-7: 記録漏れは「気づかれないこと」自体が問題なので、0 件でも1行載せる
     # (A-18-5・A-18-6 と同じ流儀 — 沈黙を「見ていない」と区別できるようにする)。
     unrecorded = result.get("unrecorded_prs") or []
+    checked_prs = result.get("checked_protected_prs") or 0
     if unrecorded:
         lines = [
             f"- `{u['merge']}` PR #{u['pr_number']} {u['subject']}"
@@ -1926,16 +2014,27 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
         ]
         fields.append(
             {
-                "name": "⚠️ A-18-7 保護領域 PR の承認記録漏れ(--deemed の実行忘れ)",
+                "name": (
+                    f"⚠️ A-18-7 保護領域 PR の承認記録漏れ {len(unrecorded)}/{checked_prs} 件"
+                    "(--deemed-for-pr の実行忘れ)"
+                ),
                 "value": "\n".join(lines)[:1024],
                 "inline": False,
             }
         )
     elif result.get("decision_refs_verified"):
+        # **緑には必ず分母を書く**(後-4)。件数の無い ✅ は「漏れが無い」と「1件も見て
+        # いない」を同じ表示にする —— squash マージへ移行して `Merge pull request` 件名が
+        # 消えれば、検査は 0 件走査の ✅ を出し続ける。
         fields.append(
             {
                 "name": "A-18-7 保護領域 PR の承認記録",
-                "value": "✅ 記録漏れなし",
+                "value": (
+                    f"✅ 記録漏れなし(検査対象 {checked_prs} 件)"
+                    if checked_prs
+                    else "対象 PR なし(基準コミット以降に保護領域へ触れた PR マージが 0 件 — "
+                         "squash マージ運用へ移行した場合も同じ表示になる)"
+                ),
                 "inline": False,
             }
         )
@@ -2028,8 +2127,10 @@ def run_a18_readonly(repo_path: str | Path, **run_kwargs: Any) -> dict[str, Any]
     (むしろ単一の長いトランザクションは、検査中に発効した承認を最後まで見ないという別の
     ずれを作る)。
 
-    ``default_transaction_read_only`` を立てるのは監査の read-only 原則の執行点である。
-    将来この経路に書込が紛れ込んだら、静かに書かれるのではなく即座に失敗する。
+    ``default_transaction_read_only`` は**うっかり書込の検出点であって権限境界ではない**
+    (後続配線審査 後-8)。これはセッション既定にすぎず、``SET TRANSACTION READ WRITE`` で
+    上書きでき、接続ロールの書込権限も失われない。意図せず書込が紛れ込んだときに静かに
+    書かれず即座に失敗する、という早期検出のための設定であり、悪意ある書込は止められない。
     """
     from ryza.db.conn import connect
 

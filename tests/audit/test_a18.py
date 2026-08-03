@@ -1738,6 +1738,14 @@ def test_embed_shows_resolution_line_when_not_alerting():
 # 叩き忘れると保護領域の変更が #承認 への通知なしにマージされる。A-18-5 は「記録はあるが
 # 未配送」を見るので、**記録そのものが無い**この経路はどの検査にも掛かっていなかった。
 # ────────────────────────────────────────────────────────────────────────────
+#: A-18-7 テストの「自リポジトリ」。承認記録の帰属は自リポの PR URL 完全一致で判定する。
+SELF_SLUG = "klonyapin/ryza"
+
+
+def _self_pr_url(pr_no: int) -> str:
+    return f"https://github.com/{SELF_SLUG}/pull/{pr_no}"
+
+
 def _merge_protected_pr(r: Path, pr_no: int, *, trailer: str | None = None) -> str:
     """保護ファイルに触れるブランチを PR マージで main に取り込み、マージ sha を返す。"""
     branch = f"prot{pr_no}"
@@ -1751,8 +1759,27 @@ def _merge_protected_pr(r: Path, pr_no: int, *, trailer: str | None = None) -> s
     return _git(r, "rev-parse", "HEAD").strip()
 
 
-def _run_a187(r: Path, since: str, conn):
-    return a18.check_unrecorded_protected_prs(r, a18.load_governance(r), conn, since_commit=since)
+def _scan_a187(r: Path, since: str, conn, *, slug: str | None = SELF_SLUG):
+    """A-18-7 の走査結果(findings / checked / repo_slug)。
+
+    ``slug`` を明示するのは、一時リポジトリに ``origin`` を足すと :class:`a18.PRVerifier` が
+    実 API を叩きうるためである(テストはネットワークに触れない)。既定は自リポ相当。
+    """
+    return a18.check_unrecorded_protected_prs(
+        r, a18.load_governance(r), conn, since_commit=since, repo_slug=slug
+    )
+
+
+def _run_a187(r: Path, since: str, conn, *, slug: str | None = SELF_SLUG):
+    return _scan_a187(r, since, conn, slug=slug).findings
+
+
+def _run_a18_deemed(r: Path, since: str, conn=None):
+    """A-18-7 込みの run_a18(PR 実在照合は無効 — ネットワークに触れない)。"""
+    return a18.run_a18(
+        r, since_commit=since, pr_since_commit=since, deemed_since_commit=since,
+        conn=conn, verify_prs=False,
+    )
 
 
 def test_pr_number_from_subject_parses_only_pr_merges():
@@ -1770,7 +1797,8 @@ def test_a18_7_protected_pr_without_any_record_is_a_finding(repo, conn):
     assert [f["merge"] for f in findings] == [merge[:12]]
     assert findings[0]["pr_number"] == 501
     assert findings[0]["files"] == ["docs/protected.md"]
-    assert "PR 番号に対応する承認記録も無い" in findings[0]["reason"]
+    assert findings[0]["expected_ref"] == _self_pr_url(501)
+    assert "当該 PR を指す承認記録も無い" in findings[0]["reason"]
     conn.rollback()
 
 
@@ -1779,7 +1807,7 @@ def test_a18_7_deemed_record_for_the_pr_url_clears_it(repo, conn, run_id):
     r, since = repo
     _merge_protected_pr(r, 502)
     assert len(_run_a187(r, since, conn)) == 1
-    _deemed(conn, run_id, "https://github.com/klonyapin/ryza/pull/502")
+    _deemed(conn, run_id, _self_pr_url(502))
     assert _run_a187(r, since, conn) == []
     conn.rollback()
 
@@ -1788,17 +1816,65 @@ def test_a18_7_pr_number_match_is_anchored(repo, conn, run_id):
     """``/pull/50`` の記録は PR #5 を救済しない(末尾一致で誤一致させない)。"""
     r, since = repo
     _merge_protected_pr(r, 5)
-    _deemed(conn, run_id, "https://github.com/klonyapin/ryza/pull/50")
+    _deemed(conn, run_id, _self_pr_url(50))
     assert [f["pr_number"] for f in _run_a187(r, since, conn)] == [5]
     conn.rollback()
 
 
-def test_a18_7_trailer_reference_clears_it(repo, conn, run_id):
-    """PR URL 以外(IPS 改訂など)の承認記録もトレーラ経由で照合される。"""
+# ── 帰属の検査(後続配線審査 後-3・後-5)──────────────────────────────────────
+def test_a18_7_trailer_copied_from_another_pr_does_not_clear_it(repo, conn, run_id):
+    """**後-3 の実証ケース**: #601 の記録を #602 にトレーラ複写しても #602 は緑にならない。
+
+    「参照先の決定が実在するか」だけを見ると、追い PR にトレーラを複写しただけで所見が
+    消える。検査の意味は「承認記録がある」ではなく「**この変更の**承認記録がある」。
+    """
+    r, since = repo
+    _deemed(conn, run_id, _self_pr_url(601))
+    _merge_protected_pr(r, 601, trailer=_self_pr_url(601))
+    _merge_protected_pr(r, 602, trailer=_self_pr_url(601))  # 同じトレーラを複写した追い PR
+    findings = _run_a187(r, since, conn)
+    assert [f["pr_number"] for f in findings] == [602]
+    assert "別提案の承認記録を指している" in findings[0]["reason"]
+    conn.rollback()
+
+
+def test_a18_7_non_pr_proposal_ref_is_not_attribution(repo, conn, run_id):
+    """PR URL 以外(IPS 改訂など)の記録は、その PR に帰属する承認記録ではない。
+
+    トレーラから引ける決定が実在しても、``proposal_ref`` がこの PR を指していなければ
+    「この PR の発効通知が出た」証跡にはならない。理由に参照先を出して切り分けられるようにする。
+    """
     r, since = repo
     _deemed(conn, run_id, "ips-2026-09-revision")
     _merge_protected_pr(r, 503, trailer="ips-2026-09-revision")
+    findings = _run_a187(r, since, conn)
+    assert [f["pr_number"] for f in findings] == [503]
+    assert "ips-2026-09-revision" in findings[0]["reason"]
+    conn.rollback()
+
+
+def test_a18_7_other_repository_record_does_not_clear_it(repo, conn, run_id):
+    """**後-5 の実証ケース**: 他リポの ``/pull/610`` の記録が自リポ #610 を救済しない。"""
+    r, since = repo
+    _deemed(conn, run_id, "https://github.com/other/repo/pull/610")
+    _merge_protected_pr(r, 610)
+    findings = _run_a187(r, since, conn)
+    assert [f["pr_number"] for f in findings] == [610]
+    assert "別リポジトリの記録" in findings[0]["reason"]
+    # 自リポの記録を足せば緑になる(検査が「帰属」だけを見ていることの対照)。
+    _deemed(conn, run_id, _self_pr_url(610))
     assert _run_a187(r, since, conn) == []
+    conn.rollback()
+
+
+def test_a18_7_without_slug_falls_back_to_suffix_and_is_disclosed(repo, conn, run_id):
+    """origin を解決できない実行は末尾一致まで。緑にする代わりに未照合を開示する。"""
+    r, since = repo
+    _deemed(conn, run_id, "https://github.com/other/repo/pull/611")
+    _merge_protected_pr(r, 611)
+    scan = _scan_a187(r, since, conn, slug=None)
+    assert scan.findings == []  # 末尾一致で救済されてしまう(だから開示が要る)
+    assert scan.repo_slug is None
     conn.rollback()
 
 
@@ -1809,23 +1885,32 @@ def test_a18_7_trailer_pointing_nowhere_is_a_finding(repo, conn):
     findings = _run_a187(r, since, conn)
     assert len(findings) == 1
     assert findings[0]["trailer_refs"] == ["https://github.com/x/y/pull/999"]
-    assert "参照" in findings[0]["reason"]
+    assert "対応する承認記録が無い" in findings[0]["reason"]
     conn.rollback()
 
 
 def test_a18_7_bare_number_trailer_does_not_clear_it(repo, conn, run_id):
     """裸の数字は決定 ID として解釈しない(重要-2)ので記録漏れのまま残る。"""
     r, since = repo
-    decision_id = _deemed(conn, run_id, "https://github.com/x/y/pull/999")
-    _merge_protected_pr(r, 520, trailer=str(decision_id))
-    assert [f["pr_number"] for f in _run_a187(r, since, conn)] == [520]
+    decision_id = _deemed(conn, run_id, _self_pr_url(520))
+    _merge_protected_pr(r, 521, trailer=str(decision_id))
+    assert [f["pr_number"] for f in _run_a187(r, since, conn)] == [521]
+    conn.rollback()
+
+
+def test_a18_7_decision_id_trailer_clears_it_when_it_points_at_this_pr(repo, conn, run_id):
+    """``decision:<id>`` でも、その決定の proposal_ref が当該 PR なら帰属と認める。"""
+    r, since = repo
+    decision_id = _deemed(conn, run_id, _self_pr_url(522))
+    _merge_protected_pr(r, 522, trailer=f"decision:{decision_id}")
+    assert _run_a187(r, since, conn) == []
     conn.rollback()
 
 
 def test_a18_7_vetoed_record_is_not_a_record_gap(repo, conn, run_id):
     """否認済みでも「記録はある」。取消義務の指摘は A-18-1 の担当で、ここでは鳴らさない。"""
     r, since = repo
-    url = "https://github.com/klonyapin/ryza/pull/507"
+    url = _self_pr_url(507)
     _deemed(conn, run_id, url)
     _veto(conn, run_id, url)
     _merge_protected_pr(r, 507)
@@ -1836,7 +1921,8 @@ def test_a18_7_vetoed_record_is_not_a_record_gap(repo, conn, run_id):
 def test_a18_7_ignores_prs_that_do_not_touch_protected_areas(repo, conn):
     r, since = repo
     _merge_pr(r, "docsonly", "README.md", "x\n", 508)
-    assert _run_a187(r, since, conn) == []
+    scan = _scan_a187(r, since, conn)
+    assert scan.findings == [] and scan.checked == 0  # 分母にも数えない
     conn.rollback()
 
 
@@ -1863,27 +1949,39 @@ def test_a18_7_reaches_result_and_report(repo, conn):
     """結果 dict・警告 embed・報告要否(has_findings)まで通る。"""
     r, since = repo
     _merge_protected_pr(r, 509)
-    result = a18.run_a18(
-        r, since_commit=since, pr_since_commit=since, deemed_since_commit=since, conn=conn
-    )
+    result = _run_a18_deemed(r, since, conn)
     assert [f["pr_number"] for f in result["unrecorded_prs"]] == [509]
+    assert result["checked_protected_prs"] == 1
     assert a18.has_findings(result) is True
     field = next(f for f in a18.build_alert_embed(result)["fields"] if "A-18-7" in f["name"])
     assert "⚠️" in field["name"] and "PR #509" in field["value"]
+    assert "1/1 件" in field["name"]  # 分母つきで出す
     conn.rollback()
 
 
-def test_a18_7_clean_repo_shows_a_verified_line(repo, conn, run_id):
-    """記録漏れ 0 でも1行載せる(沈黙を「見ていない」と区別させない)。"""
+# ── 緑の分母(後続配線審査 後-4)───────────────────────────────────────────────
+def test_a18_7_green_line_carries_the_denominator(repo, conn, run_id):
+    """記録漏れ 0 の緑には**検査対象数**を書く(「漏れが無い」と「見ていない」の区別)。"""
     r, since = repo
     _merge_protected_pr(r, 510)
-    _deemed(conn, run_id, "https://github.com/klonyapin/ryza/pull/510")
-    result = a18.run_a18(
-        r, since_commit=since, pr_since_commit=since, deemed_since_commit=since, conn=conn
-    )
-    assert result["unrecorded_prs"] == []
+    _deemed(conn, run_id, _self_pr_url(510))
+    result = _run_a18_deemed(r, since, conn)
+    assert result["unrecorded_prs"] == [] and result["checked_protected_prs"] == 1
     field = next(f for f in a18.build_alert_embed(result)["fields"] if "A-18-7" in f["name"])
-    assert "⚠️" not in field["name"] and "✅" in field["value"]
+    assert "⚠️" not in field["name"]
+    assert "✅ 記録漏れなし(検査対象 1 件)" in field["value"]
+    conn.rollback()
+
+
+def test_a18_7_zero_target_is_stated_explicitly(repo, conn):
+    """対象 0 件は ✅ にせず「対象 PR なし」と書く(squash 移行時の沈黙を防ぐ)。"""
+    r, since = repo
+    _merge_pr(r, "unprotected", "README.md", "x\n", 512)  # 保護領域に触れない PR のみ
+    result = _run_a18_deemed(r, since, conn)
+    assert result["checked_protected_prs"] == 0
+    field = next(f for f in a18.build_alert_embed(result)["fields"] if "A-18-7" in f["name"])
+    assert "対象 PR なし" in field["value"] and "✅" not in field["value"]
+    assert "squash" in field["value"]
     conn.rollback()
 
 
@@ -1891,10 +1989,20 @@ def test_a18_7_is_skipped_and_disclosed_without_conn(repo):
     """DB 接続なしでは照合できない — 黙って ✅ にせず、未照合を注記に出す。"""
     r, since = repo
     _merge_protected_pr(r, 511)
-    result = a18.run_a18(r, since_commit=since, pr_since_commit=since, deemed_since_commit=since)
-    assert result["unrecorded_prs"] == []
+    result = _run_a18_deemed(r, since)
+    assert result["unrecorded_prs"] == [] and result["checked_protected_prs"] == 0
     assert any("A-18-7" in n for n in result["notes"])
     assert all("A-18-7" not in f["name"] for f in a18.build_alert_embed(result)["fields"])
+
+
+def test_a18_7_unresolvable_slug_is_disclosed_in_notes(repo, conn):
+    """一時リポジトリ(origin なし)では帰属照合が末尾一致に落ちることを注記に出す。"""
+    r, since = repo
+    _merge_protected_pr(r, 513)
+    result = _run_a18_deemed(r, since, conn)  # repo に origin remote は無い
+    assert result["deemed_repo_slug"] is None
+    assert any("後-5" in n or "末尾一致" in n for n in result["notes"])
+    conn.rollback()
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1967,7 +2075,12 @@ def test_run_and_report_verifies_on_a_separate_readonly_connection(repo, migrate
 
 
 def test_run_a18_readonly_refuses_writes(repo, migrated_db, monkeypatch):
-    """照合接続への書込は静かに通らず失敗する(read-only 原則の執行点)。"""
+    """照合接続への書込は静かに通らず失敗する(**うっかり書込の検出点** — 後-8)。
+
+    ``default_transaction_read_only`` はセッション既定であって権限境界ではない
+    (``SET TRANSACTION READ WRITE`` で上書きでき、ロールの書込権限も残る)。ここで
+    確かめるのは「意図しない書込が黙って通らない」ことであり、悪意ある書込の阻止ではない。
+    """
     import psycopg
 
     r, since = repo

@@ -43,6 +43,10 @@ PR 番号だけで発効させる簡易形(参照・種別・文面を ``gh api`
     python -m ryza.governance.decisions --deemed-for-pr 99 \\
         --review docs/reviews/xxxx-independent-review.md
 
+``--review``(独立役員審査の参照)は ``--deemed-for-pr`` と ``--kind pr`` で必須である。
+ただし**実在は検査しない形式要件**であり、値は通知本文に残るだけで構造化列にはならない
+(事後の機械照合は ``decision-reviewed-sha`` リマインダーの課題)。
+
 **この CLI を叩き忘れると通知なき発効になる**。自動起票(PR イベント駆動)は未実装で
 (ops/reminders.yaml ``deemed-auto-announce``)、叩き忘れは監査 A-18-7(保護領域 PR の
 承認記録漏れ)が週次で事後検出する —— 簡易形はその頻度を下げるための入口側の手当てである。
@@ -582,7 +586,11 @@ def build_pr_notice(pr: PullRequestRef, review_ref: str) -> str:
     審査参照を**引数として要求する**のは、この簡易形が「審査前の発効」を作らないためである
     (reminders ``deemed-auto-announce`` ②)。文面に審査の所在を書かせることで、審査を
     経ていない変更をワンコマンドで発効させる経路を塞ぐ。文面が気に入らなければ
-    ``--notice`` で全文を差し替えられる。
+    ``--notice`` で全文を差し替えられるが、そのときも審査参照の行は付く
+    (:func:`_with_review_line`)。
+
+    **参照は形式要件であり実在は検査しない**(後続配線審査 後-2)。値は本文に残るだけで
+    構造化列にはならず、事後に「その審査が実在したか」を機械照合する経路は無い。
 
     変更ファイルは保護領域か否かを判定せずそのまま列挙する。glob の解釈は監査
     (``audit/a18.protected_patterns``)の責務であり、ここで二重に定義するとずれる。
@@ -618,7 +626,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--review", default=None,
-        help="独立役員審査の参照(docs/reviews/... 等)。--deemed-for-pr では必須",
+        help=(
+            "独立役員審査の参照(docs/reviews/... 等)。--deemed-for-pr と --kind pr では必須。"
+            "**実在検査はしない形式要件** — 値は通知本文に残るだけで構造化列にはならず、"
+            "事後の機械照合はできない(--review 嘘 も通る)"
+        ),
     )
     parser.add_argument(
         "--gh-repo", default=None, metavar="OWNER/NAME",
@@ -651,12 +663,40 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+#: ``--review`` を必須にする提案種別。保護領域 PR のみなし承認は独立役員審査を前置する
+#: 手続(定款第5条・07-development)であり、審査参照なしにワンコマンドで発効させられる
+#: 経路を残さない。**他の kind には課さない** —— 戦略昇格・予算・IPS 改訂などは独立役員審査が
+#: 必ずしも前置される手続ではなく、一律必須化は正当な発効経路を塞ぐ(後続配線審査 後-1)。
+REVIEW_REQUIRED_KINDS: frozenset[str] = frozenset({"pr"})
+
+#: 通知本文に審査参照を残す行の接頭辞(:func:`build_pr_notice` と同じ表記)。
+REVIEW_LINE_PREFIX = "独立役員審査: "
+
+
+def _with_review_line(notice: str, review_ref: str) -> str:
+    """手書きの通知本文に審査参照の行を足す(既に含まれていればそのまま)。
+
+    ``--notice`` で文面を差し替えたときに ``--review`` が素通りすると、必須化が
+    「引数を渡させるだけ」の儀式になり ``#承認`` に審査の所在が残らない。
+    """
+    return notice if review_ref in notice else f"{notice}\n{REVIEW_LINE_PREFIX}{review_ref}"
+
+
 def _resolve_deemed_args(args: argparse.Namespace) -> tuple[str, str, str]:
     """CLI 引数から ``(proposal_ref, kind, notice)`` を決める。
 
     ``--deemed-for-pr`` があれば ``gh`` の取得結果で欠けている引数を埋める。明示指定は
     常に優先する(自動生成の文面が状況に合わないときに手で上書きできる余地を残す)。
-    ``--review`` を必須にするのは「審査前の発効」を作らないため(:func:`build_pr_notice`)。
+
+    ``--review`` は ``--deemed-for-pr`` と ``--kind pr`` で**必須**であり、``--notice`` で
+    代替できない(後続配線審査 後-1: 旧実装は ``--notice`` があれば審査参照ゼロで通り、
+    「審査前の発効をワンコマンドで作れない」という主張が成立していなかった)。
+
+    **``--review`` は形式要件にすぎない**(後-2): 値の実在は検査せず、通知本文に文字列として
+    残るだけで ``governance.decisions`` の構造化列にはならないため、事後の機械照合はできない
+    (``--review 嘘`` も通る)。「審査を経たと**書かせる**」ことによる抑止であり、
+    「審査を経たことの**証明**」ではない。構造化列と実在検査は ops/reminders.yaml の
+    ``decision-reviewed-sha`` で扱う。
     """
     if args.deemed_for_pr is None:
         missing = [
@@ -672,17 +712,30 @@ def _resolve_deemed_args(args: argparse.Namespace) -> tuple[str, str, str]:
             raise ValueError(
                 f"{', '.join(missing)} は必須(--deemed-for-pr <PR番号> なら自動で埋まる)"
             )
-        return args.proposal_ref, args.kind, args.notice
+        if args.kind in REVIEW_REQUIRED_KINDS and not args.review:
+            raise ValueError(
+                f"--kind {args.kind} のみなし承認には --review(独立役員審査の参照)が必須。"
+                "保護領域 PR は審査を前置する手続であり、--notice では代替できない"
+            )
+        notice = args.notice
+        if args.review:
+            notice = _with_review_line(notice, args.review)
+        return args.proposal_ref, args.kind, notice
 
-    if not (args.review or args.notice):
+    if not args.review:
         raise ValueError(
             "--deemed-for-pr には --review(独立役員審査の参照)が必須。"
-            "審査を経ていない変更をワンコマンドで発効させないための入口検査"
+            "審査を経ていない変更をワンコマンドで発効させないための入口検査であり、"
+            "--notice で文面を差し替えても免除されない"
         )
     pr = fetch_pull_request(args.deemed_for_pr, repo=args.gh_repo)
     if not pr.url:
         raise ValueError(f"PR #{args.deemed_for_pr} の URL を取得できなかった")
-    notice = args.notice or build_pr_notice(pr, args.review)
+    notice = (
+        _with_review_line(args.notice, args.review)
+        if args.notice
+        else build_pr_notice(pr, args.review)
+    )
     return args.proposal_ref or pr.url, args.kind or "pr", notice
 
 
