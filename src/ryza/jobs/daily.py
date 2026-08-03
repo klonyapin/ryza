@@ -66,6 +66,89 @@ _DEGRADED_NEAR_THRESHOLD = -1.0
 # 取込段のフック: (conn, run, as_of) を受け、任意の集計 dict を返す。省略時は取込をスキップ。
 IngestFn = Callable[[psycopg.Connection, Run, datetime], dict[str, Any]]
 
+# 1 ソースの取込を実行するコーラブル(as_of を受け、任意の結果を返す。失敗は例外送出)。
+IngestSource = Callable[[datetime], Any]
+
+
+def _default_ingest_sources() -> list[tuple[str, IngestSource]]:
+    """T-009 の実取込ソース(名前, 実行コーラブル)を順序付きで返す。
+
+    各ソースは自前の autocommit 接続・Run・Fetcher・証憑ストアを持つ CLI ``main`` を呼ぶ
+    (``src/ryza/ingest/`` は **import 利用のみ**・変更しない)。``main`` は成功時 0 を返す。
+    """
+    from ryza.ingest import calendar, edinet, fred, jquants, news_rss, tdnet
+
+    def _date(as_of: datetime) -> str:
+        return as_of.astimezone(JST).date().isoformat()
+
+    return [
+        ("jquants", lambda as_of: jquants.main(["--date", _date(as_of)])),
+        ("tdnet", lambda as_of: tdnet.main([])),
+        ("edinet", lambda as_of: edinet.main(["--date", _date(as_of)])),
+        ("news_rss", lambda as_of: news_rss.main([])),
+        ("fred", lambda as_of: fred.main([])),
+        ("calendar", lambda as_of: calendar.main([])),
+    ]
+
+
+def _auth_error_types() -> tuple[type[BaseException], ...]:
+    """資格情報未設定を表す取込側の例外型(これらは失敗でなく skipped として報告する)。"""
+    from ryza.ingest.fred import FredAuthError
+    from ryza.ingest.jquants import JQuantsAuthError
+
+    return (JQuantsAuthError, FredAuthError)
+
+
+def run_ingest_sources(
+    as_of: datetime,
+    *,
+    dry_run: bool = False,
+    sources: list[tuple[str, IngestSource]] | None = None,
+    auth_errors: tuple[type[BaseException], ...] | None = None,
+) -> dict[str, Any]:
+    """実取込ソースを順に呼ぶ(ソースごとに失敗許容)。
+
+    - ``dry_run``: 実ネットワークを一切呼ばず、全ソースを ``skipped`` として報告する。
+    - 資格情報未設定(``auth_errors``)は失敗でなく ``skipped``(理由付き)。
+    - その他の例外は ``failed``(理由付き)として記録し、後続ソースは続行する。
+    """
+    sources = sources if sources is not None else _default_ingest_sources()
+    auth_errors = auth_errors if auth_errors is not None else _auth_error_types()
+    per_source: dict[str, dict[str, Any]] = {}
+    counts = {"ok": 0, "skipped": 0, "failed": 0}
+    for name, fn in sources:
+        if dry_run:
+            per_source[name] = {"status": "skipped", "reason": "dry-run(実ネットワーク不使用)"}
+            counts["skipped"] += 1
+            continue
+        try:
+            result = fn(as_of)
+        except auth_errors as exc:  # 資格情報未設定 → skipped
+            per_source[name] = {"status": "skipped", "reason": f"資格情報未設定: {exc}"}
+            counts["skipped"] += 1
+        except Exception as exc:  # noqa: BLE001 - 1 ソースの失敗は握って他を止めない
+            per_source[name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+            counts["failed"] += 1
+        else:
+            per_source[name] = {"status": "ok", "result": result}
+            counts["ok"] += 1
+    return {"sources": per_source, **counts}
+
+
+def make_default_ingest(
+    *,
+    dry_run: bool = False,
+    sources: list[tuple[str, IngestSource]] | None = None,
+) -> IngestFn:
+    """実取込を daily に本配線する ``IngestFn`` を作る(各ソースは自前接続で完結)。"""
+
+    def _ingest(
+        _conn: psycopg.Connection, _run: Run, as_of: datetime
+    ) -> dict[str, Any]:
+        return run_ingest_sources(as_of, dry_run=dry_run, sources=sources)
+
+    return _ingest
+
 
 @dataclass
 class StageResult:
@@ -151,6 +234,12 @@ def _build_ops_embed(
         mark = "✅" if s.ok else "⚠️"
         if s.error:
             value = f"{mark} 失敗: {s.error}"[:1024]
+        elif "sources" in s.detail:  # 取込段: ソース別ステータスを compact に。
+            per = ", ".join(f"{n}:{v['status']}" for n, v in s.detail["sources"].items())
+            value = (
+                f"{mark} ok={s.detail['ok']} skipped={s.detail['skipped']} "
+                f"failed={s.detail['failed']} — {per}"
+            )[:1024]
         else:
             detail = ", ".join(f"{k}={v}" for k, v in s.detail.items()) or "ok"
             value = f"{mark} {detail}"[:1024]
@@ -314,6 +403,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
         result = run_daily(
             conn, run, research_llm=research_llm, press_llm=press_llm,
             config=config, dry_run=args.dry_run,
+            ingest=make_default_ingest(dry_run=args.dry_run),
         )
         run.finish("success" if result.ok else "failed")
     except Exception:

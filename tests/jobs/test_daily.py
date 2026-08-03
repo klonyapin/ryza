@@ -9,8 +9,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from ryza.bot import killswitch
+from ryza.ingest.jquants import JQuantsAuthError
 from ryza.jobs import daily
-from ryza.jobs.daily import run_daily
+from ryza.jobs.daily import make_default_ingest, run_daily, run_ingest_sources
 
 
 def _seed(insert_enriched_doc):
@@ -142,3 +143,80 @@ def test_daily_default_as_of_is_utc(conn, run, llm_config, make_daily_llms, inse
     assert result.as_of.tzinfo is not None
     # 既定 as_of は now(UTC) 付近。
     assert abs((datetime.now(UTC) - result.as_of).total_seconds()) < 30
+
+
+# ── 実取込の本配線(default_ingest)──────────────────────────────────────────────
+def _mock_sources(calls: list[str]):
+    """順次実行・部分失敗・資格情報未設定を再現するモックソース列。"""
+    def ok(name):
+        def _fn(as_of):
+            calls.append(name)
+            return {"fetched": 1}
+        return _fn
+
+    def boom(as_of):
+        calls.append("tdnet")
+        raise RuntimeError("network down")
+
+    def noauth(as_of):
+        calls.append("fred")
+        raise JQuantsAuthError("no key")  # auth_errors に含まれる型
+
+    return [("jquants", ok("jquants")), ("tdnet", boom), ("fred", noauth)]
+
+
+def test_run_ingest_sources_order_and_partial_failure():
+    calls: list[str] = []
+    summary = run_ingest_sources(datetime.now(UTC), sources=_mock_sources(calls))
+    # 全ソースが順に呼ばれる(部分失敗でも後続を止めない)。
+    assert calls == ["jquants", "tdnet", "fred"]
+    assert summary["ok"] == 1 and summary["failed"] == 1 and summary["skipped"] == 1
+    assert summary["sources"]["jquants"]["status"] == "ok"
+    assert summary["sources"]["tdnet"]["status"] == "failed"
+    assert "network down" in summary["sources"]["tdnet"]["error"]
+    # 資格情報未設定は失敗でなく skipped。
+    assert summary["sources"]["fred"]["status"] == "skipped"
+    assert "資格情報" in summary["sources"]["fred"]["reason"]
+
+
+def test_run_ingest_sources_dry_run_skips_network():
+    calls: list[str] = []
+    summary = run_ingest_sources(
+        datetime.now(UTC), dry_run=True, sources=_mock_sources(calls)
+    )
+    # dry-run は 1 度もコーラブルを呼ばない。
+    assert calls == []
+    assert summary["skipped"] == 3 and summary["ok"] == 0 and summary["failed"] == 0
+    assert all(v["status"] == "skipped" for v in summary["sources"].values())
+
+
+def test_default_ingest_sources_are_wired():
+    # 6 ソースが名前付きで登録されている(呼び出しはしない)。
+    from ryza.jobs.daily import _default_ingest_sources
+
+    names = [n for n, _ in _default_ingest_sources()]
+    assert names == ["jquants", "tdnet", "edinet", "news_rss", "fred", "calendar"]
+
+
+def test_daily_with_default_ingest_stage(
+    conn, run, llm_config, make_daily_llms, insert_enriched_doc
+):
+    _seed(insert_enriched_doc)
+    calls: list[str] = []
+
+    def _src(as_of):
+        calls.append("jquants")
+        return {"n": 1}
+
+    ingest = make_default_ingest(sources=[("jquants", _src)])
+    research, press, _ = make_daily_llms()
+    result = run_daily(
+        conn, run, research_llm=research, press_llm=press,
+        config=llm_config, dry_run=True, ingest=ingest,
+    )
+    # 注入した実取込フックが取込段で走り、サマリに載る。
+    assert calls == ["jquants"]
+    ingest_stage = result.stage("ingest")
+    assert ingest_stage.ok
+    assert ingest_stage.detail["sources"]["jquants"]["status"] == "ok"
+    assert result.posted  # 後段は通常どおり
