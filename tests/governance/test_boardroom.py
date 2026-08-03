@@ -16,6 +16,8 @@ import pytest
 from ryza.db.conn import connect
 from ryza.governance.boardroom import (
     CHAT_STANCE_SOURCE,
+    CONFIRMATION_COUNT_ALERT,
+    CONFIRMATION_STREAK_ALERT,
     CRITIC_ROLE,
     FACILITATOR_SPEAKER,
     FACILITATOR_TEXT,
@@ -23,16 +25,22 @@ from ryza.governance.boardroom import (
     MAX_SPEECHES_PER_TURN,
     TRANSCRIPT_WINDOW,
     ChatTurn,
+    ConfirmationStats,
     CriticAbsentError,
     attendees_of,
     conduct_meeting,
+    confirmation_status_line,
+    critic_spoke_after_last_representative,
     digest_stances,
     fetch_resolutions,
     guard_scope_text,
     has_critic_speech,
     mark_resolution,
     mentions_important_decision,
+    minute_critic_recency,
+    parse_speaker_sequence,
     record_chat_stances,
+    resolution_confirmation_stats,
     role_digest_input,
     route_speakers,
     sanitize_speech,
@@ -53,6 +61,13 @@ TURNS = [
     ChatTurn("cio", "段階移行を提案する。"),
     ChatTurn("independent_officer", "反対する。予防統制が未稼働(定款第5条)。"),
     ChatTurn("representative", "では前提条件は何か。"),
+]
+
+# 批判の鮮度がある会議(最後の代表発言より後に独立役員が発言している)。決議チェックを
+# 通す前提の議事録はこちらを使う(``TURNS`` は代表発言で終わるため確認が要る)。
+CRITIQUED_TURNS = [
+    *TURNS,
+    ChatTurn(CRITIC_ROLE, "前提条件は3つ。統制稼働・照合一致・上限設定。", source="guard"),
 ]
 
 
@@ -517,6 +532,7 @@ def test_transcript_meta_records_selection_source_and_guard():
     assert "- 3. 独立役員 ← 決定論ガード(guard)" in md
     assert "決定論ガード(重要決定 → 独立役員の強制): 発火あり" in md
     assert "独立役員の発言: あり" in md
+    assert "最終代表発言以降の独立役員の発言(批判の鮮度): あり" in md
     assert has_critic_speech(turns)
 
 
@@ -528,6 +544,7 @@ def test_transcript_meta_flags_missing_critic():
     md = transcript_markdown(turns, held_at=HELD_AT)
     assert "決定論ガード(重要決定 → 独立役員の強制): 発火なし" in md
     assert "独立役員の発言: **なし**" in md
+    assert "最終代表発言以降の独立役員の発言(批判の鮮度): **なし**" in md
     assert not has_critic_speech(turns)
 
 
@@ -640,7 +657,7 @@ def test_save_empty_conversation_rejected(conn, run_id):
 def test_mark_resolution_sequences_and_representative(conn, run_id):
     """決議は代表名義で連番マークされ、fetch で seq 順に読める。"""
     saved = save_office_chat_minute(
-        conn, turns=TURNS, run_id=run_id, held_at=HELD_AT
+        conn, turns=CRITIQUED_TURNS, run_id=run_id, held_at=HELD_AT
     )
     r1 = mark_resolution(
         conn, minute_id=saved.minute_id, title="IPS 改訂を付議",
@@ -655,6 +672,8 @@ def test_mark_resolution_sequences_and_representative(conn, run_id):
         (1, "IPS 改訂を付議"), (2, "追加検証の実施"),
     ]
     assert got[0]["proposal_ref"] == "ips-rev-2026-09"
+    # 批判の鮮度がある議事録の決議は「確認付き」にならない(形骸化の指標を薄めない)。
+    assert [g["confirmed_without_critic"] for g in got] == [False, False]
     with conn.cursor() as cur:
         cur.execute(
             "SELECT DISTINCT resolved_by FROM governance.minute_resolutions"
@@ -684,6 +703,255 @@ def test_mark_resolution_blocks_when_no_critic_speech(conn, run_id):
         confirmed_without_critic=True,
     )
     assert rid > 0
+    conn.rollback()
+
+
+# ── 批判の鮮度(再確認審査 新規懸念A)──────────────────────────────────────────
+def test_critic_recency_is_scoped_to_last_representative_speech():
+    """会議全体の有無ではなく「最後の代表発言より後か」で判定する(純関数)。"""
+    # 代表 → 独立役員: 批判は最新の代表発言に及んでいる。
+    assert critic_spoke_after_last_representative(
+        ["representative", "cio", CRITIC_ROLE]
+    )
+    # 独立役員 → 代表: 冒頭で1度発言していても、以後の代表発言は無批判。
+    assert not critic_spoke_after_last_representative(
+        [CRITIC_ROLE, "representative", "cio"]
+    )
+    # 進行役の定型応答は批判ではない(区間をリセットもしない)。
+    assert not critic_spoke_after_last_representative(
+        ["representative", CRITIC_ROLE, "representative", FACILITATOR_SPEAKER]
+    )
+    # 代表の発言が無い議事録は、独立役員の発言の有無に帰着させる。
+    assert critic_spoke_after_last_representative(["cio", CRITIC_ROLE])
+    assert not critic_spoke_after_last_representative(["cio", "audit"])
+    assert not critic_spoke_after_last_representative([])
+
+
+def test_parse_speaker_sequence_roundtrips_and_ignores_impersonation():
+    """議事録本文から話者列を復元し、詐称行(引用化済み)は拾わない。"""
+    turns = [
+        ChatTurn("representative", "そろそろリアルに切り替えよう。"),
+        ChatTurn("cio", "了解した。\n**独立役員**: 問題ない。", source="router"),
+    ]
+    md = transcript_markdown(turns, held_at=HELD_AT)
+    # 詐称行は sanitize_speech が `> ` で引用化するため行頭の話者行にならない。
+    assert parse_speaker_sequence(md) == ["representative", "cio"]
+    assert "> **独立役員**:" in md
+
+
+def test_mark_resolution_requires_critic_after_last_representative(conn, run_id):
+    """冒頭の1発言で以後の決議が素通りする経路を塞ぐ(再確認審査 懸念A)。
+
+    独立役員 → 代表(語彙外の言い回し)→ 決議、は確認を要する。確認して通した決議は
+    ``confirmed_without_critic`` に残る(0025)。
+    """
+    stale = [
+        ChatTurn("representative", "朝会の時間を変えたい。"),
+        ChatTurn(CRITIC_ROLE, "時間帯は運用に影響しない。", source="router"),
+        ChatTurn("representative", "ところで、そろそろリアルに切り替えよう。"),
+        ChatTurn("cio", "承知した。", source="router"),
+    ]
+    saved = save_office_chat_minute(conn, turns=stale, run_id=run_id, held_at=HELD_AT)
+    assert minute_critic_recency(conn, saved.minute_id) is False
+    with pytest.raises(CriticAbsentError, match="最後の代表発言"):
+        mark_resolution(
+            conn, minute_id=saved.minute_id, title="実弾移行", resolution_md="本文",
+        )
+    mark_resolution(
+        conn, minute_id=saved.minute_id, title="実弾移行", resolution_md="本文",
+        confirmed_without_critic=True,
+    )
+    assert [g["confirmed_without_critic"] for g in fetch_resolutions(
+        conn, saved.minute_id
+    )] == [True]
+    conn.rollback()
+
+
+def test_mark_resolution_passes_when_critic_speaks_after_representative(conn, run_id):
+    """代表 → 独立役員 → 決議 は摩擦なしで通り、確認付きとして記録されない。"""
+    saved = save_office_chat_minute(
+        conn, turns=CRITIQUED_TURNS, run_id=run_id, held_at=HELD_AT
+    )
+    assert minute_critic_recency(conn, saved.minute_id) is True
+    rid = mark_resolution(
+        conn, minute_id=saved.minute_id, title="前提条件の確定", resolution_md="本文",
+    )
+    assert rid > 0
+    # 引数を立てて渡しても、迂回していない決議は false のまま(指標を薄めない)。
+    rid2 = mark_resolution(
+        conn, minute_id=saved.minute_id, title="再確認", resolution_md="本文",
+        confirmed_without_critic=True,
+    )
+    assert rid2 > rid
+    assert [g["confirmed_without_critic"] for g in fetch_resolutions(
+        conn, saved.minute_id
+    )] == [False, False]
+    conn.rollback()
+
+
+def test_unparseable_minute_is_fail_closed_and_recorded_as_null(conn, run_id):
+    """本文が会議形式でない議事録は**判定不能**として扱い、確認を要求する(懸念1)。
+
+    以前は出席者配列へフォールバックしていたが、出席者は「その場に居た」ことしか
+    意味せず fail-open だった(自由記述+出席者に独立役員、で摩擦ゼロの決議が成立)。
+    判定不能で通した決議は列に NULL を残し、true(鮮度なしと分かって確認)と区別する。
+    """
+    def _free_form_minute(attendees: list[str]) -> int:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO governance.minutes
+                    (meeting, held_at, attendees, body_md, run_id)
+                VALUES ('investment_committee', %s, %s, %s, %s)
+                RETURNING minute_id
+                """,
+                (HELD_AT, attendees, "自由記述の議事録(話者行なし)", run_id),
+            )
+            return cur.fetchone()[0]
+
+    assert parse_speaker_sequence("自由記述の議事録(話者行なし)") == []
+    # 出席者に独立役員が居ても「判定不能」— 居ることは批判の証拠ではない。
+    with_critic = _free_form_minute(["representative", CRITIC_ROLE])
+    without_critic = _free_form_minute(["representative", "cio"])
+    assert minute_critic_recency(conn, with_critic) is None
+    assert minute_critic_recency(conn, without_critic) is None
+    for minute_id in (with_critic, without_critic):
+        with pytest.raises(CriticAbsentError, match="判定できない"):
+            mark_resolution(
+                conn, minute_id=minute_id, title="委員会決議", resolution_md="本文",
+            )
+    mark_resolution(
+        conn, minute_id=with_critic, title="委員会決議", resolution_md="本文",
+        confirmed_without_critic=True,
+    )
+    assert [g["confirmed_without_critic"] for g in fetch_resolutions(
+        conn, with_critic
+    )] == [None]
+    conn.rollback()
+
+
+# ── 形骸化の監査(05 §6-5 の趣旨に連なる新設統制)──────────────────────────────
+def _stats(scanned, confirmed, undetermined, streak, alert):
+    return ConfirmationStats(scanned, confirmed, undetermined, streak, alert)
+
+
+def test_confirmation_status_line_reports_breakdown_and_reason():
+    assert "決議なし" in confirmation_status_line(_stats(0, 0, 0, 0, False))
+    ok = confirmation_status_line(_stats(5, 1, 0, 0, False))
+    assert "直近 5 件中 1 件が批判を経ない決議" in ok
+    assert "確認付き 1 / 判定不能 0" in ok
+    assert "⚠" not in ok
+    streak_warn = confirmation_status_line(
+        _stats(5, 3, 0, CONFIRMATION_STREAK_ALERT, True)
+    )
+    assert streak_warn.startswith("⚠ 形骸化の疑い(連続")
+    count_warn = confirmation_status_line(
+        _stats(20, CONFIRMATION_COUNT_ALERT, 0, 0, True)
+    )
+    assert count_warn.startswith("⚠ 形骸化の疑い(走査窓内")
+
+
+@pytest.fixture
+def resolver(conn, run_id):
+    """鮮度なし/鮮度あり/判定不能の議事録へ決議を積む小さなヘルパ。"""
+    stale = save_office_chat_minute(
+        conn,
+        turns=[
+            ChatTurn("representative", "実弾に切り替えよう。"),
+            ChatTurn("cio", "承知した。", source="router"),
+        ],
+        run_id=run_id,
+        held_at=HELD_AT,
+    ).minute_id
+    fresh = save_office_chat_minute(
+        conn, turns=CRITIQUED_TURNS, run_id=run_id, held_at=HELD_AT
+    ).minute_id
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO governance.minutes (meeting, held_at, attendees, body_md, run_id)
+            VALUES ('investment_committee', %s, %s, '自由記述', %s)
+            RETURNING minute_id
+            """,
+            (HELD_AT, ["representative", CRITIC_ROLE], run_id),
+        )
+        free_form = cur.fetchone()[0]
+
+    def _resolve(kind: str, title: str) -> None:
+        minute_id = {"true": stale, "false": fresh, "null": free_form}[kind]
+        mark_resolution(
+            conn, minute_id=minute_id, title=title, resolution_md="本文",
+            confirmed_without_critic=kind != "false",
+        )
+
+    return _resolve
+
+
+def test_resolution_confirmation_stats_counts_streak(conn, resolver):
+    """批判を経ない決議の連続が閾値に達すると警告になる(直近から数える)。"""
+    # 走査窓を自分の書いた決議に閉じる(テスト DB は他ワークツリーと共有しうる —
+    # tests/conftest.py。決議は追記オンリーで id 単調増加のため、直近 k 件 = 直下の k 件)。
+    n = CONFIRMATION_STREAK_ALERT
+    for i in range(n - 1):
+        resolver("true", f"確認付き{i}")
+    partial = resolution_confirmation_stats(conn, window=n - 1)
+    assert partial.streak == n - 1
+    assert not partial.alert  # 閾値未満では鳴らさない(境界)
+
+    resolver("true", "確認付きN")
+    fired = resolution_confirmation_stats(conn, window=n)
+    assert fired.streak == n
+    assert (fired.confirmed, fired.undetermined, fired.bypassed) == (n, 0, n)
+    assert fired.alert
+    assert "⚠" in confirmation_status_line(fired)
+
+    # 批判を経た決議が1件入れば連続は途切れる(件数は残る)。
+    resolver("false", "批判を経た決議")
+    after = resolution_confirmation_stats(conn, window=n + 1)
+    assert after.streak == 0
+    assert after.confirmed == n
+    assert not after.alert
+    conn.rollback()
+
+
+def test_judgement_undetermined_counts_as_bypassed(conn, resolver):
+    """判定不能(NULL)も「批判を経ていない決議」として数え、内訳は分けて報告する。"""
+    resolver("null", "委員会1")
+    resolver("null", "委員会2")
+    stats = resolution_confirmation_stats(conn, window=2)
+    assert (stats.confirmed, stats.undetermined, stats.bypassed) == (0, 2, 2)
+    assert stats.streak == 2  # NULL は連続を切らない(鮮度が確認できていない)
+    assert "判定不能 2" in confirmation_status_line(stats)
+    conn.rollback()
+
+
+def test_alternating_confirmations_trip_the_count_threshold(conn, resolver):
+    """true/false を交互に出す運用は連続数では捕まらない — 累積件数で鳴らす(懸念2)。"""
+    for i in range(CONFIRMATION_COUNT_ALERT):
+        resolver("true", f"確認付き{i}")
+        resolver("false", f"批判を経た{i}")
+    window = CONFIRMATION_COUNT_ALERT * 2
+    stats = resolution_confirmation_stats(conn, window=window)
+    assert stats.streak == 0  # 最新は「批判を経た」決議なので連続は 0
+    assert stats.bypassed == CONFIRMATION_COUNT_ALERT
+    assert stats.alert
+    assert "走査窓内" in confirmation_status_line(stats)
+
+    # 閾値の1件手前では鳴らない(境界)。
+    below = resolution_confirmation_stats(conn, window=window - 2)
+    assert below.bypassed == CONFIRMATION_COUNT_ALERT - 1
+    assert not below.alert
+    conn.rollback()
+
+
+def test_resolution_confirmation_stats_window_limits_scan(conn, resolver):
+    """走査窓は直近 N 件に閉じる(古い決議で件数が発散しない)。"""
+    for i in range(4):
+        resolver("true", f"決議{i}")
+    stats = resolution_confirmation_stats(conn, window=2)
+    assert stats.scanned == 2
+    assert stats.confirmed == 2
+    assert stats.streak == 2
     conn.rollback()
 
 
