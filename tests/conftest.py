@@ -143,8 +143,8 @@ _STAMP_TRIGGER = "instrument_classification_history_stamp_recorded_at"
 _RECORD_HISTORY_SQL = f"""
     INSERT INTO {_HISTORY_TABLE}
         (instrument_id, universe_tags, instrument_flags, is_single_name, product,
-         unit_size, source, as_of, run_id, created_at)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         unit_size, asset_class, source, as_of, run_id, created_at)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 
@@ -179,8 +179,8 @@ def record_classification_history():
                 _RECORD_HISTORY_SQL,
                 (
                     instrument_id, list(c.universe_tags), list(c.instrument_flags),
-                    c.is_single_name, c.product, c.unit_size, source, as_of,
-                    run_id, created_at,
+                    c.is_single_name, c.product, c.unit_size, c.asset_class, source,
+                    as_of, run_id, created_at,
                 ),
             )
             cur.execute(f"ALTER TABLE {_HISTORY_TABLE} ENABLE TRIGGER {_STAMP_TRIGGER}")

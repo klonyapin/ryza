@@ -104,6 +104,13 @@ protected_areas:
     area: mandates
   - path: docs/design/81-fm-mandates.md
     area: mandates
+  # 独立役員審査 2026-08-04(FM 運用整備 C-24)。curated ユニバース定義は「マンデートの
+  # universe 語彙(liquid_equity 等)に属する母集団を実際に埋める」操作であり、統制上は
+  # マンデート変更と同格である。未登録のままだと「銘柄を 35 行足すこと」と「自分で
+  # 承認済みと書くこと」を同一 PR・無トレーラで行え、A-18-1 の突合対象にならない。
+  # 出典: docs/reviews/t017-fm-agents-independent-review.md C-24
+  - path: config/universe/**
+    area: mandates
   - path: migrations/*.sql # スキーマ全体(帳簿分離・証憑制約は migrations に宿る。C-1/懸念1-S1)
     area: schema
   - path: src/ryza/bot/main.py # Kill Switch の配線・コマンド登録(懸念1-S2)
