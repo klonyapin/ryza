@@ -95,3 +95,24 @@ def test_params_stored_as_jsonb(conn):
         cur.execute("SELECT params FROM meta.runs WHERE run_id = %s", (r.run_id,))
         params = cur.fetchone()[0]
     assert params == {"date": "2026-08-02", "types": ["filing"]}
+
+
+def test_update_params_merges_into_existing(conn):
+    """実行中に判明した情報(例: 役員室会議の発言者選定)を params へ追記できる。"""
+    r = start_run("dashboard.boardroom.meeting", {"speaker_tier": "fable"}, conn=conn)
+    r.update_params({"rounds": 2, "roles": [["cio"], ["audit"]]})
+    r.update_params({})  # 空パッチは何もしない
+    with conn.cursor() as cur:
+        cur.execute("SELECT params FROM meta.runs WHERE run_id = %s", (r.run_id,))
+        params = cur.fetchone()[0]
+    assert params == {
+        "speaker_tier": "fable", "rounds": 2, "roles": [["cio"], ["audit"]],
+    }
+
+
+def test_update_params_on_run_without_initial_params(conn):
+    r = start_run("dashboard.boardroom.meeting", conn=conn)
+    r.update_params({"roles": [["cio"]]})
+    with conn.cursor() as cur:
+        cur.execute("SELECT params FROM meta.runs WHERE run_id = %s", (r.run_id,))
+        assert cur.fetchone()[0] == {"roles": [["cio"]]}

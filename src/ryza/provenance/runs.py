@@ -119,6 +119,25 @@ class Run:
             )
         self._commit_if_owned()
 
+    def update_params(self, patch: dict[str, Any]) -> None:
+        """``meta.runs.params`` に実行中に判明した情報を追記する(浅いマージ)。
+
+        開始時点では決まらないパラメータ(例: 役員室会議で進行役が選んだ発言者)を
+        後から記録するための口。既存キーは上書きし、他のキーは保持する。
+        """
+        if not patch:
+            return
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT params FROM meta.runs WHERE run_id = %s", (self.run_id,))
+            row = cur.fetchone()
+            merged: dict[str, Any] = dict(row[0] or {}) if row else {}
+            merged.update(patch)
+            cur.execute(
+                "UPDATE meta.runs SET params = %s WHERE run_id = %s",
+                (Jsonb(merged), self.run_id),
+            )
+        self._commit_if_owned()
+
     def finish(self, status: str = "success") -> None:
         """実行を終了として記録する(``finished_at`` と ``status`` を更新)。
 

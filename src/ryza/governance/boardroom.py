@@ -1,16 +1,23 @@
 """boardroom — 役員室(会議)のロジック層(05-governance §5・Issue #9)。
 
 ダッシュボードの「役員室」タブ(``dashboard/app.py``)から分離した、UI に依存しない
-関数群。代表が発言すると全役職が固定順で逐次応答する**会議形式**で審議し、会話を
-議事録(``governance.minutes``・meeting='office_chat')に保存し、「決議」を
+関数群。代表が発言すると**反応すべきと判断された役員だけ**が発言する会議形式で審議し、
+会話を議事録(``governance.minutes``・meeting='office_chat')に保存し、「決議」を
 ``governance.minute_resolutions`` にマークし、セッションの主要な主張・懸念を LLM 要約で
 ``governance.stances`` に蓄積する。
 
-**会議形式への変更(2026-08-03 代表指示)**: 役職を1つ選ぶ1対1チャットを廃止し、代表の
-1発言に対して CIO → 独立役員 → 監査 の固定順で全役職が応答する。後の発言者には先行者の
-発言を含む**当該会議のトランスクリプト全文**を渡す(会議体の審議は相互批判が本質であり、
-先行発言を見ずに並列独白させると牽制が働かない — 05 §3 の「CIO の提案を独立役員が批判し、
-代表が決める」構造)。
+**会議形式(2026-08-03 代表指示。役職を1つ選ぶ1対1チャットの廃止)**: 会議の1ターンは
+「ルータ段 → 発言段 → 反応ラウンド(最大1回)」で構成する。
+
+1. **ルータ段(安価な階層・既定 mid)**: 会議トランスクリプトを入力に、どの役職が発言
+   すべきかを発言順つきで選ぶ(``route_speakers``)。全員が毎回話す必要はない
+2. **発言段(役員の階層・既定 fable)**: 選ばれた役職だけが、ルータの与えた順で逐次発言
+   する(``speak``)。後の発言者には先行者の発言を含む**当該会議のトランスクリプト全文**
+   を渡す(会議体の審議は相互批判が本質であり、先行発言を見ずに並列独白させると牽制が
+   働かない — 05 §3 の「CIO の提案を独立役員が批判し、代表が決める」構造)
+3. **反応ラウンド(最大1回)**: 新たに出た発言に反応すべき役職をルータがもう一度だけ選び、
+   選ばれた役職が発言する。1ターンの発言(高階層呼び出し)は ``MAX_SPEECHES_PER_TURN``
+   件までにコードで強制的に打ち切る(会議が発散して費用が青天井になるのを防ぐ)
 
 **05 §6-2(独立性の実質確保)との関係 — 共有するのは当該会議のトランスクリプトのみ**:
 同条は独立役員が執行側と「モデル系統・プロンプト資産・記憶を共有しない」ことを求める。
@@ -54,20 +61,25 @@ from ryza.research.llm import StructuredLLM
 TASK_TYPE = "boardroom"
 
 # 役員室の会議に出席する役職(05 §5: CIO/独立役員。監査も対話窓口として許す)と表示名。
-# **この dict の順序が会議の発言順**(CIO が提案・執行の立場を述べ、独立役員が批判し、
-# 監査が証跡・手続の観点で締める — 05 §3 の牽制構造をそのまま発言順に写す)。
+# 実際に誰が発言するかは毎ターン ``route_speakers`` が選ぶ(この dict は出席者名簿であり
+# 発言順ではない)。議事録の出席者表記・要約対象の並び順にはこの定義順を使う。
 BOARDROOM_ROLES: dict[str, str] = {
     "cio": "CIO",
     "independent_officer": "独立役員",
     "audit": "監査",
 }
 
-# 会議の発言順(固定)。ダッシュボードもテストもこの順を正とする。
+# 出席役職の正準順(議事録の出席者行・stances 要約の順序に使う決定論的な並び)。
 MEETING_ORDER: tuple[str, ...] = tuple(BOARDROOM_ROLES)
 
-# 「追加すべき論点がない」ことの明示。同意の繰り返しでトークンを焼かないための出口で
-# あり、発言機会があった証跡として議事録にも UI にも残す(非表示にはしない)。
-PASS_TEXT = "(発言なし)"
+# 誰も選ばれなかったときに応答する進行役。会議で代表の発言が黙殺されるのを避ける
+# (無応答は UI 上「壊れている」ようにしか見えない)。
+FACILITATOR_ROLE = "cio"
+
+# 1ターン(代表発言 → 発言段 → 反応ラウンド)で許す発言数の上限。**コストの硬い上限**で
+# あり、ルータが何人選んでもここで打ち切る(2026-08-03 代表指示: 高階層呼び出しは
+# 1ターン最大4回)。ルータ呼び出し自体は安価な階層のため上限に数えない。
+MAX_SPEECHES_PER_TURN = 4
 
 _SPEAKER_LABELS = {"representative": "代表", **BOARDROOM_ROLES}
 
@@ -81,6 +93,21 @@ REPLY_SCHEMA: dict[str, Any] = {
     "additionalProperties": True,
     "properties": {
         "reply": {"type": "string"},
+    },
+}
+
+# ルータ段の出力(発言すべき役職を発言順で)。空配列 = 誰も発言しない、も許す
+# (その場合の扱いは ``conduct_meeting`` が決める — FACILITATOR_ROLE が短く応答)。
+# enum で役職キーを縛るため、未知の役職名はスキーマ検証で弾かれる。
+SPEAKER_ROUTE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["roles"],
+    "additionalProperties": True,
+    "properties": {
+        "roles": {
+            "type": "array",
+            "items": {"type": "string", "enum": list(MEETING_ORDER)},
+        },
     },
 }
 
@@ -128,22 +155,14 @@ def _label(speaker: str) -> str:
 
 
 def attendees_of(turns: Sequence[ChatTurn]) -> list[str]:
-    """会議の出席者(代表+実際に発言機会があった役職)を固定順で返す。
-
-    ``(発言なし)`` でパスした役職も出席者に含める(パスは欠席ではない)。
-    """
+    """会議の出席者(代表+実際に発言した役職)を正準順で返す。"""
     spoke = {t.speaker for t in turns}
     return ["representative", *[r for r in MEETING_ORDER if r in spoke]]
 
 
 # ── 会話の Markdown 化(議事録本文)───────────────────────────────────────────
 def transcript_markdown(turns: Sequence[ChatTurn], *, held_at: datetime) -> str:
-    """会議全文を議事録本文(Markdown)へ決定論的に整形する。
-
-    05 §4「要約でなく全文を残す」。パス(``(発言なし)``)もそのまま残す — 発言機会が
-    あったことの証跡であり、05 §6-5(独立役員の懸念ゼロ回答の連続は監査アラート対象)を
-    後から検証できるようにするため。
-    """
+    """会議全文を議事録本文(Markdown)へ決定論的に整形する(05 §4「全文を残す」)。"""
     lines = [
         "# 役員室会議",
         "",
@@ -161,47 +180,124 @@ def _conversation_block(turns: Sequence[ChatTurn]) -> str:
     return "\n\n".join(f"{_label(t.speaker)}: {t.text}" for t in turns)
 
 
-# ── 会議での応答 ───────────────────────────────────────────────────────────────
-_ATTENDEE_LIST = "・".join(BOARDROOM_ROLES[r] for r in MEETING_ORDER)
-_ORDER_LIST = " → ".join(BOARDROOM_ROLES[r] for r in MEETING_ORDER)
+# ── ルータ段(誰が発言するかの判定)─────────────────────────────────────────────
+_ROLE_MENU = "\n".join(
+    f"- {r}({BOARDROOM_ROLES[r]})" for r in MEETING_ORDER
+)
 
+# ルータは会議の進行役であって役員ではない(役職資産・stances を読まない — 記憶分離の
+# 外側にある純粋な交通整理)。安価な階層で回すことを前提にした短いシステム指示にする。
+_ROUTER_SYSTEM = (
+    "あなたは Ryza 役員室の会議進行役。代表(ユーザー)の発言に対し、**どの役職が"
+    "発言すべきか**を選ぶ。選ばれた役職だけが発言する(全員が毎回話す必要はない)。\n\n"
+    f"# 出席役職\n{_ROLE_MENU}\n\n"
+    "# 判定規則(上から順に適用)\n"
+    "1. 代表が特定の役職・その担当者名に呼びかけている場合(「CIO はどう思う」「ほむらの"
+    "意見は」など)は、**必ずその役職を含める**\n"
+    "2. 議題が重要決定・提案・数値の主張(実弾移行・IPS 改訂・リスクリミット・資本配分・"
+    "戦略の採否・パフォーマンスや確率の数値主張など)を含む場合は、**必ず independent_officer"
+    "を含める**(批判義務 — 05-governance §3)\n"
+    "3. 単なる雑談・事実確認・軽い相談なら、最も関連する役職**1名で十分**\n"
+    "4. 手続・証跡・コンプライアンス・監査に関わる論点があるときだけ audit を含める\n"
+    "5. 誰も発言する必要がなければ roles は空配列でよい\n\n"
+    "# 出力\n"
+    "roles に役職キー(上記の英字キー)を**発言させたい順**で並べる。同じ役職を"
+    "重複させない。理由は書かない。"
+)
+
+_REACTION_ROUTER_SYSTEM = (
+    "あなたは Ryza 役員室の会議進行役。直前のラウンドで役員の発言があった。**それに"
+    "反応すべき役職**を選ぶ(反応ラウンドは1回だけで、ここで選ばれなければこのターンは"
+    "終了する)。\n\n"
+    f"# 出席役職\n{_ROLE_MENU}\n\n"
+    "# 判定規則\n"
+    "1. まだ発言していない役職のうち、直前の発言に**付け加えるべき実質的な論点**を持つ"
+    "者を選ぶ\n"
+    "2. 既に発言した役職でも、直前の発言が自分の主張への反論・事実誤認を含み、**反論が"
+    "必要な場合**は選んでよい\n"
+    "3. 同意の繰り返し・要約・相槌しか生まないなら選ばない。**空配列が既定**と考える\n"
+    "4. 代表の判断を待つべき局面(論点が出そろっている)なら空配列にする\n\n"
+    "# 出力\n"
+    "roles に役職キーを発言させたい順で並べる。同じ役職を重複させない。理由は書かない。"
+)
+
+
+def route_speakers(
+    llm: StructuredLLM,
+    *,
+    turns: Sequence[ChatTurn],
+    model: str,
+    model_tier: str,
+    reaction: bool = False,
+    limit: int = MAX_SPEECHES_PER_TURN,
+) -> list[str]:
+    """このラウンドで発言すべき役職を、発言順のリストで返す(空も可)。
+
+    ``reaction=False`` は代表の発言を受けた1回目のラウンド、``True`` は役員の発言に
+    反応するラウンド。出力は ``SPEAKER_ROUTE_SCHEMA``(enum)で役職キーを検証済みで、
+    さらに重複除去と ``limit`` 件への打ち切りを決定論的に行う(LLM の出力をそのまま
+    実行数にしない — 不変原則1「LLM は判断材料を作る側」)。
+    """
+    if not turns:
+        raise ValueError("会議のトランスクリプトが空(代表の発言が必要)")
+    result = llm.complete(
+        system=_REACTION_ROUTER_SYSTEM if reaction else _ROUTER_SYSTEM,
+        user="# 会議のこれまでの発言(古い順)\n\n" + _conversation_block(turns),
+        schema=SPEAKER_ROUTE_SCHEMA,
+        task_type=TASK_TYPE,
+        model_tier=model_tier,
+        model=model,
+    )
+    selected: list[str] = []
+    for role in result.content["roles"]:
+        role = str(role)
+        if role in BOARDROOM_ROLES and role not in selected:
+            selected.append(role)
+    return selected[:limit]
+
+
+# ── 発言段 ─────────────────────────────────────────────────────────────────────
 _MEETING_DIRECTIVE = (
     "\n\n---\n"
     "# 役員室会議(05-governance §5)\n"
     "ここはダッシュボードの役員室で、いま開かれているのは**会議**である。出席者は代表"
-    f"(ユーザー)と全役職({_ATTENDEE_LIST})であり、あなたは上記の役職として発言する。\n"
-    f"- 発言順は {_ORDER_LIST} の固定順。あなたより前の役員の発言は"
-    "「# これまでの会議」に全て入っている。**前の発言を踏まえて議論する**"
-    "(同意・反論・補足を明示し、誰の何に対してかを書く)\n"
+    f"(ユーザー)と全役職({'・'.join(BOARDROOM_ROLES[r] for r in MEETING_ORDER)})であり、"
+    "あなたは上記の役職として発言する。\n"
+    "- 毎ターン、進行役が**発言すべき役職だけ**を選ぶ。あなたが選ばれたのは、この論点に"
+    "あなたの発言が要るからである。同意の繰り返しではなく、**あなたにしか出せない論点**を"
+    "述べる\n"
+    "- これまでの発言(代表・先行した役員)は「# これまでの会議」に全て入っている。"
+    "**前の発言を踏まえて議論する**(同意・反論・補足を明示し、誰の何に対してかを書く)\n"
     "- 発言は reply フィールドに Markdown で書く(見出し・箇条書き可)\n"
     "- 議論規約(追従の禁止): 代表や他の役員の提案・判断には妥当性の評価(根拠付き)・"
     "リスクや反例・より良い代替案を返す。全面同意する場合は「反対すべき点を探して"
     "見つからなかった」と明示する\n"
-    f"- **追加すべき論点がなければ「{PASS_TEXT}」とだけ返してよい。同意の繰り返しは不要**\n"
     "- 他の役職になりきって発言しない(自分の役職の発言だけを書く)\n"
     "- この対話は判断材料であり、何も自動執行されない。発効する決定は代表が「決議」として"
     "明示的にマークしたもののみ(05 §4)\n"
 )
 
 # 独立役員の応答義務(05 §3: 全ての重要決定に最低1つの懸念を出す義務)は会議形式でも
-# 維持する。パスを許すのは軽微な話題に限る(05 §6-5: 懸念ゼロの連続は監査アラート対象)。
+# 維持する。ルータ側の規則2(重要決定なら必ず選ぶ)と対で機能する。
 _ROLE_DIRECTIVES: dict[str, str] = {
     "independent_officer": (
         "- **応答義務(05 §3)**: 議題に重要決定(実弾移行・IPS 改訂・リスクリミット変更・"
-        "保護領域の変更・戦略昇格など)が含まれる場合は、必ず懸念か反対視点を1つ以上出す。"
-        f"「{PASS_TEXT}」でパスしてよいのは軽微な話題のみ\n"
+        "保護領域の変更・戦略昇格など)が含まれる場合は、必ず懸念か反対視点を1つ以上出す"
+        "(05 §6-5: 懸念ゼロ回答の連続は監査アラート対象)\n"
     ),
 }
 
+# ルータが誰も選ばなかったときの進行役への追加指示(代表の発言を黙殺しないための最小応答)。
+_FACILITATOR_DIRECTIVE = (
+    "- **この発言は会議の進行役としての応答である**: 他の役員が発言する必要はないと"
+    "判断された論点なので、**簡潔に(数行で)**応答し、必要なら次に議論すべき点を1つ示す\n"
+)
 
-def meeting_directive(role: str) -> str:
-    """当該役職に付ける会議指示(共通指示+役職固有の義務)。"""
-    return _MEETING_DIRECTIVE + _ROLE_DIRECTIVES.get(role, "")
 
-
-def is_pass(text: str) -> bool:
-    """発言が「(発言なし)」パスかどうか(前後の空白・改行は無視する)。"""
-    return text.strip() == PASS_TEXT
+def meeting_directive(role: str, *, facilitator: bool = False) -> str:
+    """当該役職に付ける会議指示(共通指示+役職固有の義務+進行役指示)。"""
+    directive = _MEETING_DIRECTIVE + _ROLE_DIRECTIVES.get(role, "")
+    return directive + _FACILITATOR_DIRECTIVE if facilitator else directive
 
 
 def speak(
@@ -212,6 +308,7 @@ def speak(
     turns: Sequence[ChatTurn],
     model: str,
     model_tier: str,
+    facilitator: bool = False,
 ) -> str:
     """当該役職の会議発言を1つ得る。
 
@@ -227,7 +324,7 @@ def speak(
         "上記を踏まえ、あなたの役職として発言せよ。",
     ]
     result = llm.complete(
-        system=onboarding_prompt + meeting_directive(role),
+        system=onboarding_prompt + meeting_directive(role, facilitator=facilitator),
         user="\n\n".join(parts),
         schema=REPLY_SCHEMA,
         task_type=TASK_TYPE,
@@ -237,47 +334,89 @@ def speak(
     return str(result.content["reply"])
 
 
+# ── 会議の1ターン(ルータ段 → 発言段 → 反応ラウンド)──────────────────────────
+class MeetingResult(NamedTuple):
+    """会議1ターンの結果。``rounds`` はラウンドごとにルータが選んだ役職(コスト記録用)。"""
+
+    turns: list[ChatTurn]
+    rounds: list[list[str]]
+
+
 def conduct_meeting(
-    llm: StructuredLLM,
     *,
+    router_llm: StructuredLLM,
+    speaker_llm: StructuredLLM,
     onboarding_for_role: Callable[[str], str],
     turns: Sequence[ChatTurn],
-    model: str,
-    model_tier: str,
-    roles: Sequence[str] = MEETING_ORDER,
+    router_model: str,
+    router_tier: str,
+    speaker_model: str,
+    speaker_tier: str,
     on_reply: Callable[[ChatTurn], None] | None = None,
-) -> list[ChatTurn]:
-    """代表の1発言に対し、全役職を固定順で逐次発言させる(会議の1ターン)。
+    max_speeches: int = MAX_SPEECHES_PER_TURN,
+) -> MeetingResult:
+    """代表の1発言に対し、反応すべき役員だけを発言させる(会議の1ターン)。
 
-    ``turns`` は代表の新しい発言までを含む会議トランスクリプト(末尾は代表の発言)。
-    各役職には**先行役員の発言を追加したトランスクリプト**を渡す(後の発言者が前の
-    発言を踏まえて議論するため — モジュール docstring の 05 §6-2 に関する注記を参照)。
-    ``onboarding_for_role`` は役職キー → 着任プロンプトの関数で、役職ごとに独立に
-    組み立てられる(永続記憶の分離はここで担保される)。
+    手順(2026-08-03 代表指示):
 
-    ``on_reply`` は1発言ごとに呼ばれるコールバック(UI の逐次描画用)。LLM 呼び出しが
-    失敗した場合は例外をそのまま送出する(既に得た発言は呼び出し側が ``on_reply`` で
-    受け取っている — 発言を握り潰さない)。
+    1. ルータ(安価な階層)が発言すべき役職を発言順で選ぶ。誰も選ばれなければ
+       ``FACILITATOR_ROLE`` が簡潔に応答する(代表の発言を黙殺しない)
+    2. 選ばれた役職が順に発言する。各役職には**先行者の発言を追加したトランスクリプト**
+       を渡す(モジュール docstring の 05 §6-2 に関する注記を参照)
+    3. 予算が残っていればルータをもう1度だけ回し、反応すべき役職が発言する(最大1回)
+
+    発言(高階層呼び出し)は合計 ``max_speeches`` 件を超えない — ルータの出力が何であれ
+    コード側で打ち切る。``on_reply`` は1発言ごとに呼ばれるコールバック(UI の逐次描画用)。
+    LLM 呼び出しが失敗した場合は例外をそのまま送出する(既に得た発言は呼び出し側が
+    ``on_reply`` で受け取っている — 発言を握り潰さない)。
     """
     if not turns or turns[-1].speaker != "representative":
         raise ValueError("turns の末尾は代表(representative)の発言でなければならない")
+    if max_speeches < 1:
+        raise ValueError("max_speeches は 1 以上でなければならない(無応答の会議は作らない)")
     transcript = list(turns)
     new_turns: list[ChatTurn] = []
-    for role in roles:
-        reply = speak(
-            llm,
-            role=role,
-            onboarding_prompt=onboarding_for_role(role),
-            turns=transcript,
-            model=model,
-            model_tier=model_tier,
+    rounds: list[list[str]] = []
+
+    def _speak_round(roles: Sequence[str], *, facilitator: bool = False) -> None:
+        for role in roles:
+            reply = speak(
+                speaker_llm,
+                role=role,
+                onboarding_prompt=onboarding_for_role(role),
+                turns=transcript,
+                model=speaker_model,
+                model_tier=speaker_tier,
+                facilitator=facilitator,
+            )
+            turn = ChatTurn(role, reply.strip())
+            transcript.append(turn)
+            new_turns.append(turn)
+            if on_reply is not None:
+                on_reply(turn)
+
+    selected = route_speakers(
+        router_llm, turns=transcript, model=router_model, model_tier=router_tier,
+        limit=max_speeches,
+    )
+    if selected:
+        rounds.append(selected)
+        _speak_round(selected)
+    else:
+        # 進行役の最小応答。ルータの空選択でも会議は必ず1発言を返す。
+        rounds.append([FACILITATOR_ROLE])
+        _speak_round([FACILITATOR_ROLE], facilitator=True)
+
+    remaining = max_speeches - len(new_turns)
+    if remaining > 0:
+        reacting = route_speakers(
+            router_llm, turns=transcript, model=router_model, model_tier=router_tier,
+            reaction=True, limit=remaining,
         )
-        turn = ChatTurn(role, reply.strip())
-        transcript.append(turn)
-        new_turns.append(turn)
-        if on_reply is not None:
-            on_reply(turn)
-    return new_turns
+        if reacting:
+            rounds.append(reacting)
+            _speak_round(reacting)
+    return MeetingResult(turns=new_turns, rounds=rounds)
 
 
 # ── 議事録保存・決議マーク ─────────────────────────────────────────────────────
@@ -373,18 +512,13 @@ _DIGEST_SYSTEM = (
     "- **代表および他の役職の発言は対象外**(会議の全文を読むが、要約して永続記憶に"
     "書き込むのは指定された役職本人の発言のみ — 役職間で記憶を共有しない 05 §6-2)。"
     "他者の発言は本人の主張を理解する文脈としてのみ使う\n"
-    f"- 「{PASS_TEXT}」だけの発言は引き継ぐ内容がない。引き継ぐ価値のある内容が"
-    "なければ stances は空配列でよい\n"
+    "- 引き継ぐ価値のある内容がなければ stances は空配列でよい\n"
 )
 
 
 def speaking_roles(turns: Sequence[ChatTurn]) -> list[str]:
-    """実質的な発言(パスでない発言)をした役職を固定順で返す。
-
-    stances 要約の対象を絞る用途(``(発言なし)`` しか出していない役職に永続記憶を
-    作らせない)。
-    """
-    spoke = {t.speaker for t in turns if t.speaker != "representative" and not is_pass(t.text)}
+    """発言した役職を正準順で返す(stances 要約の対象 — 発言していない役職は作らない)。"""
+    spoke = {t.speaker for t in turns if t.speaker != "representative"}
     return [r for r in MEETING_ORDER if r in spoke]
 
 
@@ -440,21 +574,24 @@ def record_chat_stances(
 
 __all__ = [
     "BOARDROOM_ROLES",
+    "FACILITATOR_ROLE",
+    "MAX_SPEECHES_PER_TURN",
     "MEETING_ORDER",
-    "PASS_TEXT",
     "REPLY_SCHEMA",
+    "SPEAKER_ROUTE_SCHEMA",
     "STANCE_DIGEST_SCHEMA",
     "TASK_TYPE",
     "ChatTurn",
+    "MeetingResult",
     "SavedMinute",
     "attendees_of",
     "conduct_meeting",
     "digest_stances",
     "fetch_resolutions",
-    "is_pass",
     "mark_resolution",
     "meeting_directive",
     "record_chat_stances",
+    "route_speakers",
     "save_office_chat_minute",
     "speak",
     "speaking_roles",

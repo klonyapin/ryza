@@ -909,15 +909,11 @@ def _role_avatar(role: str) -> str | None:
 def _render_chat_turn(turn: boardroom.ChatTurn) -> None:
     """1 発言を吹き出し表示する。役職側は名前(役職)+キャラクター色+アバター。
 
-    「(発言なし)」のパスは小さく畳んで表示する(非表示にはしない — 発言機会が
-    あったことの証跡。05 §6-5 の「懸念ゼロ回答の連続」を代表が目視できる形で残す)。
+    発言しなかった役員は単に現れない(会議の進行役が発言者を選ぶ方式のため — 05 §5)。
     """
     if turn.speaker == "representative":
         with st.chat_message("user"):
             st.markdown(turn.text)
-        return
-    if boardroom.is_pass(turn.text):
-        st.caption(f"— {_role_display(turn.speaker)}: {boardroom.PASS_TEXT}")
         return
     member = _role_member(turn.speaker)
     with st.chat_message("assistant", avatar=_role_avatar(turn.speaker)):
@@ -929,18 +925,18 @@ def _render_chat_turn(turn: boardroom.ChatTurn) -> None:
         st.markdown(turn.text)
 
 
-# 役員室は経営審議の場であり 05 §3 の設計階層(CIO・独立役員=fable)どおり fable 固定
-# — 2026-08-03 代表指示。会議形式のため代表1発言あたり役員数分の fable 呼び出しになる
-# (コストは meta.runs に記録)。
+# 役員の発言は 05 §3 の設計階層(CIO・独立役員=fable)どおり fable 固定 — 2026-08-03
+# 代表指示。誰が発言するかを選ぶルータ段は安価な mid 固定(交通整理に高階層は要らない)。
+# 1ターンの fable 呼び出しは boardroom.MAX_SPEECHES_PER_TURN 件で打ち切る。
 _BOARDROOM_TIER = "fable"
+_ROUTER_TIER = "mid"
 
 
 def page_boardroom() -> None:
     st.header("役員室")
-    order = " → ".join(boardroom.BOARDROOM_ROLES[r] for r in boardroom.MEETING_ORDER)
     st.caption(
-        "経営レベルの審議の場(05-governance §5)。代表の発言に対し、全役職が"
-        f"{order} の固定順で逐次応答する**会議形式**(2026-08-03 代表指示)。"
+        "経営レベルの審議の場(05-governance §5)。代表が発言すると、進行役が"
+        "**反応すべきと判断した役員だけ**が順に応答する会議形式(2026-08-03 代表指示)。"
         "対話は判断材料であり、何も自動執行しない(不変原則1)。"
         "発効する決定は「決議」マークのみ。"
     )
@@ -953,7 +949,8 @@ def page_boardroom() -> None:
     st.caption(
         "出席: 代表、"
         + "、".join(_role_display(r) for r in boardroom.MEETING_ORDER)
-        + f" / モデル階層: {_BOARDROOM_TIER}(固定)"
+        + f" / 発言={_BOARDROOM_TIER}・進行役={_ROUTER_TIER}(固定)"
+        + f" / 1ターン最大 {boardroom.MAX_SPEECHES_PER_TURN} 発言"
     )
 
     turns: list[boardroom.ChatTurn] = st.session_state.setdefault("br_turns", [])
@@ -972,28 +969,36 @@ def page_boardroom() -> None:
             _render_chat_turn(turn)
 
         try:
-            # LLM 呼び出しは会議1ターン(代表発言→全役員応答)で 1 Run にまとめる
-            # (コスト記録の単位 — 仕様 7)。セッション単位の Run にしない理由:
-            # Streamlit にはセッション終了フックがなく、ブラウザを閉じると 'running'
-            # 行が漏れ残るため。
+            # LLM 呼び出しは会議1ターン(ルータ段+発言段+反応ラウンド)で 1 Run に
+            # まとめる(コスト記録の単位 — ルータ呼び出しも同 Run に入る)。セッション
+            # 単位の Run にしない理由: Streamlit にはセッション終了フックがなく、
+            # ブラウザを閉じると 'running' 行が漏れ残るため。
             with run_ctx(
                 "dashboard.boardroom.meeting",
-                {"tier": _BOARDROOM_TIER, "roles": list(boardroom.MEETING_ORDER)},
+                {"speaker_tier": _BOARDROOM_TIER, "router_tier": _ROUTER_TIER},
                 conn=wconn,
             ) as r:
-                with st.spinner(f"役員が順に発言中({_BOARDROOM_TIER})…"):
-                    boardroom.conduct_meeting(
-                        _boardroom_llm(r, _BOARDROOM_TIER),
+                with st.spinner(
+                    f"進行役({_ROUTER_TIER})が発言者を選び、役員({_BOARDROOM_TIER})が"
+                    "順に発言中…"
+                ):
+                    result = boardroom.conduct_meeting(
+                        router_llm=_boardroom_llm(r, _ROUTER_TIER),
+                        speaker_llm=_boardroom_llm(r, _BOARDROOM_TIER),
                         # 着任プロンプトは役職ごとに毎回組み立てる(永続記憶は役職別 —
                         # 05 §2・§6-2。会議で共有されるのはトランスクリプトのみ)。
                         onboarding_for_role=lambda role: personas.assume_role(wconn, role),
                         turns=turns,
-                        model=_llm_config().model_for(_BOARDROOM_TIER),
-                        model_tier=_BOARDROOM_TIER,
+                        router_model=_llm_config().model_for(_ROUTER_TIER),
+                        router_tier=_ROUTER_TIER,
+                        speaker_model=_llm_config().model_for(_BOARDROOM_TIER),
+                        speaker_tier=_BOARDROOM_TIER,
                         # 発言が出るたびに追記・描画する(途中で失敗しても既に得た
                         # 発言は残す — 会議で実際にあった発言を握り潰さない)。
                         on_reply=_append_and_render,
                     )
+                # ルータの選定結果を Run に残す(誰が呼ばれたかの事後検証用)。
+                r.update_params({"rounds": len(result.rounds), "roles": result.rounds})
         except Exception as exc:  # noqa: BLE001 - API 失敗時も会議を壊さず継続
             if len(turns) == spoke_before:
                 turns.pop()  # 誰も発言できなかった場合は代表の発言ごと取り消す
