@@ -20,7 +20,6 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.types.json import Json
 
-from ryza.bot import killswitch
 from ryza.gate.compliance import (
     GateResult,
     LimitsState,
@@ -75,6 +74,18 @@ def advance_order_status(conn: psycopg.Connection, order_id: int, new_status: st
 
 
 # ── 現在状態の読み出し(gate_and_record 用)──────────────────────────────────
+def _load_trading_state(conn: psycopg.Connection) -> str | None:
+    """``ops.trading_state`` の現在値。行が無ければ None(→ G-0 が「未初期化」で block)。
+
+    bot 側 ``killswitch.get_state`` は表示用途の互換として欠落=normal を返すが、
+    ゲートは fail-closed — 状態が測定できないことを normal と主張しない。
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT state FROM ops.trading_state")
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
 def _load_positions(conn: psycopg.Connection, book_id: str) -> tuple[PositionState, ...]:
     with conn.cursor() as cur:
         cur.execute(
@@ -176,7 +187,7 @@ def gate_and_record(
         trade_date = datetime.now(UTC).astimezone(_JST).date()
 
     state = PortfolioState(
-        trading_state=killswitch.get_state(conn),
+        trading_state=_load_trading_state(conn),
         nav=nav,
         cash=cash,
         positions=_load_positions(conn, proposal.book_id),

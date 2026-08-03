@@ -10,7 +10,9 @@
 - G-F 入力完全性(fail-closed): 判定に必要な入力(NAV・現金・positions・参照価格・
   当日売買代金・リスク状態)が欠けていれば pass ではなく block(reason=入力不足)
 - G-0 取引状態: ``ops.trading_state`` が normal 以外なら block(凍結中の例外取引の
-  承認経路は T-016。ここでは block+reason で足りる)
+  承認経路は T-016。ここでは block+reason で足りる)。行欠落(未初期化)も block —
+  ゲートでは「状態が測定できない」=「安全と主張できない」(fail-closed)。bot 側
+  ``killswitch.get_state`` の「欠落=normal」互換はゲートには適用しない
 - G-1 商品許可: products.default=deny — allowed に無い商品種別は block。
   prohibitions.instruments(レバ/インバース ETF・監理銘柄)は block
 - G-2 ユニバース(マンデート): 銘柄のユニバース分類が当該 FM の universe に含まれるか。
@@ -136,7 +138,7 @@ class LimitsState:
 class PortfolioState:
     """判定時点の現在状態。欠けている入力は fail-closed(G-F)で block になる。"""
 
-    trading_state: str | None  # ops.trading_state(normal|frozen|...)
+    trading_state: str | None  # ops.trading_state(normal|frozen|...)。None=未初期化 → G-0 block
     nav: Decimal | None  # 帳簿 NAV(JPY)
     cash: Decimal | None  # 現金(JPY)
     positions: tuple[PositionState, ...] | None  # 当該帳簿の全ポジション
@@ -232,7 +234,15 @@ def _class_gross_post(ctx: _Ctx) -> dict[str, Decimal]:
 
 # ── 規則(独立の小関数。返り値は Reason のリスト)──────────────────────────────
 def _g0_trading_state(ctx: _Ctx) -> list[Reason]:
-    """G-0 取引状態: normal 以外は block(Kill Switch — IPS §5)。"""
+    """G-0 取引状態: normal 以外は block(Kill Switch — IPS §5)。行欠落も block。"""
+    if ctx.state.trading_state is None:
+        return [
+            Reason(
+                "G-0",
+                "block",
+                "取引状態未初期化(ops.trading_state に行が無い — fail-closed)",
+            )
+        ]
     if ctx.state.trading_state != "normal":
         return [
             Reason(
@@ -558,8 +568,8 @@ def _g10_risk_state(ctx: _Ctx) -> list[Reason]:
 def _missing_inputs(proposal: OrderProposal, state: PortfolioState, ips: IPSConfig) -> list[str]:
     """fail-closed: 判定に必要な入力の欠落を列挙する。"""
     missing = []
-    if state.trading_state is None:
-        missing.append("trading_state")
+    # trading_state の欠落は G-F ではなく G-0 が「取引状態未初期化」として block する
+    # (規則 ID を Kill Switch 系に揃え、監査ログ上の意味を明確にするため)。
     if state.nav is None or state.nav <= 0:
         missing.append("nav")
     if state.cash is None:

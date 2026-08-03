@@ -28,6 +28,22 @@ _NAV = Decimal(10_000_000)
 _CASH = Decimal(5_000_000)
 
 
+@pytest.fixture(autouse=True)
+def _normal_trading_state(conn):
+    """取引状態を normal に初期化(トランザクション内・rollback で巻き戻る)。
+
+    ゲートは行欠落を G-0 で block する(fail-closed)ため、通常系テストは明示的に
+    normal 行を用意する。欠落そのものの検証は専用テストで行う。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ops.trading_state (state, updated_by) VALUES ('normal', 'test')
+            ON CONFLICT (singleton) DO UPDATE SET state = 'normal', updated_by = 'test'
+            """
+        )
+
+
 def _gate(conn, run_id, proposal=None, *, nav=_NAV, cash=_CASH, **kw):
     return gate_and_record(
         conn, proposal or jp_stock_proposal(), nav=nav, cash=cash, run_id=run_id, **kw
@@ -145,6 +161,17 @@ def test_gate_and_record_frozen_state_blocks(conn, run_id, limits_row):
     _, _, result = _gate(conn, run_id)
     assert result.verdict == "block"
     assert any(r.rule == "G-0" for r in result.reasons)
+
+
+def test_gate_and_record_blocks_when_state_missing(conn, run_id, limits_row):
+    """ops.trading_state の行欠落は G-0「取引状態未初期化」で block(fail-closed)。"""
+    limits_row()
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM ops.trading_state")  # トランザクション内・rollback で復元
+    order_id, _, result = _gate(conn, run_id)
+    assert result.verdict == "block"
+    assert any(r.rule == "G-0" and "未初期化" in r.message for r in result.reasons)
+    assert _order_row(conn, order_id)[0] == "blocked"
 
 
 def test_gate_and_record_atomicity(conn, run_id, limits_row):

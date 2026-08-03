@@ -59,7 +59,6 @@ def test_baseline_pass(ips, mandates):
         {"positions": None},
         {"daily_turnover": None},
         {"limits": None},
-        {"trading_state": None},
     ],
 )
 def test_fail_closed_missing_inputs(ips, mandates, state_kw):
@@ -83,6 +82,17 @@ def test_fail_closed_unknown_asset_class(ips, mandates):
 
 
 # ── G-0 取引状態 ─────────────────────────────────────────────────────────────
+def test_g0_blocks_when_state_missing(ips, mandates):
+    """行欠落(未初期化)も block — 状態が測定できないことを normal と主張しない。"""
+    result = evaluate(
+        jp_stock_proposal(), make_state(trading_state=None), ips, mandates
+    )
+    assert result.verdict == "block"
+    assert rules_of(result) == {"G-0"}
+    assert any("未初期化" in r.message for r in result.reasons)
+    assert "G-10" in result.checked_rules  # 入力は揃っているため他規則の評価は継続
+
+
 @pytest.mark.parametrize("state", ["frozen", "winding_down", "flattening", "flattened"])
 def test_g0_blocks_when_not_normal(ips, mandates, state):
     result = evaluate(jp_stock_proposal(), make_state(trading_state=state), ips, mandates)
