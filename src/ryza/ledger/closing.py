@@ -55,6 +55,13 @@ RESTATEMENT_URGENT_BUSINESS_DAYS = 5
 # price_source は callable(instrument_id)->price、または dict{instrument_id: price}
 PriceSource = Callable[[int], Any] | dict[int, Any]
 
+#: 再締め用の**過去日**価格ソース: (instrument_id, date) -> 終値 | None。
+#: 当日の締め(``PriceSource``)と違い日付を取る — 再締めは過去日の評価替えを
+#: その日の終値で打ち直すため。終値が無いときは例外ではなく ``None`` を返すこと
+#: (当日の締めは評価不能を例外で止めるが、再締めが過去日の欠測で当日の締めごと
+#: 落ちるのは fail-safe の向きが逆になる — 欠測日は再適用せず注記を残す)。
+HistoricalPriceSource = Callable[[int, _date], Any | None]
+
 
 def _price_of(price_source: PriceSource, instrument_id: int) -> Any:
     if callable(price_source):
@@ -364,6 +371,55 @@ _RESTATEMENT_NOTE = (
     "遅延約定を含む日の建玉は取得原価のままで時価ではない。"
 )
 
+#: MTM を集計内で再適用できた日の注記(独立審査 新-3 の是正)。
+_RESTATEMENT_NOTE_MTM = (
+    "再締めは記帳済み仕訳の集計をやり直し、建玉は as_of リプレイで復元した"
+    "その日の数量をその日の終値で評価替えして NAV に反映した(仕訳は書かない)。"
+)
+
+
+def _reapply_mtm(
+    conn: psycopg.Connection,
+    book_id: str,
+    snap_date: _date,
+    price_source: HistoricalPriceSource,
+) -> dict[str, Any] | None:
+    """``snap_date`` 時点の建玉を復元し、その日の終値で評価替えした **NAV 調整額**を返す。
+
+    **仕訳は書かない**(独立審査 新-3 の是正における制約): 過去日付への新規記帳は
+    ``journal_entries`` の水位を進めて自分自身を stale にし、再締めが毎日仕訳を積む
+    無限ループになる。評価替えは集計の中だけで行い、結果を ``detail`` に証憑として残す。
+
+    数量は ``_util.replay_position(as_of=snap_date)``、帳簿価額は
+    ``_util.securities_book_value(as_of=snap_date)`` — どちらも同じ日付境界で切るので、
+    差分 ``時価 − 帳簿価額`` は ``post_mark_to_market`` がその日に打ったはずの delta と
+    一致する(NAV = 資産 − 負債 なので、その delta をそのまま NAV に足せばよい)。
+
+    戻り値 ``{"delta", "positions"}``。**1 銘柄でも終値が無い日は None**(部分適用は
+    「原価でも時価でもない NAV」を作るため、その日は再適用しない — 呼び出し側が
+    ``mtm_not_reapplied`` を維持する)。
+    """
+    positions: dict[str, Any] = {}
+    delta = Decimal(0)
+    for iid in _util.held_instruments(conn, book_id):
+        qty, _cost = _util.replay_position(conn, book_id, iid, as_of=snap_date)
+        if qty == 0:
+            continue
+        raw = price_source(iid, snap_date)
+        if raw is None:
+            return None
+        price = _util.to_decimal(raw)
+        market_value = qty * price
+        book_value = _util.securities_book_value(conn, book_id, iid, as_of=snap_date)
+        delta += market_value - book_value
+        positions[str(iid)] = {
+            "qty": str(qty),
+            "price": str(price),
+            "market_value": str(market_value),
+            "book_value": str(book_value),
+        }
+    return {"delta": delta, "positions": positions, "priced_at": snap_date.isoformat()}
+
 
 def reclose_stale(
     conn: psycopg.Connection,
@@ -371,6 +427,7 @@ def reclose_stale(
     book_id: str,
     through: _date,
     run_id: int,
+    price_source: HistoricalPriceSource | None = None,
 ) -> list[dict[str, Any]]:
     """締めの後に仕訳が立った日(stale 日)を水位で検出し、その日だけ再計算する。
 
@@ -384,11 +441,21 @@ def reclose_stale(
     ように NAV が動かない仕訳でも水位は進む。NAV 等値でスキップすると水位が古いまま
     残り、同じ日を毎日 stale と誤検出し続ける(かつ本当の遅延を見分けられない)。
 
-    **MTM を打ち直さない理由**(独立審査 再-6 で追認): ``post_mark_to_market`` は
-    ``replay_position``(``entry_date`` で絞らない)の現在数量を使うため、過去日付で
-    呼ぶとその日に存在しなかった建玉を過去日付の仕訳として書いてしまう。過去日への
-    新規記帳は行わず、既に記帳された仕訳の集計だけをやり直す。代償として遅延約定の
-    ある日の建玉は取得原価のままになるので、``detail`` にその旨を明記する。
+    **MTM の再適用**(独立審査 新-3 の是正): 集計だけをやり直すと、遅延**約定**が入った
+    日の建玉が取得原価のまま残り、翌日の締めが時価に打ち直した瞬間に「約定日の値洗い差 ×
+    数量 / NAV」の**恒久的な偽リターン**が立つ(審査実測: 市場 1200 の日に 1000 で 1000 株を
+    遅延記帳 → 真値 ``[0.0]`` に対し観測 ``[+0.020]``、翌日以降も訂正されない)。そこで
+    ``price_source`` が渡された日は、``_util.replay_position(as_of=snap_date)`` でその日
+    時点の建玉を復元し、その日の終値で評価替えした差分を **集計内で** NAV に足す。
+
+    **仕訳は書かない**: ``post_mark_to_market`` を過去日付で呼ぶ経路は作らない(独立審査
+    再-6 の理由はそのまま生きている — 過去日への新規記帳は水位を進めて自分自身を stale に
+    する)。再適用の根拠は ``detail.mtm_reapplied`` に建玉・終値・帳簿価額として残す。
+
+    **対象は ``recon_invalidated`` と同じ集合**(遅延仕訳に建玉行を含む日)。それ以外の日の
+    MTM は締め時点の建玉に対して正しく打たれており、打ち直す理由が無い。``price_source`` が
+    無い / その日の終値が 1 銘柄でも欠ける日は再適用せず ``detail.mtm_not_reapplied`` を
+    維持する(部分適用で「原価でも時価でもない NAV」を作らない)。
 
     **status / restated / recon_invalidated の定義**(独立審査 再-2 に対する裁定):
 
@@ -404,7 +471,8 @@ def reclose_stale(
     古い日の restatement は ``urgent_restatements`` が urgent 通知の対象として拾う。
 
     戻り値(日付昇順): ``[{date, nav_before, nav_after, status, restated, late_entries,
-    recon_invalidated, age_business_days, watermark_before, watermark_after}, ...]``。
+    recon_invalidated, mtm_reapplied, age_business_days, watermark_before,
+    watermark_after}, ...]``。
     ``restated`` または ``recon_invalidated`` が True の日は呼び出し側が必ず通知すること。
     """
     with conn.cursor() as cur:
@@ -413,6 +481,9 @@ def reclose_stale(
             {"book": book_id, "through": through, "wm_key": WATERMARK_KEY},
         )
         stale = cur.fetchall()
+
+    # 評価替えの対象はファンド帳簿だけ(運営帳簿に建玉は無い — run_daily_close と同じ条件)。
+    can_reapply = price_source is not None and _util.book_type(conn, book_id) == "fund"
 
     results: list[dict[str, Any]] = []
     for snap_date, stored_wm, current_wm, age, position_changing_late in stale:
@@ -426,18 +497,32 @@ def reclose_stale(
         prev_nav = _util.to_decimal(prev_nav)
         prev_detail = prev_detail if isinstance(prev_detail, dict) else {}
         totals = statements.book_totals(conn, book_id, snap_date)
-        nav = totals["nav"]
 
         # 水位を持たない日(本機能より前のスナップショット)は「遅延仕訳があった」と
         # 断定できない。NAV も変わらないならリネージの後追い記録だけを行い、
         # restatement としては扱わない — 起きていない訂正を主張しないため。
         late_entries = stored_wm is not None and (current_wm or 0) > stored_wm
-        restated = nav != prev_nav
         recon_invalidated = bool(late_entries and position_changing_late)
+
+        # 建玉が後から変わった日だけ、その日の建玉と終値で評価替えを打ち直す(新-3)。
+        # 判定には**過去の再締めで立ったフラグも含める**: 再適用は仕訳を書かないので、
+        # 2 回目の再締め(例: 同じ日に拠出資本だけが遅れて立つ)が「今回は建玉が動いて
+        # いない」として集計だけをやり直すと、前回の評価替えが NAV から消えて偽リターンが
+        # 復活する。``recon_invalidated`` は一度立ったら下ろさないので判定材料に使える。
+        invalidated_ever = bool(recon_invalidated or prev_detail.get("recon_invalidated"))
+        mtm = (
+            _reapply_mtm(conn, book_id, snap_date, price_source)  # type: ignore[arg-type]
+            if (can_reapply and invalidated_ever)
+            else None
+        )
+        if mtm is not None:
+            totals = _with_mtm(totals, mtm["delta"])
+        nav = totals["nav"]
+        restated = nav != prev_nav
         detail = (
             _restated_detail(
                 prev_detail, totals, run_id, prev_nav, nav,
-                recon_invalidated=recon_invalidated,
+                recon_invalidated=recon_invalidated, mtm=mtm,
             )
             if (late_entries or restated)
             else dict(prev_detail)
@@ -456,12 +541,30 @@ def reclose_stale(
                 "restated": restated,
                 "late_entries": late_entries,
                 "recon_invalidated": recon_invalidated,
+                "mtm_reapplied": mtm is not None,
                 "age_business_days": int(age),
                 "watermark_before": stored_wm,
                 "watermark_after": current_wm,
             }
         )
     return results
+
+
+def _with_mtm(totals: dict[str, Decimal], delta: Decimal) -> dict[str, Decimal]:
+    """評価替えの差分を集計値に載せる(``post_mark_to_market`` の仕訳と同じ効果)。
+
+    Dr securities / Cr unrealized_pnl は資産と収益を同額動かす。NAV = 資産 − 負債 なので
+    NAV も同額動く。負債・資本は動かない。
+    """
+    if delta == 0:
+        return totals
+    return {
+        **totals,
+        "assets": totals["assets"] + delta,
+        "income": totals["income"] + delta,
+        "net_income": totals["net_income"] + delta,
+        "nav": totals["nav"] + delta,
+    }
 
 
 def _restated_detail(
@@ -472,6 +575,7 @@ def _restated_detail(
     nav_after: Decimal,
     *,
     recon_invalidated: bool = False,
+    mtm: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """再締め後の ``detail``。古い建玉明細を**残さず**訂正の事実を書く(独立審査 再-2/再-3)。
 
@@ -485,6 +589,12 @@ def _restated_detail(
     まま毎日の urgent 条件にすると「一度でも遅延約定が起きたら永久に赤」になるため
     (中-5 で是正済みの欠陥の再発 — 独立審査 新-2)、**いつの再締めで立った/更新された
     か**を ``recon_invalidated_by_run`` に残し、通知側が鮮度で絞れるようにする。
+
+    ``mtm`` を渡した日は評価替えを再適用した日であり、``mtm_not_reapplied`` は False に
+    なって根拠(建玉・終値・帳簿価額)が ``mtm_reapplied`` に載る。``positions_stale`` は
+    **True のまま**にする — ``positions`` キーは締め時点の建玉スナップショットの語彙であり、
+    再締めが復元した as_of 建玉を同じキーに書くと読み手が両者を区別できなくなる
+    (再適用の建玉は ``mtm_reapplied.positions`` にある)。
     """
     history = prev_detail.get("reclose")
     history = list(history) if isinstance(history, list) else []
@@ -503,13 +613,22 @@ def _restated_detail(
         liabilities=str(totals["liabilities"]),
         net_income=str(totals["net_income"]),
         positions_stale=True,
-        mtm_not_reapplied=True,
-        restatement_note=_RESTATEMENT_NOTE,
+        mtm_not_reapplied=mtm is None,
+        restatement_note=_RESTATEMENT_NOTE if mtm is None else _RESTATEMENT_NOTE_MTM,
         restated=True,
         restated_at=datetime.now(UTC).isoformat(),
         restated_by_run=int(run_id),
         reclose=history,
     )
+    if mtm is not None:
+        detail["mtm_reapplied"] = {
+            "delta": str(mtm["delta"]),
+            "positions": mtm["positions"],
+            "priced_at": mtm["priced_at"],
+            "run_id": int(run_id),
+        }
+    else:
+        detail.pop("mtm_reapplied", None)
     # 既に立っている日を再締めが触った(= 水位が動いた)ときも「更新」として run を打ち直す。
     if recon_invalidated or prev_detail.get("recon_invalidated"):
         detail["recon_invalidated"] = True
@@ -533,6 +652,7 @@ def urgent_restatements(reclosed: list[dict[str, Any]]) -> list[dict[str, Any]]:
 __all__ = [
     "RESTATEMENT_URGENT_BUSINESS_DAYS",
     "WATERMARK_KEY",
+    "HistoricalPriceSource",
     "reclose_stale",
     "run_daily_close",
     "urgent_restatements",

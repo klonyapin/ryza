@@ -607,8 +607,8 @@ reminders:
       type: issue_create
       title: "ledger: replay_position の as_of 対応 → 再締めで過去日の評価替えを再適用する"
       labels: [impl, ledger, risk]
-      body: "再締め(`ledger.closing.reclose_stale`)は記帳済み仕訳の**集計だけ**をやり直し、評価替え(MTM)は打ち直さない。`_util.replay_position`(src/ryza/ledger/_util.py:215-264)が `entry_date` で絞らず全期間を再生するため、`post_mark_to_market`(src/ryza/ledger/posting.py:298-316)を過去日付で呼ぶと**その日に存在しなかった建玉**を過去日付の仕訳として書いてしまうからである。帰結として遅延約定のあった日の建玉は取得原価のまま残り、**恒久的な偽リターン**が立つ(独立審査の実測: 市場価格 1200 の日に 1000 で 1000 株を遅延記帳 → 真値 `[0.0]` に対し観測 `[+0.020]`、翌日以降も訂正されない)。振幅は『約定日の値洗い差 × 数量 / NAV』に限られ ±50% 級ではないが、`ewma_vol` を経由して重要-1 と同じ経路(誤 vol_exceeded)に乗る。是正: `replay_position` に `as_of`(`entry_date <= as_of` で絞る)を追加し、再締めが過去日の評価替えを**その日の建玉と終値**で再適用できるようにする。移動平均法の原価計算・`securities_book_value` の as_of との整合、既存呼び出し(post_fill の実現損益計算)への影響を確認すること。当面の防御として当該日は `detail.recon_invalidated` / `positions_stale` で名指しされている。**src/ryza/ledger/ は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 新-3。"
-    status: pending
+      body: "(実装済み)`_util.replay_position` に `as_of` を追加し、`reclose_stale` が遅延仕訳に建玉行を含む日(= `recon_invalidated` と同集合)について、その日時点の建玉を as_of リプレイで復元しその日の終値(`market.bars` — 当日の締めと同じソース)で評価替えを**集計内で**再適用するようにした。仕訳は書かない(過去日付への新規記帳は水位を進めて自分自身を stale にするため)。終値が欠ける日は再適用せず `detail.mtm_not_reapplied` を維持する縮退。**src/ryza/ledger/ は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 新-3。"
+    status: done # 2026-08-04 実装(branch mtm-replay)。審査実測 +2% → 0% を回帰テストで固定
 
   - id: close-stage-failure-visibility
     what: "締め段が落ちた日にリスク日次が未再締めの系列を黙って測る問題(再々審査 起草者留意点(a)の独立評価 — 中)"

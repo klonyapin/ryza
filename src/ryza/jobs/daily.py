@@ -378,6 +378,9 @@ def _build_restatement_embed(
             "value": (
                 f"NAV {r['nav_before']} → {r['nav_after']}"
                 f"(status={r['status']} 据え置き / 建玉明細は無効化)"
+                + ("\n評価替えを当日終値で再適用(as_of リプレイ)" if r.get("mtm_reapplied")
+                   else "\n⚠️ 終値が無く評価替えは未再適用(建玉は取得原価)"
+                   if r.get("recon_invalidated") else "")
                 + ("\n⚠️ nav_daily に行が無く risk 側は未追随" if r["nav_daily_missing"] else "")
             )[:1024],
             "inline": False,

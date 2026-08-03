@@ -292,6 +292,68 @@ def test_reclose_invalidates_recon_when_trade_entries_are_late(
     )
 
 
+def test_reclose_reapplies_mtm_from_bars_and_kills_the_false_return(
+    conn, run_id, insert_bar
+):
+    """独立審査 新-3 の実測ケース: 遅延約定日の建玉を当日終値で評価替えし直す。
+
+    d0 を締めた後に d0 付けで 1000 株@1000 が記帳される。市場の終値は両日 1200 なので、
+    d0 を取得原価のまま残すと翌日の締めが時価に打ち直した瞬間に **+2% の恒久的な偽
+    リターン**が立った(審査実測: 真値 ``[0.0]`` に対し観測 ``[+0.020]``)。再締めが
+    ``market.bars``(当日の締めと同じソース)からその日の終値を引いて再適用すれば消える。
+    """
+    d0, d1 = _G_DAYS[0], _G_DAYS[1]
+    insert_bar(1, d0, close=Decimal(1200), volume=Decimal(1_000_000))
+    insert_bar(1, d1, close=Decimal(1200), volume=Decimal(1_000_000))
+    _close(conn, run_id, d0)
+
+    posting.post_fill(  # ← d0 の締めの後に d0 付けで立つ遅延約定
+        conn, book_id="DEMO_FUND", instrument_id=1, side="buy",
+        qty=Decimal(1000), price=Decimal(1000), fee=Decimal(0),
+        entry_date=d0, run_id=run_id, fill_id=999_002, source="test",
+    )
+
+    result = _close(conn, run_id, d1)
+    item = next(r for r in result["reclose"] if r["date"] == d0)
+    assert item["recon_invalidated"] is True and item["mtm_reapplied"] is True
+    assert (item["nav_before"], item["nav_after"]) == (
+        Decimal(10_000_000), Decimal(10_200_000)
+    )
+    assert result["nav"] == Decimal(10_200_000)  # d1 は時価 = 同額
+    assert _returns(conn) == [0.0]  # 偽リターン(+0.02)が消える
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT detail FROM risk.nav_daily "
+            "WHERE book_id = 'DEMO_FUND' AND nav_date = %s",
+            (d0,),
+        )
+        assert cur.fetchone()[0]["mtm_reapplied"] is True
+
+
+def test_reclose_degrades_when_the_days_bar_is_missing(conn, run_id, insert_bar):
+    """その日の終値が bars に無ければ再適用せず、注記だけ残して縮退する。"""
+    d0, d1 = _G_DAYS[0], _G_DAYS[1]
+    _close(conn, run_id, d0)  # d0 のバー無し(建玉も無いので締めは通る)
+    posting.post_fill(
+        conn, book_id="DEMO_FUND", instrument_id=1, side="buy",
+        qty=Decimal(1000), price=Decimal(1000), fee=Decimal(0),
+        entry_date=d0, run_id=run_id, fill_id=999_003, source="test",
+    )
+    insert_bar(1, d1, close=Decimal(1200), volume=Decimal(1_000_000))
+
+    result = _close(conn, run_id, d1)
+    item = next(r for r in result["reclose"] if r["date"] == d0)
+    assert item["recon_invalidated"] is True and item["mtm_reapplied"] is False
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT detail FROM ledger.nav_snapshots "
+            "WHERE book_id = 'DEMO_FUND' AND snap_date = %s",
+            (d0,),
+        )
+        assert cur.fetchone()[0]["mtm_not_reapplied"] is True
+
+
 def _post_late_entry(conn, run_id, day, lines, description):
     posting.post_entry(
         conn, book_id="DEMO_FUND", entry_date=day, description=description, lines=lines,

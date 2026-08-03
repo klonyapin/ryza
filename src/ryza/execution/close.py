@@ -14,7 +14,10 @@
    ポジション照合(2)の両方が一致したときのみ confirmed
 4. ``ledger.closing.reclose_stale`` — 締めの**後**に同じ日付で立った仕訳がある日を
    水位(``detail.producer.input_refs``)で検出し、その日だけ NAV を再計算する
-   (独立審査 重要-2 / 再-1)。値が変わった日は ``risk.nav_daily`` 側も追随させる
+   (独立審査 重要-2 / 再-1)。値が変わった日は ``risk.nav_daily`` 側も追随させる。
+   建玉が後から動いた日は ``price_source``(当日の締めと同じ ``market.bars`` の日足)を
+   渡して**その日の終値で評価替えを再適用**する(独立審査 新-3 — 遅延約定日の建玉が
+   取得原価のまま残ることで立つ恒久的な偽リターンの根治)
 
 **NAV 二表の役割分担(T-015 統合時の設計リード裁定 2026-08-03)**:
 ``ledger.nav_snapshots`` が NAV の正(ledger が所有・T-015 の ``risk/daily.py`` は
@@ -168,6 +171,21 @@ def _make_price_source(
     return _price
 
 
+def _historical_price_source(conn: psycopg.Connection) -> Callable[[int, _date], Decimal | None]:
+    """再締めの評価替えに使う**過去日**の終値ソース(``closing.HistoricalPriceSource``)。
+
+    当日の締め(``_make_price_source``)と同じ ``market.bars`` の日足を引くが、無いときは
+    例外ではなく ``None`` を返す — 過去日のバーが取り込まれていないだけで当日の締めごと
+    落ちるのは fail-safe の向きが逆であり、``reclose_stale`` はその日の再適用を諦めて
+    ``mtm_not_reapplied`` を残す(独立審査 新-3 の是正の縮退動作)。
+    """
+
+    def _price(instrument_id: int, day: _date) -> Decimal | None:
+        return latest_close(conn, int(instrument_id), day)
+
+    return _price
+
+
 def run_demo_close(
     conn: psycopg.Connection,
     *,
@@ -229,7 +247,8 @@ def run_demo_close(
     # 当日のスナップショットを先に確定させておけば、当日は水位が最新になり自動的に
     # 検出対象から外れる(自分自身を再締めしない)。
     reclosed = closing.reclose_stale(
-        conn, book_id=book_id, through=date, run_id=run_id
+        conn, book_id=book_id, through=date, run_id=run_id,
+        price_source=_historical_price_source(conn),
     )
     _sync_nav_daily_after_reclose(conn, book_id, reclosed, run_id)
 
@@ -299,6 +318,9 @@ def _sync_nav_daily_after_reclose(
         detail.update(
             reclose=history, positions_stale=True, restated=True, restated_by_run=run_id
         )
+        if item.get("mtm_reapplied"):
+            # その日の建玉を as_of リプレイで復元し終値で評価替えした NAV(独立審査 新-3)。
+            detail["mtm_reapplied"] = True
         if item["recon_invalidated"]:
             # 一度立ったら下ろさない(nav_snapshots 側と同じ扱い)。
             detail["recon_invalidated"] = True
