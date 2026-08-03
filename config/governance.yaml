@@ -179,6 +179,70 @@ protected_areas:
   #   ops/fetch-fonts.sh … 生成物(フォント)がリポジトリに入るだけで稼働経路ではない
   # この判断が変わる場合(site を動的化する・compose を本番に使う等)は登録し直すこと。
 
+  # ── 対照・ゴールデンを持つテスト(2026-08-04 登録・reminder protect-equivalence-tests)──
+  # 登録基準: **テストが実装から独立した参照(旧 SQL の凍結コピー・ゴールデンファイル・
+  # 発効値の写し・構造の存在検査)を保持し、その参照を先に書き換えると以後の保護領域変更が
+  # テスト差分に現れなくなるもの**。これらは二段手順で無力化できる — (1) 参照を「新形に
+  # 合わせて」書き換える(テストは保護外なので無審査・CI も緑)、(2) 後日、実装(保護領域)を
+  # 変える(審査に載るが、対照は既に空回りしており審査者は緑の CI を見て等価と誤認する)。
+  # tests/test_ips.py を invariant_tests として登録した先例(懸念1)と同じ論法である。
+  # 実装側(ledger/risk/gate/migrations/ops/lib)は既に保護領域であり、これらのテストは実務上
+  # 同じ PR で動くため、登録による追加の手続コストはほぼゼロで二段手順だけを塞ぐ。
+  #
+  # 会計・リスクの同値性を固定する対照(査-1)。旧 SQL を逐語で凍結し、新旧が同一データで
+  # 完全一致することを固定する。書き換えれば「速さのための近似」が無検出で入り、
+  # 遅延仕訳の取りこぼし(再締めされない日)・外部フローの取りこぼし(NAV リターンの誤り→
+  # 実現ボラ→発注ブロック判定)がそのまま統制を素通りする。
+  - path: tests/ledger/test_stale_query_rewrite.py
+    area: invariant_tests
+  - path: tests/risk/test_navflow_query_rewrite.py
+    area: invariant_tests
+  # リスク判定の全キー・スナップショット固定(独立役員審査 2026-08-04 推奨)。ゴールデンを
+  # 先に再生成すれば、以後のフラグ・測定値・理由コードの変更が差分に現れない。判定不変の
+  # 証拠能力はゴールデン本体(json)に宿るため、テストと同格で登録する。
+  - path: tests/risk/test_engine_invariance.py
+    area: invariant_tests
+  - path: tests/risk/engine_snapshot.json
+    area: invariant_tests
+  # スキーマ統制の存在検査(帳簿分離・貸借一致・証憑必須・追記オンリー・分類履歴ガードの
+  # 各トリガが DB に存在すること)。migrations/*.sql は保護領域だが、**保護は承認を要求する
+  # だけでトリガの喪失は検知しない** — 検知しているのはこのテストだけであり、削れば後続の
+  # migration が DROP TRIGGER を静かに通せる。controls 表「定款第5条(不変条件テストによる
+  # 振る舞い保護)」enforcement: ci の実体そのもの。
+  - path: tests/test_migrations.py
+    area: invariant_tests
+  # デプロイゲートの配線・生成 SQL を本文の文字列で固定する検査(git ゲート・公開バインド
+  # 除去・pg_hba・ロール権限ゲートの assertion 群)。ops/lib/** と ops/deploy-dashboard.sh を
+  # 登録したのと同じ論法 — ゲート関数を残したまま「呼び出しを外す/assertion を1つ落とす」
+  # 改変を検知するのはこのテストだけである。
+  - path: tests/ops/test_deploy_guards.py
+    area: invariant_tests
+  - path: tests/ops/test_deploy_role_gate.py
+    area: invariant_tests
+  # IPS v1.3 発効値の写し(test_ips_effective_values)+ G-0〜G-10 の pass/block 境界。
+  # 写しを先に緩めると、config/ips.yaml(保護領域)を緩める変更が CI 差分に出なくなる。
+  - path: tests/gate/test_rules.py
+    area: invariant_tests
+  # 棚卸しの記録(2026-08-04・reminder protect-equivalence-tests): 以下は **今回は対象外**。
+  #   振る舞い回帰テスト(tests/bot/test_killswitch.py・tests/gate/test_lock.py・
+  #   tests/governance/test_notices.py・tests/ledger/test_posting.py・tests/risk/test_state.py・
+  #   tests/execution/test_runner.py・tests/audit/test_a18.py など)
+  #     … 実装を変えれば同時に落ちる構造であり、参照の写しを持たない。統制の実体は DB 制約・
+  #       トリガ・実装ロジック側にあり、テストを緩めても実体は残る。実体を変えるには保護領域
+  #       (migrations・ledger・governance・risk・gate・audit・killswitch)に触れる必要がある。
+  #       ここまで登録すると「保護領域モジュールの全テスト」が保護対象になり、登録基準が
+  #       意味を失う。
+  #   tests/dashboard/test_dads_theme.py … .streamlit/config.toml の写しを持つが、内容は配色・
+  #       行間・コントラスト等の表示品質であり、資産・注文・承認のどの統制にも触れない。
+  #   tests/execution/test_config.py・tests/fm/test_sizing.py・tests/research/test_prompting.py
+  #     … 「唯一の執行点」に該当するが、対応する実装・設定(config/execution.yaml・
+  #       src/ryza/fm/**・src/ryza/research/prompting.py)が**保護領域でない**。テストだけを
+  #       登録すると、未保護モジュールを事実上の保護領域に格上げすることになる(実装を変えれば
+  #       テストが落ち、通すには保護ファイルの改変=審査が要る)。これは L1 のテスト登録として
+  #       決めるべき範囲を超えるため、モジュール自体を保護領域にするかどうかの審査に送る
+  #       (reminder ``protect-invariant-tests-phase2``)。とくに tests/fm/test_sizing.py は
+  #       不変原則1(LLM の確信度をサイジングに入れない)の唯一の CI 執行点である。
+
 # 承認記録の様式(定款第5条・C-5): 保護領域の変更コミットは本文末尾に承認トレーラを必須と
 # する。A-18-1 はこのトレーラと承認記録(governance.decisions)・GitHub を突合する。
 #
