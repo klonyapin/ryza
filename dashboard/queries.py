@@ -9,11 +9,16 @@ Streamlit UI(``app.py``)から分離した純粋なクエリ関数群。**すべ
 
 テーブルは migrations/ に定義されたものだけを参照する:
 - 概況   … ``ops.trading_state``(0012) / ``meta.runs``(0001) / ``press.outbox``(0007)
+- 成績   … ``ledger.nav_snapshots``(0005)+出資フロー(``ledger.journal_lines``)
+- リスク … ``risk.limits_state``(0014) / ``risk.limits_state_events``(0015)
 - 取込   … ``docs.documents``(0003) / ``market.bars`` / ``market.indicators``(0002)
            + 鮮度 SLA は ``ryza.ingest.freshness`` の SLA 表を共有
 - 報道   … ``press.outbox``(0007)
 - コスト … ``meta.runs.cost``(0001。構造は provenance/runs.py: by_tier)
 - 市場観 … ``docs.market_view``(0003) / ``docs.market_view_daily``(0010)
+
+**スキーマに無い指標は作らない**(T-018)。UI が欲しがっても列が無ければクエリを
+書かず、ページ側で「未実装」と明示する。
 
 テストは ``tests/dashboard/``(テスト専用 DB。UI 自体はテスト対象外)。
 """
@@ -124,6 +129,131 @@ def fetch_latest_daily_summary(conn: psycopg.Connection) -> dict[str, Any] | Non
             ORDER BY id DESC
             LIMIT 1
             """
+        )
+        rows = _rows(cur)
+    return rows[0] if rows else None
+
+
+def fetch_latest_daily_run(conn: psycopg.Connection) -> dict[str, Any] | None:
+    """直近の日次サイクル実行(``meta.runs`` の ``job_name='jobs.daily'``)。
+
+    ステージ単位の所要時間は記録されていない(``jobs.daily`` は各段の成否と要約だけを
+    ``StageResult`` に持ち、outbox embed の field として残す)。したがってここで返せる
+    所要はサイクル全体の ``finished_at − started_at`` のみで、段別所要は未実装。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT run_id, status, started_at, finished_at,
+                   EXTRACT(EPOCH FROM (coalesce(finished_at, now()) - started_at))
+                       AS duration_seconds
+            FROM meta.runs
+            WHERE job_name = 'jobs.daily'
+            ORDER BY run_id DESC
+            LIMIT 1
+            """
+        )
+        rows = _rows(cur)
+    return rows[0] if rows else None
+
+
+def fetch_outbox_pending(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    """未配送(``sent_at IS NULL``)の通知をチャンネル別に集計。
+
+    ``{"channel", "pending", "oldest_created_at", "oldest_age_hours"}``。「何件・最古は
+    何時間前」がそのまま概況ブロック⑤と承認ページのサマリ行になる。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT channel,
+                   count(*)          AS pending,
+                   min(created_at)   AS oldest_created_at,
+                   EXTRACT(EPOCH FROM (now() - min(created_at))) / 3600 AS oldest_age_hours
+            FROM press.outbox
+            WHERE sent_at IS NULL
+            GROUP BY channel
+            ORDER BY 4 DESC NULLS LAST
+            """
+        )
+        return _rows(cur)
+
+
+# ── 成績(NAV)────────────────────────────────────────────────────────────────
+#: 既定の対象帳簿。デモ運用中はファンド帳簿が 1 本(0006 seed の DEMO_FUND)。
+DEFAULT_BOOK_ID = "DEMO_FUND"
+
+
+def fetch_nav_series(
+    conn: psycopg.Connection, *, book_id: str = DEFAULT_BOOK_ID
+) -> list[dict[str, Any]]:
+    """帳簿の日次 NAV 系列(日付昇順)と当日の外部フロー純額。
+
+    NAV の正は ``ledger.nav_snapshots``(``ryza.risk.daily.load_nav_series`` と同じ選択。
+    ``risk.nav_daily`` は執行照合を重ねた risk 用ビューであり、正ではない)。
+
+    外部フロー(出資・払戻)は ``ledger.accounts.category='equity'`` かつ
+    ``account_id <> 'retained'``(拠出資本勘定)への仕訳の日次合算で、これを引かないと
+    増資日のリターンが跳ねる。集計式も risk エンジンと同一にしてある。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT s.snap_date AS day, s.nav, s.status,
+                   coalesce(f.net_flow, 0) AS net_flow
+            FROM ledger.nav_snapshots s
+            LEFT JOIN (
+                SELECT je.entry_date AS d, sum(jl.credit - jl.debit) AS net_flow
+                FROM ledger.journal_lines jl
+                JOIN ledger.journal_entries je ON je.entry_id = jl.entry_id
+                JOIN ledger.accounts a
+                  ON a.book_id = jl.book_id AND a.account_id = jl.account_id
+                WHERE jl.book_id = %(book)s
+                  AND a.category = 'equity' AND a.account_id <> 'retained'
+                GROUP BY je.entry_date
+            ) f ON f.d = s.snap_date
+            WHERE s.book_id = %(book)s
+            ORDER BY s.snap_date
+            """,
+            {"book": book_id},
+        )
+        return _rows(cur)
+
+
+# ── リスク ────────────────────────────────────────────────────────────────────
+def fetch_limits_state(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    """帳簿別のリスクフラグ(``risk.limits_state``)。行が無い帳簿はゲートが fail-closed。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT book_id, dd_soft, dd_hard, vol_exceeded, es_exceeded, as_of, run_id
+            FROM risk.limits_state
+            ORDER BY book_id
+            """
+        )
+        return _rows(cur)
+
+
+def fetch_latest_risk_metrics(
+    conn: psycopg.Connection, *, book_id: str = DEFAULT_BOOK_ID
+) -> dict[str, Any] | None:
+    """直近のリスク測定値(``risk.limits_state_events.metrics``)。未計測なら None。
+
+    測定値(DD・実現ボラ・ES95)は ``limits_state`` には無く(同テーブルは boolean の
+    フラグだけ)、追記オンリーの台帳側に ``metrics`` jsonb として残る
+    (``ryza.risk.state.state_metrics``)。**ダッシュボードは DD を自前で再計算しない** —
+    リスクエンジンが出した測定値をリネージ付きでそのまま表示する(不変原則1・3)。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, event, metrics, actor, as_of, run_id, created_at
+            FROM risk.limits_state_events
+            WHERE book_id = %s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (book_id,),
         )
         rows = _rows(cur)
     return rows[0] if rows else None
@@ -247,6 +377,34 @@ def fetch_cost_daily(conn: psycopg.Connection, *, days: int = 30) -> list[dict[s
         return _rows(cur)
 
 
+def fetch_cost_summary(conn: psycopg.Connection) -> dict[str, Any]:
+    """**当月(暦月・JST)**のコスト合計と分母(実行回数)。
+
+    窓を 30 日ローリングではなく暦月にしたのは、比較対象が**月次**予算
+    (config/llm.yaml の budget.monthly_jpy → いずれ ledger.budgets の月次予算行)
+    だからである。分子と分母の期間が食い違うと消化率が意味を持たない(中-9)。
+
+    「1 ジョブ実行あたりコスト」を出すために、コスト記録のある実行数(``cost_runs``)と
+    全実行数(``all_runs``)の両方を返す。累計トークン数は返さない — 単調増加する絶対値は
+    行動を変えない vanity metric(調査ノート A10)。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) FILTER (WHERE cost IS NOT NULL)              AS cost_runs,
+                   count(*)                                             AS all_runs,
+                   coalesce(sum((cost ->> 'total_cost_estimate')::numeric), 0)
+                                                                        AS total_cost,
+                   (date_trunc('month', now() AT TIME ZONE 'Asia/Tokyo')
+                        AT TIME ZONE 'Asia/Tokyo')                      AS since
+            FROM meta.runs
+            WHERE started_at >= date_trunc('month', now() AT TIME ZONE 'Asia/Tokyo')
+                                   AT TIME ZONE 'Asia/Tokyo'
+            """
+        )
+        return _rows(cur)[0]
+
+
 # ── 市場観 ────────────────────────────────────────────────────────────────────
 def fetch_current_market_view(conn: psycopg.Connection) -> dict[str, Any] | None:
     """現在の市場観(``docs.market_view`` の最新版)。未初期化なら None。"""
@@ -368,6 +526,29 @@ def load_governance(path: Path | None = None) -> dict[str, Any]:
     """権限マトリクス・統制テーブル(``config/governance.yaml``・定款の機械可読版)。"""
     path = path if path is not None else _REPO_ROOT / "config" / "governance.yaml"
     return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def load_llm_budget(path: Path | None = None) -> dict[str, Any]:
+    """LLM の月次予算(``config/llm.yaml`` の ``budget``)。
+
+    予算の**最終的な**正は経営管理部の予算科目(``ledger.budgets``・category=llm_*)で、
+    ここは承認フローが動くまでの既定値。キーが無い設定でも壊れないよう空 dict を返す
+    (呼び出し側は「予算未設定」と表示して比率を偽造しない)。
+    """
+    path = path if path is not None else _REPO_ROOT / "config" / "llm.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return data.get("budget") or {}
+
+
+def load_ips_limits(path: Path | None = None) -> dict[str, Any]:
+    """IPS のハードリミット(``config/ips.yaml`` の ``hard_limits``)。
+
+    bullet の分母(dd_soft_limit / dd_hard_limit / realized_vol_limit /
+    daily_es95_nav_max)を引くためだけに読む。IPS は保護領域であり、ここは読取専用。
+    """
+    path = path if path is not None else _REPO_ROOT / "config" / "ips.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return data.get("hard_limits") or {}
 
 
 def load_roadmap(path: Path | None = None) -> dict[str, Any]:
