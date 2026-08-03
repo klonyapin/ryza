@@ -69,7 +69,9 @@ class PressEchoProvider:
         self.bad_shape = bad_shape
         self.calls: list[dict[str, str]] = []
 
-    def generate(self, *, system: str, user: str, schema: dict[str, Any], model: str) -> ProviderResult:
+    def generate(
+        self, *, system: str, user: str, schema: dict[str, Any], model: str
+    ) -> ProviderResult:
         self.calls.append({"system": system, "user": user, "model": model})
         props = schema.get("properties", {})
         data = json.loads(user)
@@ -91,30 +93,32 @@ class PressEchoProvider:
                               title=str(material.get("title", "トピック")))
         return _result(content)
 
-    def _write(self, *, is_morning: bool, refs: list[int], is_prediction: bool, title: str) -> dict[str, Any]:
+    def _write(
+        self, *, is_morning: bool, refs: list[int], is_prediction: bool, title: str
+    ) -> dict[str, Any]:
         if self.bad_shape:
             return {
                 "argument": "アーギュメント一文。",
                 "sentences": [{"text": _pad("単調な文", 45), "level": 5, "source_ids": []}
                               for _ in range(6)],
-                "trade_implication": {"action": "watch", "target": "日経平均", "condition": "上抜け"},
+                "trade_implication": {"action": "watch", "target": "指数", "condition": "上抜け"},
             }
         if is_morning:
             valley_level = 1 if refs else 2
             valley_refs = refs[:1] if refs else []
+            s = "source_ids"
             sentences = [
-                {"text": _pad("概念をまとめて広い例を提示する文である", 45), "level": 4, "source_ids": []},
-                {"text": _pad("二つ以上の証拠をまとめた文である", 45), "level": 3, "source_ids": []},
-                {"text": _pad("観察としての解釈的要約の文である", 45), "level": 2, "source_ids": []},
-                {"text": _pad("純粋なファクトを述べる文である", 45), "level": valley_level,
-                 "source_ids": valley_refs},
-                {"text": _pad("再び概念的にまとめ直す文である", 45), "level": 3, "source_ids": []},
-                {"text": _pad("アブストラクトな含意で締める文である", 45), "level": 5, "source_ids": []},
+                {"text": _pad("概念をまとめ広い例を示す文", 45), "level": 4, s: []},
+                {"text": _pad("二つ以上の証拠をまとめた文", 45), "level": 3, s: []},
+                {"text": _pad("観察の解釈的要約の文", 45), "level": 2, s: []},
+                {"text": _pad("純粋なファクトの文", 45), "level": valley_level, s: valley_refs},
+                {"text": _pad("再び概念的にまとめ直す文", 45), "level": 3, s: []},
+                {"text": _pad("含意で締める文", 45), "level": 5, s: []},
             ]
             return {
                 "argument": "きょうの相場は半導体が主導したみたい。",
                 "sentences": sentences,
-                "trade_implication": {"action": "watch", "target": title, "condition": "上抜けで追随"},
+                "trade_implication": {"action": "watch", "target": title, "condition": "上抜け"},
                 "title": title,
             }
         # 速報(短縮形)。
@@ -135,7 +139,9 @@ class PressEchoProvider:
 
 
 def _result(content: dict[str, Any]) -> ProviderResult:
-    return ProviderResult(content=content, tokens_in=80, tokens_out=40, raw_text=json.dumps(content))
+    return ProviderResult(
+        content=content, tokens_in=80, tokens_out=40, raw_text=json.dumps(content)
+    )
 
 
 @pytest.fixture

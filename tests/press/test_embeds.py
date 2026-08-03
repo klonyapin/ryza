@@ -60,7 +60,7 @@ def test_flash_prediction_embed_shows_label():
     t = Topic(
         argument="予兆。",
         sentences=[Sentence("シグナルが揃った。", 1, [10]), Sentence("……続くよ。", 5, [])],
-        prediction=Prediction(claim="円安継続", confidence=0.6, verify_by="2026-08-10T00:00:00+00:00"),
+        prediction=Prediction(claim="円安継続", confidence=0.6, verify_by="2026-08-10T00:00:00Z"),
     )
     embed = embeds.build_flash_embed(t, is_prediction=True)
     assert "予測" in embed["title"]

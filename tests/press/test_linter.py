@@ -21,7 +21,7 @@ def _ti() -> TradeImplication:
     return TradeImplication(action="watch", target="日経平均", condition="上抜けで追随")
 
 
-def _sent(level: int, *, src: list[int] | None = None, text: str = "文文文文文文文文文文") -> Sentence:
+def _sent(level: int, *, src: list[int] | None = None, text: str = "文" * 10) -> Sentence:
     return Sentence(text=text, level=level, source_ids=src or [])
 
 
@@ -185,7 +185,7 @@ def test_flash_fact_passes():
 def test_flash_prediction_requires_label():
     t = Topic(
         argument="予兆があるみたい。",
-        sentences=[Sentence("弱いシグナルが揃った。", 1, [10]), Sentence("……たぶん、続くよ。", 5, [])],
+        sentences=[Sentence("シグナルが揃った。", 1, [10]), Sentence("……続くよ。", 5, [])],
         prediction=None,  # L-5 欠落
     )
     report = lint_topic(t, mode="flash", valid_source_ids={10}, is_prediction=True)
@@ -196,8 +196,8 @@ def test_flash_prediction_requires_label():
 def test_flash_prediction_with_label_passes():
     t = Topic(
         argument="予兆があるみたい。",
-        sentences=[Sentence("弱いシグナルが揃った。", 1, [10]), Sentence("……たぶん、続くよ。", 5, [])],
-        prediction=Prediction(claim="円安が続く", confidence=0.6, verify_by="2026-08-10T00:00:00+00:00"),
+        sentences=[Sentence("シグナルが揃った。", 1, [10]), Sentence("……続くよ。", 5, [])],
+        prediction=Prediction(claim="円安が続く", confidence=0.6, verify_by="2026-08-10T00:00:00Z"),
     )
     report = lint_topic(t, mode="flash", valid_source_ids={10}, is_prediction=True)
     assert report.ok, report.reasons()
