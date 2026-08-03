@@ -1,0 +1,37 @@
+# .gcloudignore — gcloud がアップロードしないファイル(Cloud Build のビルドコンテキスト)。
+#
+# **このファイルをリポジトリに置くこと自体が統制**(独立役員 再審査 新-F)。
+# .gcloudignore が無いと、`gcloud builds submit` は git リポジトリを検出して
+# .gcloudignore をカレントディレクトリに**自動生成**する。生成された未追跡ファイルにより
+# 作業ツリーが dirty になり、次回の deploy-dashboard.sh の git ゲート
+# (status --porcelain が空)が落ちて冪等性が壊れる。先回りして置くことで自動生成を封じる。
+#
+# 構文は .gitignore と同じ。**.gitignore と整合させること**(片方だけ変えない)。
+# 除外しすぎない方針: 同じリポジトリルートを ops/deploy-{bot,daily,a13,ops-weekly}.sh も
+# ビルドコンテキストに使うため、それらが必要とする src/・migrations/・config/ 等は残す。
+
+# ── git 本体(コンテナには不要。code_version は env RYZA_CODE_VERSION で注入する)──
+# 末尾スラッシュを付けない: git worktree では .git はディレクトリでなくファイル。
+.git
+.gitignore
+.gcloudignore
+
+# ── .gitignore と同じ除外 ──
+__pycache__/
+*.pyc
+.venv/
+.env
+*.env
+secrets/
+.DS_Store
+scratch/
+# .claude/ は全体を除外する(イメージに不要で、.claude/worktrees/ 配下に開発用の
+# worktree 実体が入りうるためアップロードが肥大化する)。
+.claude/
+# ローカル証憑ストアの出力(LocalStorage の既定ルート。ingest 実行の残渣)
+_evidence/
+
+# ── ツールのキャッシュ(追跡外だがアップロードすると無駄に大きい)──
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

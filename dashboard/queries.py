@@ -1,8 +1,11 @@
 """dashboard/queries — 運用ダッシュボードの読み取り専用 DB 層(Issue #10)。
 
 Streamlit UI(``app.py``)から分離した純粋なクエリ関数群。**すべて SELECT のみ**で
-書込は行わない(``connect_readonly`` はセッションを read-only に固定する)。
-接続先はコード全体と同じ ``RYZA_DATABASE_URL``(``ryza.db.conn``)。
+書込は行わない。接続先はコード全体と同じ ``RYZA_DATABASE_URL``(``ryza.db.conn``)。
+
+接続は用途で2本に分ける(独立役員審査 2026-08-03 重大-2 の是正):
+``connect_readonly`` は読取専用ロール、``connect_boardroom`` は役員室の書込専用
+ロールを指す。DB ロールの権限そのものが境界であり、アプリ側の設定はその補強にすぎない。
 
 テーブルは migrations/ に定義されたものだけを参照する:
 - 概況   … ``ops.trading_state``(0012) / ``meta.runs``(0001) / ``press.outbox``(0007)
@@ -18,28 +21,58 @@ Streamlit UI(``app.py``)から分離した純粋なクエリ関数群。**すべ
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import psycopg
+import yaml
 
 from ryza.db.conn import connect
 from ryza.ingest.freshness import DEFAULT_SLAS, FreshnessSLA, _latest_as_of
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
+#: 役員室の書込専用ロールの接続 URL(Cloud Run では Secret Manager から env 注入)。
+#: 未設定ならローカル開発とみなし ``RYZA_DATABASE_URL`` にフォールバックする。
+BOARDROOM_URL_ENV = "RYZA_BOARDROOM_DATABASE_URL"
+
 
 def connect_readonly() -> psycopg.Connection:
-    """read-only セッションで接続する(ダッシュボードは操作系を一切持たない)。
+    """読取ページ用の接続(ダッシュボードは操作系を一切持たない)。
 
-    UI 側のバグや将来の変更で誤って書込コードが紛れても、DB 側で
-    ``read_only_sql_transaction`` として拒否される(防御の第二層)。
+    防御は二層で、**主たる層は DB ロールの権限**である。Cloud Run では
+    ``RYZA_DATABASE_URL`` が読取専用ロール ``ryza_dashboard``(SELECT のみ GRANT・
+    ``default_transaction_read_only = on``)を指すため、書込は権限エラーで拒否される
+    (``ops/deploy-dashboard.sh``)。第二層がこの ``SET SESSION CHARACTERISTICS`` で、
+    ローカル開発のように特権ロールで接続した場合にも書込を
+    ``read_only_sql_transaction`` として弾く。第二層はクライアント側の設定であり
+    ``SET`` で解除しうるため、単独では境界にならない。
     """
     conn = connect(autocommit=True)
     conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
     return conn
+
+
+def connect_boardroom() -> psycopg.Connection:
+    """役員室専用の**書込可**接続(autocommit)。
+
+    Cloud Run では ``RYZA_BOARDROOM_DATABASE_URL``(Secret ``ryza-boardroom-db-url``)が
+    最小権限ロール ``ryza_boardroom`` を指す。このロールが書けるのは
+    ``governance.minutes`` / ``governance.minute_resolutions`` / ``governance.stances``
+    の INSERT と ``meta.runs`` の INSERT/UPDATE だけで、帳簿・取引状態・監査対象への
+    経路を持たない(``ops/deploy-dashboard.sh``)。
+
+    autocommit なのは実ジョブの Run と同じ流儀(即時永続化)。書込先は追記オンリーの
+    ため、途中失敗しても改竄は起きない。env 未設定時は ``RYZA_DATABASE_URL`` へ
+    フォールバックする(ローカル開発は単一ロール運用)。
+    """
+    dsn = os.environ.get(BOARDROOM_URL_ENV)
+    if dsn:
+        return psycopg.connect(dsn, autocommit=True)
+    return connect(autocommit=True)
 
 
 def _rows(cur: psycopg.Cursor) -> list[dict[str, Any]]:
@@ -262,3 +295,86 @@ def load_site_status(path: Path | None = None) -> dict[str, Any] | None:
     if match is None:
         return None
     return json.loads(match.group(1))
+
+
+# ── 承認・通知(組織サイト化 — 2026-08-03 代表指示)────────────────────────────
+def fetch_decisions(conn: psycopg.Connection, *, limit: int = 50) -> list[dict[str, Any]]:
+    """承認フローの決定履歴(``governance.decisions``・0007)。
+
+    みなし承認(定款第3条 v0.4)は ``decision='deemed'`` で記録される設計
+    (governance.yaml deemed_approval)。現行スキーマの CHECK は
+    approve|reject|question のみのため deemed 行はまだ存在しないが、UI 側は
+    decision 値で「みなし/明示」を区別する(スキーマ拡張時に自動追随)。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, proposal_ref, kind, decision, decided_by, note, decided_at
+            FROM governance.decisions
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        return _rows(cur)
+
+
+def fetch_running_runs(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    """実行中のジョブ(``meta.runs`` の status='running')。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT run_id, job_name, started_at, params
+            FROM meta.runs
+            WHERE status = 'running'
+            ORDER BY run_id DESC
+            """
+        )
+        return _rows(cur)
+
+
+def load_reminders(path: Path | None = None) -> list[dict[str, Any]]:
+    """リマインダー・レジストリ(``ops/reminders.yaml``)の一覧。
+
+    「セッション内の約束は無効 — 将来アクションは必ずここに登録」(CLAUDE.md)の
+    実体。pending が「代表が知るべき将来アクション」。ファイル読取のみ(DB 不要)。
+    """
+    path = path if path is not None else _REPO_ROOT / "ops" / "reminders.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    out = []
+    for r in data.get("reminders", []):
+        action = r.get("action") or {}
+        out.append(
+            {
+                "id": r.get("id"),
+                "what": r.get("what"),
+                "status": r.get("status", "pending"),
+                "action_type": action.get("type"),
+                "conditions": ", ".join(
+                    str(c.get("type")) for c in r.get("conditions", [])
+                ),
+            }
+        )
+    return out
+
+
+def load_org(path: Path | None = None) -> dict[str, Any]:
+    """組織メンバー台帳(``config/org.yaml``・キャラクター設定の正)。"""
+    path = path if path is not None else _REPO_ROOT / "config" / "org.yaml"
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def load_governance(path: Path | None = None) -> dict[str, Any]:
+    """権限マトリクス・統制テーブル(``config/governance.yaml``・定款の機械可読版)。"""
+    path = path if path is not None else _REPO_ROOT / "config" / "governance.yaml"
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def load_roadmap(path: Path | None = None) -> dict[str, Any]:
+    """全体計画(``config/roadmap.yaml``・curated)。更新は設計リードの責務。
+
+    静的な計画(フェーズ・マイルストーン)はこのファイルが正で、動的な状態
+    (Issues/PR/meta.runs)は「計画」ページが重ね合わせて表示する。
+    """
+    path = path if path is not None else _REPO_ROOT / "config" / "roadmap.yaml"
+    return yaml.safe_load(path.read_text(encoding="utf-8"))

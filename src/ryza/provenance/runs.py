@@ -3,7 +3,8 @@
 設計書 §6(``meta.runs``)準拠。**規約(CLAUDE.md / 設計原則3)**: DB に書き込む全ジョブは
 Run 経由で ``run_id`` を取得し、生成する全行に刻む。これがリネージの鍵になる。
 
-``code_version`` は ``git describe`` で自動取得する(実行時のコードを再現できるように)。
+``code_version`` は env ``RYZA_CODE_VERSION``(デプロイ時に注入されるコミット SHA)を
+最優先で、無ければ ``git describe`` で自動取得する(実行時のコードを再現できるように)。
 
 ## 接続とトランザクション
 
@@ -23,6 +24,7 @@ Run 経由で ``run_id`` を取得し、生成する全行に刻む。これが�
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -38,8 +40,22 @@ from ryza.db.conn import connect
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+#: デプロイ時に注入される code_version(コミット SHA)。コンテナには .git が無く
+#: git describe が使えないため、これが最優先の情報源になる(独立役員 再審査 条件2)。
+CODE_VERSION_ENV = "RYZA_CODE_VERSION"
+
+
 def _git_code_version() -> str:
-    """``git describe --always --dirty`` で code_version を取得する。失敗時は 'unknown'。"""
+    """code_version を取得する。env ``RYZA_CODE_VERSION`` → ``git describe`` → 'unknown'。
+
+    コンテナ実行(Cloud Run / Cloud Run Jobs)では .git が同梱されないため、
+    ``git describe`` は必ず失敗して 'unknown' になる。デプロイスクリプトが
+    ``RYZA_CODE_VERSION`` にコミット SHA を注入するので、それを最優先で読む
+    (不変原則3: 生成物に code_version を記録する)。
+    """
+    injected = os.environ.get(CODE_VERSION_ENV, "").strip()
+    if injected:
+        return injected
     try:
         proc = subprocess.run(
             ["git", "describe", "--always", "--dirty", "--tags"],
