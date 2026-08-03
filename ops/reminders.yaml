@@ -564,7 +564,15 @@ reminders:
       title: "決議チェックの精緻化(批判の鮮度)と確認付き決議の連続検出"
       labels: [governance]
       body: "現行の boardroom.mark_resolution は『議事録の出席者に独立役員が居るか』しか見ない(src/ryza/governance/boardroom.py)。そのため会議の冒頭で独立役員が別論点に1度発言していれば、その後に代表が持ち出した本題が無批判のまま決議できてしまう(独立役員 再確認審査 懸念A)。実装内容: ①チェックを『最終の代表発言以降に独立役員の発言があるか』へ精緻化する(guard_scope_text と同じ区間の考え方を決議側にも適用)、②confirmed_without_critic=True で通した決議を証跡として残す(現状は DB に痕跡が無く、連続使用を検出できない — governance.minute_resolutions への列追加は保護領域のため独立役員審査が必要)、③監査ジョブ(src/ryza/audit)に『確認付き決議の連続』を 05-governance §6-5(形骸化の防止)のアラートとして追加する。②の列追加なしに③は成立しないため順序に注意。"
-    status: pending
+    # 2026-08-03 実装(ブランチ resolution-recency)。①minute_critic_recency /
+    # critic_spoke_after_last_representative(議事録本文の話者行から復元。判定不能も
+    # 通さない fail-closed — 決議精緻化審査 懸念1)、②migrations/0025
+    # (confirmed_without_critic の三値。保護領域)、③resolution_confirmation_stats +
+    # ops-weekly ダイジェスト行(連続3件 or 走査窓内5件で警告)・ダッシュボードの決議欄。
+    # ③の設置先は src/ryza/audit ではなく週次 ops(設計リード指示)。週次の実配線は
+    # boardroom-audit-wiring、残る懸念は critic-input-window-decision-visibility /
+    # speaker-label-stability へ分割登録した。
+    status: done # 2026-08-03 実装・独立役員審査済み(条件付きマージ可。是正反映済み)
 
   - id: meeting-reaction-round-consistency
     what: "進行役の定型応答の直後に反応ラウンドが回る筋を整理する(独立役員 再確認審査 懸念C)"
@@ -687,4 +695,40 @@ reminders:
       title: "ダッシュボード基盤の比較調査: Streamlit 継続 vs 移行(Phase 5 判断)"
       labels: [decision]
       body: "2026-08-03 の DADS デザイン改修(代表指示)で、Streamlit には CSS でも JS でも回避できない制約が7項目あることが確定した(docs/research/dads-streamlit-application.md §6)。とくに決定打になりうるのは (1) st.dataframe が canvas 描画で DOM にテキストを持たず、スクリーンリーダー・ブラウザ内検索・テキスト選択・拡大が一切効かないこと、(2) CSS 注入が非公式 API でありバージョン更新で無言で壊れ CI で検知できないこと。現時点では『単一利用者の非公開ツールに全面準拠の実利なし』という裁定でトークン層のみ採用したが、この裁定は利用者が代表1名という前提に依存する。調査すべき論点: (a) §6 の7項目のうち Phase 5 時点で実害が出ているものはどれか(『表の値をコピーできない』『Ctrl+F で銘柄を探せない』は単一利用者でも効く実害であり、想定と実測を突き合わせること)、(b) 移行先候補(Next.js + Recharts / SvelteKit / Dash / Panel 等)の実装コストと、Python の可視化ヘルパ dashboard/viz.py・queries.py をどこまで再利用できるか、(c) 移行しない場合の緩和策(明細を CSV ダウンロードで出す、st.dataframe を st.table に落とす等)で足りるか、(d) 二系統(取引デモ/実)の将来的な同時表示や外部公開の可能性が判断を変えるか。**結論は『移行する/しない』ではなく、判断材料(実害の実測とコスト見積り)を投資委員会へ出すこと。** 反対意見書(この提案が間違っている場合の理由トップ3+代替案)を添付すること(CLAUDE.md 議論規約2)。出典: docs/research/dads-streamlit-application.md §6・§7。"
+    status: pending
+
+  - id: boardroom-audit-wiring
+    what: "決議の形骸化監査(BOARDROOM_AUDIT)を週次ジョブに実配線する(決議精緻化審査 懸念4)"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "BOARDROOM_AUDIT を ops-weekly の実行環境に配線する(形骸化監査の独立した検出点)"
+      labels: [impl, governance]
+      body: "src/ryza/ops/weekly.resolution_audit_status は BOARDROOM_AUDIT=1 のときだけ DB を読み、批判を経ない決議(confirmed_without_critic が true または NULL)の直近件数・連続数を週次ダイジェストに出す。しかし現状 BOARDROOM_AUDIT はどのデプロイスクリプトにも設定されておらず、週次側は恒久的に『スキップ(BOARDROOM_AUDIT 未配線)』になる(決議精緻化審査 2026-08-03 懸念4)。残る表出先はダッシュボードの決議欄=**チェックを外す当人**であり、独立した検出点になっていない。実装内容: ①ops/deploy-ops-weekly.sh の JOB_ENV に BOARDROOM_AUDIT を足すか、DB へ届く実行環境(GCE VM の systemd timer 側 — ops/deploy-daily.sh と同じ経路)で週次を回すかを決める。Cloud Run 版は VM 内 PostgreSQL に届かないため、前者を選ぶなら Cloud SQL 移行が前提になる。②配線後、確認付き決議を1件作って実際に ⚠ 行が Issue に出ることを実測で確認する。**ops/deploy-ops-weekly.sh は保護領域(deploy_path)のため、変更は独立役員審査+承認記録の手続を経ること。**"
+    status: pending
+
+  - id: critic-input-window-decision-visibility
+    what: "批判の鮮度判定と独立役員の入力窓(TRANSCRIPT_WINDOW=30)のずれを塞ぐ(決議精緻化審査 懸念3)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "鮮度判定の区間を独立役員の入力窓に揃える(長い会議で決定発言が窓外になる)"
+      labels: [governance]
+      body: "boardroom.minute_critic_recency は議事録**全体**の話者列で鮮度を判定するが、独立役員が実際に読むのは直近 TRANSCRIPT_WINDOW=30 発言である(speak / route_speakers)。決議精緻化審査 2026-08-03 懸念3 は、43 発言の会議で『鮮度あり』と判定されつつ決定発言(実弾・¥100万 を含む代表発言)が独立役員の入力窓の外にある状況を実測した。すなわち『最後の代表発言より後に独立役員が発言した』ことは、その独立役員が**決定そのものを読んだ**ことを意味しない。対処の選択肢: (a) 鮮度の判定区間を入力窓(直近 N 発言)に揃える、(b) 決議本文または直近の代表発言が mentions_important_decision に当たるとき、窓内での批判を追加で要求する、(c) 長い会議では議事録を分割保存する運用にする。(b) は重要決定にだけ摩擦を集中できる点で筋が良いが、決議本文は代表が書く自由文であり語彙ガードの弱点(言い換え)をそのまま引き継ぐことに注意。いずれを選んでもテストで固定すること。"
+    status: pending
+
+  - id: speaker-label-stability
+    what: "話者ラベルの改称で過去議事録の鮮度判定が反転する問題を塞ぐ(決議精緻化審査 懸念6)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "議事録の話者復元をラベル辞書から切り離す(ラベル凍結または構造化保存)"
+      labels: [governance]
+      body: "boardroom.parse_speaker_sequence は表示用ラベル辞書 _SPEAKER_LABELS の逆写像で議事録本文から話者を復元する。決議精緻化審査 2026-08-03 懸念6 は、『代表』→『代表取締役』のような表示上の改称だけで、同一の過去本文の判定が『要確認』→『鮮度あり』へ**反転**する(fail-open)ことを実測した。証憑(minutes.body_md)は追記オンリーで書き換えられないのに、その解釈がコード側の可変な辞書に依存している。対処の選択肢: (a) 復元専用のラベル表を凍結し(過去の表記も含む追記オンリーの表として持つ)、表示用辞書と分離した上で回帰テストで固定する、(b) 議事録保存時に話者列を構造化して残す(governance.minutes への列追加 = 保護領域の migration。本文と冗長になるが解釈をコードから外せる)、(c) 本文の話者行に役職キー(英字)を機械可読な形で併記する。(b) が最も堅いが保護領域の手続を要する。いずれの場合も、既存行(旧表記)の解釈が変わらないことをテストで固定すること。"
     status: pending
