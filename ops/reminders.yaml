@@ -467,7 +467,7 @@ reminders:
       type: issue_create
       title: "確認: protected_areas の src/ryza/risk/** 登録 PR が統合されたか"
       labels: [decision, risk]
-      body: "2026-08-03 の navflow 修正(リターン測定の定義変更)は、src/ryza/risk/** が config/governance.yaml の protected_areas に未登録のまま実施された(独立審査 重要-8)。governance.yaml には『risk_limits: リスクエンジン実装時に src パスを追記すること(C-2)』というコメントが残ったままで、判定値(config/ips.yaml の hard_limits)は保護されていても、それを読んでフラグに変換するコードは A-13-1(無承認変更検出)の対象外という状態が続いている。設計リードが登録の別 PR(L1・代表の明示承認が必要)を起票する裁定。本リマインダーはその追跡: 未統合なら再度 #承認 へ上げ、統合済みなら A-13-1 が risk 配下の変更を検出する状態になっていることを 1 度だけ確認して close する。src/ryza/gate/(コンプラゲート実装)の登録有無も同時に棚卸しすること。"
+      body: "2026-08-03 の navflow 修正(リターン測定の定義変更)は、src/ryza/risk/** が config/governance.yaml の protected_areas に未登録のまま実施された(独立審査 重要-8)。governance.yaml には『risk_limits: リスクエンジン実装時に src パスを追記すること(C-2)』というコメントが残ったままで、判定値(config/ips.yaml の hard_limits)は保護されていても、それを読んでフラグに変換するコードは A-18-1(無承認変更検出)の対象外という状態が続いている。設計リードが登録の別 PR(L1・代表の明示承認が必要)を起票する裁定。本リマインダーはその追跡: 未統合なら再度 #承認 へ上げ、統合済みなら A-18-1 が risk 配下の変更を検出する状態になっていることを 1 度だけ確認して close する。src/ryza/gate/(コンプラゲート実装)の登録有無も同時に棚卸しすること。"
     status: pending
 
   - id: ledger-reclose-recent-days
