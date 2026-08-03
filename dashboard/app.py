@@ -1098,7 +1098,7 @@ def page_rules() -> None:
     if decl:
         st.warning(
             f"宣言のみ(執行点未実装)の条文が {len(decl)} 件ある。"
-            "A-13 が四半期棚卸しの対象とする(定款第6条)。"
+            "A-18 が四半期棚卸しの対象とする(定款第6条)。"
         )
     df = _df(
         [
@@ -1130,7 +1130,7 @@ def page_rules() -> None:
     st.subheader("保護領域(定款第5条)")
     st.caption(
         "変更に承認記録(明示またはみなし)+ `Approved:` トレーラが必須。"
-        "A-13 が git 履歴と突合する。"
+        "A-18 が git 履歴と突合する。"
     )
     pa = _df(gov.get("protected_areas", []))
     if not pa.empty:
