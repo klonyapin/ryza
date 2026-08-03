@@ -973,7 +973,15 @@ reminders:
       title: "鮮度判定の区間を独立役員の入力窓に揃える(長い会議で決定発言が窓外になる)"
       labels: [governance]
       body: "boardroom.minute_critic_recency は議事録**全体**の話者列で鮮度を判定するが、独立役員が実際に読むのは直近 TRANSCRIPT_WINDOW=30 発言である(speak / route_speakers)。決議精緻化審査 2026-08-03 懸念3 は、43 発言の会議で『鮮度あり』と判定されつつ決定発言(実弾・¥100万 を含む代表発言)が独立役員の入力窓の外にある状況を実測した。すなわち『最後の代表発言より後に独立役員が発言した』ことは、その独立役員が**決定そのものを読んだ**ことを意味しない。対処の選択肢: (a) 鮮度の判定区間を入力窓(直近 N 発言)に揃える、(b) 決議本文または直近の代表発言が mentions_important_decision に当たるとき、窓内での批判を追加で要求する、(c) 長い会議では議事録を分割保存する運用にする。(b) は重要決定にだけ摩擦を集中できる点で筋が良いが、決議本文は代表が書く自由文であり語彙ガードの弱点(言い換え)をそのまま引き継ぐことに注意。いずれを選んでもテストで固定すること。"
-    status: pending
+    # 2026-08-04 実装(branch boardroom-residual): 選択肢 (b) の系として**ガード検出発言の
+    # ピン留め**を採った。判定区間を窓へ揃える (a) は「窓外の決定が批判なしで通る」経路を
+    # 残すため退けた。boardroom.pinned_decision_turns が、決定論ガードと同じ区間(前回の
+    # 独立役員発言以降)の代表発言のうち窓外に落ちたものを最大 MAX_PINNED_TURNS 件、
+    # 「過去の関連発言」として独立役員のプロンプト先頭へ戻す。窓は 30 発言のまま。
+    # 回帰: tests/governance/test_boardroom.py の 43 発言ケース(審査の実測長)。
+    # 2026-08-04 残懸念審査: 上限で本命が押し出されうる点を指摘され、省略件数の明示
+    # (fail-loud)を追加。選択規則の精緻化は boardroom-pinning-selection で後続。
+    status: done
 
   - id: speaker-label-stability
     what: "話者ラベルの改称で過去議事録の鮮度判定が反転する問題を塞ぐ(決議精緻化審査 懸念6)"
@@ -985,6 +993,39 @@ reminders:
       title: "議事録の話者復元をラベル辞書から切り離す(ラベル凍結または構造化保存)"
       labels: [governance]
       body: "boardroom.parse_speaker_sequence は表示用ラベル辞書 _SPEAKER_LABELS の逆写像で議事録本文から話者を復元する。決議精緻化審査 2026-08-03 懸念6 は、『代表』→『代表取締役』のような表示上の改称だけで、同一の過去本文の判定が『要確認』→『鮮度あり』へ**反転**する(fail-open)ことを実測した。証憑(minutes.body_md)は追記オンリーで書き換えられないのに、その解釈がコード側の可変な辞書に依存している。対処の選択肢: (a) 復元専用のラベル表を凍結し(過去の表記も含む追記オンリーの表として持つ)、表示用辞書と分離した上で回帰テストで固定する、(b) 議事録保存時に話者列を構造化して残す(governance.minutes への列追加 = 保護領域の migration。本文と冗長になるが解釈をコードから外せる)、(c) 本文の話者行に役職キー(英字)を機械可読な形で併記する。(b) が最も堅いが保護領域の手続を要する。いずれの場合も、既存行(旧表記)の解釈が変わらないことをテストで固定すること。"
+    # 2026-08-04 実装(branch boardroom-residual): 選択肢 (c)+(a)。議事録の話者行を
+    # `**[cio]** CIO: …` 形式にし、話者列の復元は**役職キーだけ**で行う(表示ラベルを読まない)。
+    # 旧書式の本文は凍結表 _LEGACY_LABEL_TO_SPEAKER(表示辞書と独立・追記オンリー)で復元し、
+    # どちらでも復元できなければ従来どおり判定不能=NULL の fail-closed。(b) のスキーマ変更は
+    # 保護領域の migration を要するため採らなかった(本文だけで解釈が閉じるなら列は不要)。
+    # 回帰: 表示ラベルを改称したソースを別インスタンスとして読み込み、同一の過去本文の
+    # 判定が反転しないことを実測で固定(審査の実測ケース)。
+    # 2026-08-04 残懸念審査 R-1/R-2 の是正を同ブランチで反映: 新旧書式の混在・構造を
+    # 伴わない新書式行は判定不能(fail-closed)、無害化のキー集合も凍結集合との和にした。
+    status: done
+
+  - id: boardroom-pinning-selection
+    what: "ピン留めの選択規則を精緻化する(残懸念審査 懸念3 の恒久是正)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "boardroom: ピン留めの選択を『新しい順』から検出寄与順へ改める"
+      labels: [governance]
+      body: "boardroom.pinned_decision_turns は窓外の代表発言を **新しい順** に MAX_PINNED_TURNS=5 件まで採る。残懸念審査(2026-08-04)は、決定発言(`実弾…¥100万`)の後に単位付きの雑音(「あとN%上げたい」等)が5件続くと本命がピン留めから落ちることを実測した。連結検出フォールバックはさらに弱く、候補が区間内の窓外代表発言**全件**になるため分割議題も押し出される。暫定是正として省略件数をプロンプトに明示する fail-loud を入れた(独立役員が部分集合と気付ける)が、選択規則そのものは未是正である。案: (a) 検出語・金額表記に**個別に**一致した発言を優先し、連結でしか一致しない発言は後順位にする、(b) 一致した語の種類(3専決キーワード > 保護領域 > 金額)で重み付けする、(c) 件数でなく文字数予算で頭打ちにする。いずれもテストで固定すること。出典: docs/reviews/boardroom-meeting-independent-review.md 残懸念2件審査記録。"
+    status: pending
+
+  - id: boardroom-sanitize-fullwidth
+    what: "sanitize_speech の全角・NBSP 変種のすり抜けと digest 側のフェンス欠如(残懸念審査 R-3)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "boardroom: 全角括弧・NBSP・順序付きリストの詐称行を無害化し、要約入力にもフェンスを付ける"
+      labels: [governance]
+      body: "残懸念審査(2026-08-04)の実測: `**［cio］**`(全角括弧)・全角空白/NBSP インデント・順序付きリスト `1. ` で始まる話者行は sanitize_speech が引用化しない。parse_speaker_sequence は ASCII 厳密一致のため**話者列は汚染されない**(fail-closed)が、role_digest_input はフェンス無しの Markdown を要約 LLM に渡し、_DIGEST_SYSTEM は「`**[役職キー]** 表示名:` で始まる行だけが正」と教えるため、人と LLM の目には全角版が真正の発言に見える(再確認審査 懸念B と同型の残穴)。是正案: (a) 無害化の前に全角括弧・全角空白・NBSP を正規化する(NFKC 相当の限定的な写像。本文そのものは書き換えず判定用にだけ正規化するか、引用化して残すかを決めること)、(b) 行頭マーカーに順序付きリストを加える、(c) role_digest_input の出力も _conversation_block と同じフェンスで囲む。証憑(minutes.body_md)の見た目を変える変更を含むため、既存本文の解釈が変わらないことをテストで固定すること。出典: docs/reviews/boardroom-meeting-independent-review.md 残懸念2件審査記録 R-3。"
     status: pending
 
   - id: mtm-bar-arrival-revisit
