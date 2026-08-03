@@ -51,7 +51,41 @@ SELECT b.book_id, 'securities_mtm', '有価証券評価調整', 'asset'
  WHERE b.book_type = 'fund'
 ON CONFLICT (book_id, account_id) DO NOTHING;
 
--- ── 2. 書き込みガード ───────────────────────────────────────────────────────
+-- ── 2. 逆仕訳の実突合(免除条件の共通部品)─────────────────────────────────
+-- 建玉勘定のガードは逆仕訳を免除するが、免除の判定は ``reversal_of IS NOT NULL``
+-- という**フラグでは行わない**(独立審査 新-18)。``reversal_of`` は ``post_entry`` の
+-- 公開引数であり、対象仕訳の内容とも帳簿とも突合されない — 審査の実測では、無関係な
+-- entry_id を ``reversal_of`` に入れるだけで posted_by 検証を迂回して
+-- ``Dr securities_mtm 3,000,000 / Cr capital`` が通り、次の締めが全額を洗い替えて
+-- NAV 13,000,001→10,000,001・偽の未実現損 3,000,000 を立てた(新-14(a) の完全再現)。
+--
+-- そこで免除は「その明細が、対象仕訳の同じ明細を**打ち消しているか**」の実突合にする:
+-- 同一帳簿・同一勘定・同一銘柄で借方と貸方が入れ替わった行が対象仕訳に存在すること。
+-- ``posting.reverse_entry`` が作る逆仕訳はこれを厳密に満たす一方、金額や銘柄を差し替えた
+-- 「逆仕訳を騙る記帳」は落ちる。免除の範囲が「既にある記帳の取り消し」ちょうどになる。
+CREATE OR REPLACE FUNCTION ledger.reversal_mirrors_line(
+    target_entry bigint, book text, account text, instrument bigint,
+    d numeric, c numeric
+) RETURNS boolean
+LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM ledger.journal_entries t
+        JOIN ledger.journal_lines tl ON tl.entry_id = t.entry_id
+        WHERE t.entry_id = target_entry
+          AND t.book_id = book
+          AND tl.book_id = book
+          AND tl.account_id = account
+          AND tl.instrument_id IS NOT DISTINCT FROM instrument
+          AND tl.debit = c AND tl.credit = d
+    );
+$$;
+
+COMMENT ON FUNCTION ledger.reversal_mirrors_line(bigint, text, text, bigint, numeric, numeric) IS
+    '建玉勘定ガードの逆仕訳免除を実突合する(独立審査 新-18)。reversal_of のフラグでは'
+    'なく「対象仕訳に借貸を入れ替えた同一勘定・同一銘柄・同額の明細があるか」を見る。';
+
+-- ── 3. 評価調整勘定の書き込みガード ─────────────────────────────────────────
 -- 評価調整勘定へ書けるのは締めジョブ(posted_by ∈ MTM_POSTED_BY)だけにする。
 -- 読み取り時の述語(_util.mtm_book_value の旧判定子)を**書き込み時の拒否**に
 -- 移すことで、「評価替えのつもりで別の値を書いた仕訳が、後で評価替えとして
@@ -61,14 +95,15 @@ ON CONFLICT (book_id, account_id) DO NOTHING;
 -- post_entry の呼び出し側が決める列なので、値を騙る記帳は依然として可能である。
 -- 分離は新-14 の攻撃を**塞がない** — 宛先が securities から securities_mtm へ
 -- 移るだけであり、`Dr securities_mtm / Cr capital` を締めジョブ名で立てれば次の
--- 締めが同額を洗い替えて偽の未実現損を立てる。したがって Python 側の posted_by
--- 検証(posting.post_mark_to_market)も**外してはならない**。構造的に断つには
--- DB ロール分離(締め専用ロール + current_user を見るトリガ)が要るが、単一ロール
--- 前提のインフラ全体に波及するため本件では採らない。
+-- 締めが同額を洗い替えて偽の未実現損を立てる(審査実測: NAV 13,000,000→10,000,000、
+-- `unexplained_residue` は空)。**原価恒等式はこの偽装を検出しない** — 恒等式が覆うのは
+-- 原価勘定側だけである。したがって Python 側の posted_by 検証
+-- (posting.post_mark_to_market)も**外してはならない**。構造的に断つには DB ロール分離
+-- (締め専用ロール + current_user を見るトリガ)が要るが、単一ロール前提のインフラ全体に
+-- 波及するため本件では採らない。
 --
--- 逆仕訳(reversal_of IS NOT NULL)は許す: 逆仕訳は訂正の唯一の手段(0005 は
+-- 逆仕訳は許す(免除判定は §2 の実突合): 逆仕訳は訂正の唯一の手段(0005 は
 -- UPDATE/DELETE を禁じる)であり、評価替えだけ訂正不能にすると是正経路が消える。
--- 逆仕訳は貸方に同額を立てるので残高は自然に相殺し、残渣の同定を汚さない。
 --
 -- instrument_id 必須: 評価調整は銘柄ごとの残渣同定に使う。銘柄の無い評価調整は
 -- どの建玉の調整か分からず、洗い替えの対象から永久に漏れる。
@@ -87,9 +122,14 @@ BEGIN
     END IF;
     SELECT posted_by, reversal_of INTO parent_posted_by, parent_reversal
       FROM ledger.journal_entries WHERE entry_id = NEW.entry_id;
-    IF parent_reversal IS NULL AND parent_posted_by IS DISTINCT FROM 'ledger.closing' THEN
+    IF parent_reversal IS NOT NULL
+       AND ledger.reversal_mirrors_line(parent_reversal, NEW.book_id, NEW.account_id,
+                                        NEW.instrument_id, NEW.debit, NEW.credit) THEN
+        RETURN NEW;  -- 既存の評価替え明細を打ち消す逆仕訳(実突合済み)
+    END IF;
+    IF parent_posted_by IS DISTINCT FROM 'ledger.closing' THEN
         RAISE EXCEPTION
-            '評価調整勘定へ書けるのは締めジョブだけ: posted_by=% '
+            '評価調整勘定へ書けるのは締めジョブか実突合済みの逆仕訳だけ: posted_by=% '
             '(_util.MTM_POSTED_BY と一致させること)', parent_posted_by;
     END IF;
     RETURN NEW;
@@ -102,6 +142,74 @@ CREATE TRIGGER journal_lines_mtm_guard
     FOR EACH ROW EXECUTE FUNCTION ledger.check_mtm_line();
 
 COMMENT ON FUNCTION ledger.check_mtm_line() IS
-    '評価調整勘定(securities_mtm)の書き込みガード。締めジョブ由来か逆仕訳のみ許可し、'
-    'instrument_id を必須にする。posted_by は呼び出し側が決める列なので防御であって'
-    '境界ではない(docs/design/11-mtm-account-separation.md §7)。';
+    '評価調整勘定(securities_mtm)の書き込みガード。締めジョブ由来か実突合済みの逆仕訳'
+    'のみ許可し、instrument_id を必須にする。posted_by は呼び出し側が決める列なので'
+    '防御であって境界ではない(docs/design/11-mtm-account-separation.md §7)。';
+
+-- ── 4. 原価勘定の書き込みガード(独立審査 新-20)────────────────────────────
+-- 原価恒等式の視界は ``held_instruments``(instrument_id 付き明細)に限られる。
+-- 審査の実測では ``Dr securities 2,000,000 / Cr capital``(instrument_id NULL)が
+-- ``held_instruments()==[]`` により恒等式に一度も掛からず、NAV 12,000,000 が**無言で
+-- 恒久残存**した。検出器を足しても「検出器の視界の外」は残るので、視界の外に置けなく
+-- することで塞ぐ。
+--
+-- 条件は 2 つ。(a) instrument_id 必須 — 銘柄の無い建玉は恒等式にも洗い替えにも掛からない。
+-- (b) 親仕訳の証憑 kind が ``POSITION_EVIDENCE_KINDS``(broker_fill / in_kind_contribution)
+-- であること、または実突合済みの逆仕訳であること。
+--
+-- **なぜ posted_by ではなく evidence.kind で切るのか**: 原価勘定の書き手は約定
+-- (post_fill)・現物拠出・締めの未記帳約定取り込みと複数あり、posted_by は呼び出し側ごとに
+-- 違う(ledger.posting / ledger.closing / 執行系)。許可リストにすると広すぎるか正当な
+-- 呼び出しを壊すかのどちらかになる。一方 kind は ``replay_position`` が数量を再生する
+-- ときに見る値そのものなので、**ガードと恒等式が同じ定義を共有する**ことになり、
+-- 「原価勘定に載る行は必ず数量再生の対象」という不変式が構造で保たれる。
+--
+-- **残る限界(黙って強い保証に見せない)**: kind も証憑の自由記入列であり、数量つき
+-- payload を自分で書いた ``broker_fill`` を騙ることはできる。ただしそのとき建玉は
+-- **申告どおり再生され**、恒等式は「申告と帳簿の内部整合」として成立してしまう
+-- (docs/design/11 §7・独立審査 新-21)。本ガードが塞ぐのは「黙って NAV に混ざる」経路で
+-- あって「嘘を申告する」経路ではない。後者は運用統制(拠出 API の posted_by 制限と
+-- #運営 通知)と監査の領分である。
+CREATE OR REPLACE FUNCTION ledger.check_cost_line() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    parent_reversal bigint;
+    parent_kind     text;
+BEGIN
+    IF NEW.account_id <> 'securities' THEN
+        RETURN NEW;
+    END IF;
+    IF NEW.instrument_id IS NULL THEN
+        RAISE EXCEPTION
+            '原価勘定の明細には instrument_id が必須'
+            '(銘柄の無い建玉は原価恒等式にも洗い替えにも掛からない)';
+    END IF;
+    SELECT je.reversal_of, e.kind INTO parent_reversal, parent_kind
+      FROM ledger.journal_entries je
+      JOIN ledger.evidence e ON e.evidence_id = je.evidence_id
+     WHERE je.entry_id = NEW.entry_id;
+    IF parent_reversal IS NOT NULL
+       AND ledger.reversal_mirrors_line(parent_reversal, NEW.book_id, NEW.account_id,
+                                        NEW.instrument_id, NEW.debit, NEW.credit) THEN
+        RETURN NEW;  -- 既存の建玉明細を打ち消す逆仕訳(実突合済み)
+    END IF;
+    IF parent_kind IS DISTINCT FROM 'broker_fill'
+       AND parent_kind IS DISTINCT FROM 'in_kind_contribution' THEN
+        RAISE EXCEPTION
+            '原価勘定へ書けるのは数量を再生できる証憑だけ: evidence.kind=% '
+            '(_util.POSITION_EVIDENCE_KINDS と一致させること。現物拠出は '
+            'posting.post_in_kind_contribution を使う)', parent_kind;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS journal_lines_cost_guard ON ledger.journal_lines;
+CREATE TRIGGER journal_lines_cost_guard
+    BEFORE INSERT ON ledger.journal_lines
+    FOR EACH ROW EXECUTE FUNCTION ledger.check_cost_line();
+
+COMMENT ON FUNCTION ledger.check_cost_line() IS
+    '原価勘定(securities)の書き込みガード。instrument_id を必須にし、数量を再生できる'
+    '証憑(POSITION_EVIDENCE_KINDS)か実突合済みの逆仕訳だけを許す。「原価勘定に載る行は'
+    '必ず数量再生の対象」という不変式を構造で保つ(独立審査 新-20)。';

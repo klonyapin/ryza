@@ -114,7 +114,8 @@ def test_ledger_integrity_triggers_exist(conn):
         "journal_lines_balanced",
         "journal_entries_no_mutation",
         "journal_lines_no_mutation",
-        "journal_lines_mtm_guard",  # 0034: 評価調整勘定の書き込みガード
+        "journal_lines_mtm_guard",   # 0034: 評価調整勘定の書き込みガード
+        "journal_lines_cost_guard",  # 0034: 原価勘定の書き込みガード(審査 新-20)
     ):
         assert name in triggers, f"トリガ {name} が存在しない"
 

@@ -161,13 +161,14 @@ def test_reclose_advances_watermark_for_nav_neutral_entries(conn, run_id):
     """再審査 再-4: NAV 中立の遅延仕訳でも水位を進め、翌日以降の再検出を止める。"""
     d0, d1, d2 = _G_DAYS[0], _G_DAYS[1], _G_DAYS[2]
     _close(conn, run_id, d0)
-    # 資産の振替のみ(現金 → 証券・手数料ゼロ)= NAV は動かないが仕訳は立つ。
+    # 資産の振替のみ(現金 → 差入証拠金・手数料ゼロ)= NAV は動かないが仕訳は立つ。
+    # 原価勘定を使わないのは 0034 のガード(数量を再生できる証憑のみ)に掛かるためで、
+    # この検査(NAV 中立でも水位は進むか)は勘定に依存しない。
     posting.post_entry(
         conn, book_id="DEMO_FUND", entry_date=d0,
         description="NAV 中立の遅延記帳(テスト)",
         lines=[
-            {"account_id": "securities", "debit": Decimal(1000), "currency": "JPY",
-             "instrument_id": 1},
+            {"account_id": "margin_deposit", "debit": Decimal(1000), "currency": "JPY"},
             {"account_id": "cash", "credit": Decimal(1000), "currency": "JPY"},
         ],
         evidence={"kind": "decision", "payload": {"test": "neutral"}, "source": "test"},
@@ -380,7 +381,9 @@ def _post_late_entry(conn, run_id, day, lines, description):
     )
 
 
-def test_recon_invalidation_follows_position_lines_not_account_category(conn, run_id):
+def test_recon_invalidation_follows_position_lines_not_account_category(
+    conn, run_id, insert_bar
+):
     """判定は行レベルの建玉性で行う(独立審査 新-1 の 4 ケース分離)。
 
     仕訳単位で「拠出資本に触れない仕訳か」を見る述語は両方向に誤る:
@@ -390,15 +393,14 @@ def test_recon_invalidation_follows_position_lines_not_account_category(conn, ru
     d0, d1 = _G_DAYS[0], _G_DAYS[1]
     _close(conn, run_id, d0)
     # 現物拠出: 1 仕訳に capital 行を含むが、建玉(instrument_id 付き)は増える。
-    _post_late_entry(
-        conn, run_id, d0,
-        [
-            {"account_id": "securities", "debit": Decimal(1_000_000), "currency": "JPY",
-             "instrument_id": 1},
-            {"account_id": "capital", "credit": Decimal(1_000_000), "currency": "JPY"},
-        ],
-        "現物拠出(遅延記帳)",
+    # 0034 以降、拠出は数量つき証憑を作る専用 API を通す(手仕訳はガードが拒否する)。
+    # 拠出建玉は**評価替えの対象になる**(新-17 の是正)ので、終値が要る — 建玉を持つ
+    # 銘柄の終値が無ければ締めが落ちるのは意図した fail-loud である。
+    posting.post_in_kind_contribution(
+        conn, book_id="DEMO_FUND", instrument_id=1, qty=1000, price=1000,
+        entry_date=d0, run_id=run_id, description="現物拠出(遅延記帳)",
     )
+    insert_bar(1, d1, close=Decimal(1000))
     result = _close(conn, run_id, d1)
     item = next(r for r in result["reclose"] if r["date"] == d0)
     assert item["restated"] is True

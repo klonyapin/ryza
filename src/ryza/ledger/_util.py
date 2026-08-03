@@ -36,6 +36,16 @@ COST_ACCOUNT = "securities"
 #: 判断の全文は docs/design/11-mtm-account-separation.md)。
 MTM_ACCOUNT = "securities_mtm"
 
+#: 現物拠出を記帳できる ``posted_by``(``post_in_kind_contribution`` が検証する)。
+#: 拠出は**出資の受け入れという運用オペレーション**であって、分析・執行・締めのジョブが
+#: 通る経路ではない。値を絞るのは、NAV を生成するプリミティブの呼び出し元を台帳の上で
+#: 一意にするためである(独立審査 新-21)。
+#:
+#: **これは防御であって境界ではない**: ``posted_by`` は呼び出し側が決める列なので申告制で
+#: ある。実在性(その株を本当に受け入れたか)は台帳の中では検証できない — 拠出は必ず
+#: #運営 へ通知し、人が見る側で照合する(``post_in_kind_contribution``)。
+IN_KIND_POSTED_BY: tuple[str, ...] = ("ops.capital_ops",)
+
 #: 建玉の数量を再生できる証憑の kind(``replay_position`` の対象)。
 #: ``in_kind_contribution`` は約定を経ない建玉(現物拠出)に数量を持たせるための
 #: 証憑であり、これを再生対象に含めないと当該建玉は数量ゼロに見えて**一度も
@@ -262,10 +272,12 @@ def replay_position(
     証憑という既存の 2 つの真実に 3 つ目を足すことになるため採らない。
 
     **限界: 再生できるのは証憑を持つ経路だけである。** 数量つき証憑を伴わない手仕訳
-    (``Dr securities / Cr capital`` を kind='decision' で立てる等)はここに現れない。それは
-    黙って評価から漏れるのではなく、締めの原価恒等式(``securities 残高 = ここが返す原価``)を
-    破って ``unexplained_residue`` に名指しで出る(``ledger.closing``)。株式分割・併合・
-    現物払戻は未対応であり、同じく恒等式を破る側に落ちる。
+    (``Dr securities / Cr capital`` を kind='decision' で立てる等)はここに現れない。0034 の
+    原価勘定ガード(``ledger.check_cost_line``)以降、その記帳は**書込時に拒否される** —
+    原価勘定に載る行は必ず ``POSITION_EVIDENCE_KINDS`` の証憑を持つか実突合済みの逆仕訳で
+    あり、「ここに現れないのに原価勘定にある」状態は逆仕訳のオペミス経由でしか作れない
+    (それは締めの原価恒等式が名指しする)。株式分割・併合・現物払戻も未対応のため同じく
+    拒否される — 対応するときは証憑 kind を足してここに再生を書く。
     """
     sql = """
         SELECT e.kind, je.evidence_id, e.payload_ref
@@ -428,11 +440,17 @@ def mtm_book_value(
     (審査実測 NAV 13,000,000→10,000,000)、無から NAV を増やしたり(同 10,500,000)できた
     — 独立審査 新-14。いまは勘定残高そのものなので判定子が無い。
 
+    **ただし分離は新-14 の攻撃を塞いでいない**(独立審査 新-19・設計文書 11 §5.2-1): 宛先が
+    この勘定へ移っただけであり、締めジョブ名を騙って ``Dr securities_mtm / Cr capital`` を
+    立てれば次の締めが同額を洗い替えて偽の未実現損を立てる(審査実測: NAV 13,000,000→
+    10,000,000、``unexplained_residue`` は**空**)。**原価恒等式はこの経路を検出しない** —
+    恒等式が覆うのは原価勘定側だけである。この勘定の防御は ``post_mark_to_market`` の
+    ``posted_by`` 検証と 0034 の DB トリガ(``ledger.check_mtm_line``)であって、恒等式ではない。
+
     逆仕訳は貸方に同額を立てるため残高で自然に相殺する(分離前に必要だった逆仕訳の
-    除外ロジックは不要になった)。ここに現れない数量ゼロの残高、および原価恒等式
-    (``securities`` 残高 = ``replay_position`` の原価)の破れは ``closing.run_daily_close``
-    が ``unexplained_residue`` として毎締めに検出・記録する(新-15)— 黙って消すのでも
-    黙って残すのでもなく、名指しして残す。
+    除外ロジックは不要になった)。数量ゼロの残高と原価恒等式(``securities`` 残高 =
+    ``replay_position`` の原価)の破れは ``closing.run_daily_close`` が
+    ``unexplained_residue`` として毎締めに検出・記録する(新-15)。
     """
     return _account_instrument_balance(
         conn, book_id, instrument_id, [MTM_ACCOUNT], as_of

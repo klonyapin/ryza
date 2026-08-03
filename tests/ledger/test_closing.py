@@ -12,6 +12,9 @@ import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
+import psycopg
+import pytest
+
 from ryza.ledger import _util, closing, posting, statements
 
 D = Decimal
@@ -647,12 +650,13 @@ def test_close_remarks_after_repurchase(conn, run_id):
     assert _snapshot(conn, d2)[0] == D(10_250_000)
 
 
-def _post_in_kind(conn, run_id, day: date, instrument_id: int, amount: Decimal) -> int:
-    """**数量つき証憑を伴わない**直接記帳(Dr securities / Cr capital)。
+def _post_in_kind(conn, run_id, day: date, instrument_id: int, amount: Decimal):
+    """**数量つき証憑を伴わない**原価勘定への直接記帳(Dr securities / Cr capital)。
 
-    正規の現物拠出 API(``posting.post_in_kind_contribution``)と違い数量が証憑に無いので、
-    ``replay_position`` は数量ゼロを返す。評価替えの対象から外れる代わりに、締めの原価
-    恒等式を破って ``unexplained_residue`` に名指しで出る(0034 以降)。
+    0034 の原価勘定ガード(``ledger.check_cost_line``)以降、これは**書込時に拒否される**。
+    数量を再生できない行が原価勘定に載ると、恒等式にも洗い替えにも掛からないまま NAV に
+    居座るためである(独立審査 新-20 の実測: instrument_id NULL の 2,000,000 が
+    ``held_instruments()==[]`` で一度も検査されず NAV 12,000,000 が恒久残存した)。
     """
     return posting.post_entry(
         conn,
@@ -670,38 +674,72 @@ def _post_in_kind(conn, run_id, day: date, instrument_id: int, amount: Decimal) 
     )
 
 
-def test_close_does_not_write_off_positions_built_outside_fills(conn, run_id):
-    """洗い替えの対象は**評価替えが作った残高**だけ — 現物拠出を消してはならない。
+def test_cost_account_refuses_postings_without_a_quantity_evidence(conn, run_id):
+    """原価勘定に載る行は必ず数量再生の対象(独立審査 新-20 — 検出でなく拒否で塞ぐ)。
 
-    ``replay_position`` は broker_fill 証憑しか再生しないため、約定を経ずに建った
-    securities(現物拠出・資産振替)は数量ゼロに見える。総額を洗い替える実装にすると
-    実在の資産を帳簿から消す(この是正の過程で実測: 現物拠出 1,000,000 の日の NAV が
-    丸ごと戻り、再締めの ``restated`` まで False になった)。
+    検出器を足しても「検出器の視界の外」は残る。審査の実測では instrument_id を持たない
+    ``Dr securities 2,000,000 / Cr capital`` が ``held_instruments()==[]`` により恒等式に
+    一度も掛からず、NAV 12,000,000 が**無言で恒久残存**した。ガードは (a) instrument_id
+    必須 (b) 親証憑の kind ∈ ``POSITION_EVIDENCE_KINDS`` の 2 条件で視界の外に置けなくする。
     """
-    _post_in_kind(conn, run_id, DAY, 1005, D(1_000_000))
+    # (a) 数量を再生できない証憑(kind='decision')— 銘柄付きでも拒否。
+    with pytest.raises(psycopg.errors.RaiseException, match="数量を再生できる証憑"):
+        with conn.transaction():
+            _post_in_kind(conn, run_id, DAY, 1005, D(1_000_000))
 
-    result = closing.run_daily_close(
-        conn, book_id="DEMO_FUND", date=DAY, price_source={}, run_id=run_id
+    # (b) instrument_id NULL(新-20 の実測ケースそのもの)。
+    with pytest.raises(psycopg.errors.RaiseException, match="instrument_id"):
+        with conn.transaction():
+            posting.post_entry(
+                conn, book_id="DEMO_FUND", entry_date=DAY, description="銘柄なし建玉",
+                lines=[
+                    {"account_id": "securities", "debit": D(2_000_000), "currency": "JPY"},
+                    {"account_id": "capital", "credit": D(2_000_000), "currency": "JPY"},
+                ],
+                evidence={"kind": "in_kind_contribution", "payload": {}, "source": "test"},
+                run_id=run_id, posted_by="ops.capital_ops",
+            )
+
+    # 正規の API は通り、NAV も建玉も期待どおりに立つ(拒否が広すぎないことの対照)。
+    posting.post_in_kind_contribution(
+        conn, book_id="DEMO_FUND", instrument_id=1005, qty=1000, price=1000,
+        entry_date=DAY, run_id=run_id,
     )
-    assert result["marked"] == []
-    assert _util.securities_book_value(conn, "DEMO_FUND", 1005, as_of=DAY) == D(1_000_000)
+    result = closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=DAY, price_source={1005: 1000}, run_id=run_id
+    )
+    assert result["unexplained_residue"] == {}
     assert _snapshot(conn, DAY)[0] == D(11_000_000)
-    assert "zero_qty_writeoffs" not in _snapshot(conn, DAY)[2]
-    # 触らないが黙ってもいない: 数量つき証憑が無い建玉は原価恒等式を破るので名指しされる。
-    assert result["unexplained_residue"]["1005"]["reason"] == "zero_qty_residue"
 
 
 def test_close_writes_off_only_the_mtm_share_when_both_coexist(conn, run_id):
-    """同じ銘柄に現物拠出と全売却済みの約定が同居しても、消すのは評価替えぶんだけ。"""
-    d0, d1 = _full_sell_scenario(conn, run_id)  # 1001: 残渣 200,000 を作る
-    _post_in_kind(conn, run_id, d1, 1001, D(300_000))  # 約定外の建玉が同じ銘柄に乗る
+    """原価側に説明不能な残高が同居しても、洗い替えるのは評価調整勘定ぶんだけ。
 
-    closing.run_daily_close(
+    0034 の原価勘定ガード以降、原価側に「再生できない残高」を作れるのは**逆仕訳経由**
+    だけである(新-15 の実測ケース: 買いだけを取り消して売りを残すオペミス)。洗い替えが
+    原価勘定に触れないことは勘定分離で構造的に保証されるが、両者が同じ銘柄に同居した日に
+    「評価調整だけが消え、原価側は名指しされて残る」ことを固定する。
+    """
+    d0, d1 = _full_sell_scenario(conn, run_id)  # 1001: 評価替え残渣 200,000 を作る
+    with conn.cursor() as cur:  # 買い約定だけを逆仕訳(売りは残す)
+        cur.execute(
+            """SELECT je.entry_id FROM ledger.journal_entries je
+               JOIN ledger.evidence e ON e.evidence_id = je.evidence_id
+               WHERE je.book_id = 'DEMO_FUND' AND e.kind = 'broker_fill'
+               ORDER BY je.entry_id LIMIT 1"""
+        )
+        buy_entry_id = cur.fetchone()[0]
+    posting.reverse_entry(conn, entry_id=buy_entry_id, reason="オペミス(テスト)",
+                          run_id=run_id, entry_date=d1)
+
+    result = closing.run_daily_close(
         conn, book_id="DEMO_FUND", date=d1, price_source={}, run_id=run_id
     )
-    # 200,000(評価替えぶん)だけが消え、現物拠出の 300,000 は残る。
-    assert _util.securities_book_value(conn, "DEMO_FUND", 1001, as_of=d1) == D(300_000)
+    # 評価調整 200,000 は消え、原価側の −1,000,000 は残って名指しされる。
     assert _util.mtm_book_value(conn, "DEMO_FUND", 1001, as_of=d1) == D(0)
+    assert _util.securities_cost_value(conn, "DEMO_FUND", 1001, as_of=d1) == D(-1_000_000)
+    assert result["zero_qty_writeoffs"]["1001"]["book_value"] == "200000"
+    assert result["unexplained_residue"]["1001"]["reason"] == "zero_qty_residue"
 
 
 def test_reclose_writes_off_the_residue_of_a_late_full_sell(conn, run_id):
@@ -780,46 +818,66 @@ def _post_forged_mtm(conn, run_id, day: date, lines: list[dict]) -> int:
 
 
 def test_close_ignores_forged_price_snapshot_entries(conn, run_id):
-    """kind を騙るだけでは洗い替えの対象にならない(独立審査 新-14 の攻撃 2 種)。
+    """評価替えを騙る手仕訳は**書込時に拒否される**(独立審査 新-14 の攻撃 2 種)。
 
     洗い替えは NAV を双方向に動かす原始操作なので、判定子が evidence の自由文字列だけだと
-    (a) 借方に立てた手仕訳は**実在資産を全額消され**、(b) 貸方に立てると NAV を無から
-    増やせる。判定子に ``posted_by``(締めジョブ由来)を連言で加えて両方を封じる。
+    (a) 借方に立てた手仕訳は実在資産を全額消され、(b) 貸方に立てると NAV を無から増やせた。
+    0034 以降、この 2 種はどちらも原価勘定ガード(数量を再生できる証憑のみ)に掛かって
+    そもそも記帳できない — 検出ではなく拒否で塞ぐ。
     """
     # (a) Dr securities / Cr capital を kind='price_snapshot' で立てる。
-    _post_forged_mtm(
-        conn, run_id, DAY,
-        [{"account_id": "securities", "debit": D(3_000_000), "currency": "JPY",
-          "instrument_id": 1006},
-         {"account_id": "capital", "credit": D(3_000_000), "currency": "JPY"}],
-    )
+    with pytest.raises(psycopg.errors.RaiseException, match="数量を再生できる証憑"):
+        with conn.transaction():
+            _post_forged_mtm(
+                conn, run_id, DAY,
+                [{"account_id": "securities", "debit": D(3_000_000), "currency": "JPY",
+                  "instrument_id": 1006},
+                 {"account_id": "capital", "credit": D(3_000_000), "currency": "JPY"}],
+            )
     # (b) 貸方に立てて NAV を増やさせようとする(現金と相殺 = それ自体は NAV 中立)。
-    _post_forged_mtm(
-        conn, run_id, DAY,
-        [{"account_id": "cash", "debit": D(500_000), "currency": "JPY"},
-         {"account_id": "securities", "credit": D(500_000), "currency": "JPY",
-          "instrument_id": 1007}],
-    )
+    with pytest.raises(psycopg.errors.RaiseException, match="数量を再生できる証憑"):
+        with conn.transaction():
+            _post_forged_mtm(
+                conn, run_id, DAY,
+                [{"account_id": "cash", "debit": D(500_000), "currency": "JPY"},
+                 {"account_id": "securities", "credit": D(500_000), "currency": "JPY",
+                  "instrument_id": 1007}],
+            )
 
     result = closing.run_daily_close(
         conn, book_id="DEMO_FUND", date=DAY, price_source={}, run_id=run_id
     )
     assert result["marked"] == [] and result["zero_qty_writeoffs"] == {}
-    assert _util.securities_book_value(conn, "DEMO_FUND", 1006, as_of=DAY) == D(3_000_000)
-    assert _util.securities_book_value(conn, "DEMO_FUND", 1007, as_of=DAY) == D(-500_000)
-    # NAV は手仕訳ぶんだけ(13,000,000)。洗い替えで 10,000,000 に落ちも 10,500,000 に増えもしない。
-    assert _snapshot(conn, DAY)[0] == D(13_000_000)
+    assert result["unexplained_residue"] == {}
+    assert _snapshot(conn, DAY)[0] == D(10_000_000)  # 手仕訳ぶんは 1 円も入らない
 
-    # 黙って残すのでもなく、説明不能な残渣として名指しで記録する(新-15)。
-    # 0034 以降の判定は**原価恒等式の破れ**(原価勘定の残高 ≠ 建玉再生の取得原価)であり、
-    # 評価替えの経路(kind / posted_by)を一切参照しない。
-    assert result["unexplained_residue"] == {
-        "1006": {"book_value": "3000000", "replay_cost": "0", "qty": "0",
-                 "reason": "zero_qty_residue"},
-        "1007": {"book_value": "-500000", "replay_cost": "0", "qty": "0",
-                 "reason": "zero_qty_residue"},
-    }
-    assert _snapshot(conn, DAY)[2]["unexplained_residue"]["1006"]["book_value"] == "3000000"
+
+def test_mtm_account_forgery_is_not_covered_by_the_cost_identity(conn, run_id):
+    """**恒等式は評価調整勘定を直接叩く偽装を検出しない**(独立審査 新-19 の限界固定)。
+
+    設計文書 11 §5.2-1 が「分離は新-14 を塞がない」と書いているとおり、締めジョブ名を
+    騙った ``Dr securities_mtm / Cr capital`` は次の締めで全額洗い替えられ NAV を落とす。
+    この経路の防御は ``post_mark_to_market`` の posted_by 検証と 0034 の DB トリガであって
+    恒等式ではない — その事実をテストで固定し、「恒等式が全部を覆う」という誤読を防ぐ。
+    """
+    posting.post_entry(
+        conn, book_id="DEMO_FUND", entry_date=DAY, description="締めジョブ名を騙る評価替え",
+        lines=[
+            {"account_id": "securities_mtm", "debit": D(3_000_000), "currency": "JPY",
+             "instrument_id": 1006},
+            {"account_id": "capital", "credit": D(3_000_000), "currency": "JPY"},
+        ],
+        evidence={"kind": "price_snapshot", "payload": {"forged": True}, "source": "test"},
+        run_id=run_id, posted_by="ledger.closing",  # ← 騙れる(申告制)
+    )
+    result = closing.run_daily_close(
+        conn, book_id="DEMO_FUND", date=DAY, price_source={}, run_id=run_id
+    )
+    # 洗い替えられて NAV が落ち、偽の未実現損が立つ。恒等式(原価勘定側)は**無音**。
+    assert result["zero_qty_writeoffs"]["1006"]["book_value"] == "3000000"
+    assert result["unexplained_residue"] == {}
+    assert _snapshot(conn, DAY)[0] == D(10_000_000)
+    assert statements.book_totals(conn, "DEMO_FUND", DAY)["net_income"] == D(-3_000_000)
 
 
 def test_close_reports_residue_left_by_a_reversal_mistake(conn, run_id):
@@ -1001,16 +1059,33 @@ def test_reversing_an_in_kind_contribution_unwinds_the_position(conn, run_id):
 
 
 def test_close_names_a_cost_identity_break_on_a_live_position(conn, run_id):
-    """建玉が残っていても、証憑の無い直接記帳は原価恒等式の破れとして名指しされる。
+    """建玉が残っていても、申告と帳簿が食い違えば原価恒等式の破れとして名指しされる。
 
-    分離前はこの検査が書けなかった(``securities`` に原価と評価調整が同居しており、
-    突合には評価調整ぶんを推定で差し引く必要があった — その推定子こそ新-14 が騙した
-    ものである)。分離後の判定は評価替えの経路を一切参照しない。
+    0034 の原価勘定ガードは「数量を再生できる証憑を持つこと」しか要求できない(kind も
+    証憑の自由記入列である — 新-21 と同じ限界)。ここでは ``broker_fill`` を騙りつつ
+    payload の数量をゼロにした申告を立て、**申告(再生原価 50,000)と帳簿(350,000)の
+    食い違い**が恒等式に出ることを固定する。分離前はこの検査が書けなかった —
+    ``securities`` に原価と評価調整が同居しており、突合には評価調整ぶんを推定で差し引く
+    必要があった(その推定子こそ新-14 が騙したものである)。
     """
     iid = 1013
     posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
                       qty=100, price=500, entry_date=DAY, run_id=run_id)
-    _post_in_kind(conn, run_id, DAY, iid, D(300_000))  # 数量つき証憑の無い手仕訳
+    # 数量ゼロを申告する偽の約定証憑(ガードは通るが再生原価は増えない)。
+    posting.post_entry(
+        conn, book_id="DEMO_FUND", entry_date=DAY, description="数量ゼロを申告する偽約定",
+        lines=[
+            {"account_id": "securities", "debit": D(300_000), "currency": "JPY",
+             "instrument_id": iid},
+            {"account_id": "capital", "credit": D(300_000), "currency": "JPY"},
+        ],
+        evidence={
+            "kind": "broker_fill",
+            "payload": {"instrument_id": iid, "side": "buy", "qty": "0", "price": "0"},
+            "source": "test",
+        },
+        run_id=run_id, posted_by="test.ledger",
+    )
 
     result = closing.run_daily_close(
         conn, book_id="DEMO_FUND", date=DAY, price_source={iid: 500}, run_id=run_id

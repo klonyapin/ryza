@@ -339,3 +339,108 @@ def test_mtm_account_allows_the_reversal_of_a_revaluation(conn, run_id):
     posting.reverse_entry(conn, entry_id=mtm_entry, reason="評価替えの取消(テスト)",
                           run_id=run_id)
     assert _balance(conn, "DEMO_FUND", "securities_mtm", instrument_id=iid) == D(0)
+
+
+def test_reversal_exemption_requires_a_real_matching_line(conn, run_id):
+    """逆仕訳免除は**実突合**であってフラグではない(独立審査 新-18)。
+
+    ``reversal_of`` は ``post_entry`` の公開引数であり、対象仕訳とも帳簿とも突合されない。
+    審査の実測では、無関係な entry_id を入れるだけで posted_by 検証を迂回して
+    ``Dr securities_mtm 3,000,000 / Cr capital`` が通り、次の締めが全額を洗い替えて
+    NAV 13,000,001→10,000,001・偽の未実現損 3,000,000 を立てた(新-14(a) の完全再現)。
+    免除条件を「対象仕訳に借貸を入れ替えた同一勘定・同一銘柄・同額の明細があるか」に
+    狭めたので、この攻撃は書込時に落ちる。
+    """
+    iid = 1024
+    buy = posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                            qty=10, price=100, entry_date=DAY, run_id=run_id)
+    mtm_entry = posting.post_mark_to_market(conn, book_id="DEMO_FUND", instrument_id=iid,
+                                            price=120, entry_date=DAY, run_id=run_id)
+
+    def _forged_reversal(target: int, amount, account="securities_mtm"):
+        posting.post_entry(
+            conn, book_id="DEMO_FUND", entry_date=DAY, description="逆仕訳を騙る記帳",
+            lines=[
+                {"account_id": account, "debit": amount, "currency": "JPY",
+                 "instrument_id": iid},
+                {"account_id": "capital", "credit": amount, "currency": "JPY"},
+            ],
+            evidence={"kind": "price_snapshot", "payload": {"forged": True},
+                      "source": "test"},
+            run_id=run_id, posted_by="probe.attacker", reversal_of=target,
+        )
+
+    # (a) 審査の攻撃そのもの: 無関係な仕訳(買い約定)を reversal_of に入れる。
+    with pytest.raises(psycopg.errors.RaiseException, match="締めジョブ"):
+        with conn.transaction():
+            _forged_reversal(buy, D(3_000_000))
+
+    # (b) 対象は本物の評価替えだが金額が違う(打ち消しになっていない)。
+    with pytest.raises(psycopg.errors.RaiseException, match="締めジョブ"):
+        with conn.transaction():
+            _forged_reversal(mtm_entry, D(3_000_000))
+
+    # (c) 原価勘定側にも同じ免除規則が効く(数量つき証憑を持たない偽の逆仕訳)。
+    with pytest.raises(psycopg.errors.RaiseException, match="数量を再生できる証憑"):
+        with conn.transaction():
+            _forged_reversal(mtm_entry, D(3_000_000), account="securities")
+
+    # 台帳は 1 円も動いていない。
+    assert _balance(conn, "DEMO_FUND", "securities_mtm", instrument_id=iid) == D(200)
+    assert _balance(conn, "DEMO_FUND", "securities", instrument_id=iid) == D(1000)
+
+
+def test_every_mtm_posted_by_value_is_accepted_by_the_database(conn, run_id):
+    """``MTM_POSTED_BY`` の全要素が DB トリガに受理される(独立審査 新-24 の二重管理検出)。
+
+    トリガは ``'ledger.closing'`` をハードコードしており Python 側と二重管理になっている。
+    値を足したときに「Python は通し DB が拒否する」不整合を、この 1 本が即座に落とす。
+    単一ソース化そのものは ``ops/reminders.yaml`` の ``mtm-posted-by-single-source``。
+    """
+    for i, posted_by in enumerate(_util.MTM_POSTED_BY):
+        iid = 1030 + i
+        posting.post_fill(conn, book_id="DEMO_FUND", instrument_id=iid, side="buy",
+                          qty=10, price=100, entry_date=DAY, run_id=run_id)
+        assert posting.post_mark_to_market(
+            conn, book_id="DEMO_FUND", instrument_id=iid, price=120, entry_date=DAY,
+            run_id=run_id, posted_by=posted_by,
+        ) is not None
+
+
+# ── 現物拠出の統制(独立審査 新-21)──────────────────────────────────────────
+def test_in_kind_contribution_rejects_callers_outside_the_ops_path(conn, run_id):
+    """拠出は運用オペレーション経路のみ(``IN_KIND_POSTED_BY``)。
+
+    拠出は約定を経ずに NAV を増やすプリミティブであり、証憑の数量・単価は記帳した側の
+    申告なので**原価恒等式は構造的に必ず成立する**(実在性の検査にならない)。せめて
+    呼び出し元を台帳の上で一意にする。申告制の域を出ないことは docs/design/11 §7 に明記。
+    """
+    with pytest.raises(ValueError, match="posted_by"):
+        posting.post_in_kind_contribution(
+            conn, book_id="DEMO_FUND", instrument_id=1025, qty=10, price=100,
+            entry_date=DAY, run_id=run_id, posted_by="probe.attacker",
+        )
+
+
+def test_in_kind_contribution_notifies_ops_in_the_same_transaction(conn, run_id):
+    """拠出の通知は記帳と**同一トランザクション**で投入される(落とせない)。
+
+    通知を呼び出し側の責務にすると「拠出だけして通知を落とす」ことができる。同じ conn の
+    同じトランザクションで ``press.outbox`` に入れるので、記帳がコミットされたなら通知も
+    必ずコミットされている。
+    """
+    entry_id = posting.post_in_kind_contribution(
+        conn, book_id="DEMO_FUND", instrument_id=1026, qty=200, price=750,
+        entry_date=DAY, run_id=run_id, reference="出資契約 2026-08",
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT channel, urgent, embed_json FROM press.outbox "
+            "WHERE run_id = %s ORDER BY id DESC LIMIT 1",
+            (run_id,),
+        )
+        channel, urgent, embed = cur.fetchone()
+    assert (channel, urgent) == ("ops", True)
+    assert "現物拠出" in embed["title"]
+    assert f"entry {entry_id}" in embed["fields"][0]["value"]
+    assert embed["fields"][1]["value"] == "ops.capital_ops"

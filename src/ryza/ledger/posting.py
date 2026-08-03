@@ -19,6 +19,9 @@ from typing import Any
 
 import psycopg
 
+from ryza import org
+from ryza.bot import COLOR_FLASH, DISCLAIMER
+from ryza.bot.outbox import enqueue
 from ryza.ledger import _util
 
 # post_ops_cost の category -> 勘定科目 ID / 証憑 kind
@@ -310,7 +313,7 @@ def post_in_kind_contribution(
     description: str | None = None,
     source: str = "in_kind",
     reference: str | None = None,
-    posted_by: str = "ledger.posting",
+    posted_by: str = _util.IN_KIND_POSTED_BY[0],
 ) -> int:
     """現物拠出(約定を経ない建玉の受け入れ)を記帳する。Dr securities / Cr capital。
 
@@ -333,10 +336,30 @@ def post_in_kind_contribution(
     原価恒等式)。以後この建玉は約定と同じ移動平均法で扱われ、売却時の実現損益も、締めの
     評価替えも通常どおり効く。
 
+    **これは NAV 生成プリミティブである**(独立審査 新-21): 証憑には呼び出し側が書いた
+    数量・単価がそのまま入るため、**原価恒等式は構造的に必ず成立する** — 恒等式は「同じ
+    呼び出しが書いた 2 つの成果物の内部整合」であって実在性の検査ではない。しかも新-17 の
+    是正により、架空の拠出は評価替えにも乗る(是正前は原価のまま動かなかった)。台帳の中に
+    実在性を確かめる手段は無いので、統制は 2 つ置く:
+
+    1. ``posted_by`` を ``_util.IN_KIND_POSTED_BY``(運用オペレーション経路)に限る
+    2. 記帳と**同一トランザクションで** #運営 へ通知を投入する(``press.outbox``)。
+       呼び出し側の作法に依存しない — 通知だけを落とすことができない
+
+    どちらも申告制の域を出ない(``posted_by`` は呼び出し側が決める列である)。塞いだのは
+    「黙って NAV が増える」経路であって「嘘を申告する」経路ではない。後者は人が見る側での
+    照合(#運営 通知 + 監査)に委ねる — 限界の全文は
+    docs/design/11-mtm-account-separation.md §7。
+
     **未対応**: 現物払戻(拠出の逆向き)と株式分割・併合。どちらも証憑 kind を分けて
-    数量の増減を表現する拡張になる。未対応の経路が ``securities`` を直接動かした場合は、
-    原価恒等式が破れて ``closing`` の ``unexplained_residue`` に名指しで出る。
+    数量の増減を表現する拡張になる。未対応の経路が ``securities`` を直接動かそうとしても
+    0034 の原価勘定ガードが書込時に拒否する(数量を再生できる証憑でなければ通らない)。
     """
+    if posted_by not in _util.IN_KIND_POSTED_BY:
+        raise ValueError(
+            f"現物拠出の posted_by は {_util.IN_KIND_POSTED_BY} のいずれか"
+            f"(拠出は運用オペレーション経路のみ — 独立審査 新-21): {posted_by!r}"
+        )
     q = _util.to_decimal(qty)
     p = _util.to_decimal(price)
     if q <= 0:
@@ -366,7 +389,7 @@ def post_in_kind_contribution(
          "instrument_id": int(instrument_id)},
         {"account_id": credit_account, "credit": amount, "currency": currency},
     ]
-    return post_entry(
+    entry_id = post_entry(
         conn,
         book_id=book_id,
         entry_date=entry_date,
@@ -376,6 +399,67 @@ def post_in_kind_contribution(
         run_id=run_id,
         posted_by=posted_by,
     )
+    _notify_in_kind(
+        conn,
+        book_id=book_id,
+        instrument_id=int(instrument_id),
+        qty=q,
+        price=p,
+        amount=amount,
+        entry_id=entry_id,
+        entry_date=entry_date,
+        run_id=run_id,
+        posted_by=posted_by,
+        reference=reference,
+    )
+    return entry_id
+
+
+def _notify_in_kind(
+    conn: psycopg.Connection,
+    *,
+    book_id: str,
+    instrument_id: int,
+    qty: Decimal,
+    price: Decimal,
+    amount: Decimal,
+    entry_id: int,
+    entry_date: _date,
+    run_id: int,
+    posted_by: str,
+    reference: str | None,
+) -> None:
+    """現物拠出を #運営 へ通知する(記帳と**同一トランザクション**— 独立審査 新-21)。
+
+    通知を呼び出し側の責務にすると「拠出だけして通知を落とす」ことができてしまう。
+    ``press.outbox`` への投入は同じ ``conn`` の同じトランザクションで行うので、記帳が
+    コミットされたなら通知も必ずコミットされている(逆も同じ)。
+
+    照合ブレイク・残渣と同格の専用 embed にし、``urgent`` で上げる。拠出は運用上ごく稀な
+    事象であり、身に覚えのない拠出は**それ自体が事故か偽装**である — 頻度が低いので
+    urgent の乱発にならない(通知疲れの評価は risk 側 ``PENDING_MATERIALITY_NAV`` と同じ姿勢)。
+
+    ``ryza.bot`` への依存は定数と outbox 投入だけであり、``ledger`` スキーマの書き込み権限
+    (会計エンジンのみ)には触れない。
+    """
+    embed = {
+        "title": "⚠️ 現物拠出の記帳",
+        "description": (
+            f"{book_id} {entry_date.isoformat()}: 銘柄 {instrument_id} を {qty}@{price}"
+            f"(取得原価 {amount})で受け入れた。**約定を経ずに NAV が増える経路**であり、"
+            "台帳の中に実在性を確かめる手段は無い(証憑の数量・単価は記帳した側の申告)。"
+            "出資の受け入れとして意図したものか確認すること。"
+        ),
+        "color": COLOR_FLASH,
+        "fields": [
+            {"name": "仕訳", "value": f"entry {entry_id} / run {run_id}", "inline": True},
+            {"name": "記帳経路", "value": posted_by, "inline": True},
+            {"name": "参照", "value": reference or "(なし)", "inline": True},
+        ],
+        "author": org.author_for_role("audit"),
+        "footer": {"text": DISCLAIMER},
+    }
+    enqueue(conn, "ops", embed, run_id, urgent=True)
 
 
 def post_mark_to_market(
