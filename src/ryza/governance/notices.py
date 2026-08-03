@@ -27,6 +27,7 @@ violation`` は通知なき発効を A-18 の無承認変更として扱う。�
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -36,9 +37,11 @@ from psycopg import pq
 
 from ryza import org
 from ryza.bot import COLOR_APPROVAL, COLOR_FLASH, DISCLAIMER
-from ryza.bot.approvals import KINDS
+from ryza.bot.approvals import KINDS, NotOwnerError, is_owner
 from ryza.bot.outbox import enqueue
 from ryza.governance import decisions as decisions_mod
+
+log = logging.getLogger("ryza.governance.notices")
 
 # 通知先の論理チャンネル(ryza.bot.CHANNELS)。
 APPROVAL_CHANNEL = "approval"  # #承認: みなし承認の発効通知(定款第3条の発効要件)
@@ -51,6 +54,10 @@ NOTICE_REF_PREFIX = "outbox:"
 # (``bot/approvals.py`` の ``proposal:`` と衝突しない別マーカー —— みなし承認は
 #  既に発効済みであり、承認/却下ボタンを出すと二度目の決定を促してしまう)。
 DEEMED_MARKER = "deemed:"
+
+# bot/approvals.build_approval_embed のマーカー(あちらは保護領域なので参照のみ)。
+# proposal_ref にこれが混ざると deemed 通知が承認 embed と誤認される(軽微-9)。
+_APPROVAL_MARKER = "proposal:"
 
 # 通知の発信者(config/org.yaml の役職キー)。既定は設計リード —— 保護領域 PR の
 # みなし承認通知はこれまで設計リードが手動送信しており、その手順の機械化が本モジュールの
@@ -148,6 +155,17 @@ def build_deemed_notice_embed(
         raise ValueError(f"未知の提案種別: {kind}")
     if not notice.strip():
         raise ValueError("notice(通知の要旨)は必須")
+    if not proposal_ref.strip():
+        raise ValueError("proposal_ref は必須(空文字不可)")
+    # フッターは「最後のマーカー以降が参照」という規約で復元する。参照自体がマーカー文字列を
+    # 含むと復元が壊れ、``proposal:`` を含む場合は承認 embed と誤認されて**承認/却下ボタンが
+    # 付く**(軽微-9)。発効済みの提案に承認ボタンを出すのは誤操作の温床なので入口で弾く。
+    for marker in (DEEMED_MARKER, _APPROVAL_MARKER):
+        if marker in proposal_ref:
+            raise ValueError(
+                f"proposal_ref にマーカー文字列 '{marker}' を含められない"
+                "(フッターからの参照復元が壊れる)"
+            )
     return {
         "title": title or f"みなし承認が発効しました({kind})",
         "description": (
@@ -180,6 +198,51 @@ def parse_deemed_notice(embed: dict[str, Any]) -> str | None:
         return None
     ref = footer_text[idx + len(DEEMED_MARKER):].strip()
     return ref or None
+
+
+@dataclass(frozen=True)
+class DeemedViewTarget:
+    """配送時の否認ボタン付与判定。``ref`` が None ならボタンを付けない。"""
+
+    ref: str | None
+    warning: str | None = None
+
+
+def resolve_deemed_view(conn: psycopg.Connection, embed: dict[str, Any]) -> DeemedViewTarget:
+    """embed が**実在する** deemed 決定の通知なら、その ``proposal_ref`` を返す。
+
+    **なぜ DB を引くのか**: ``press.outbox`` へ enqueue できる主体なら誰でも ``deemed:``
+    フッター付きの embed を ``#承認`` に出せ、任意の文字列を指す否認ボタンを代表に見せられる
+    (独立役員審査 重要-4)。ボタンの押下先は ``proposal_ref`` だけで決まるので、偽の通知に
+    本物の決定 ID を書けば、代表は「見覚えのない提案の否認」ではなく**別の提案の否認**を
+    押させられる。フッターの自己申告を信じず、対応する ``deemed`` 決定の実在を配送時に確かめる。
+
+    既に否認済みの決定にもボタンを付けない(押しても ``AlreadyVetoedError`` になるだけで、
+    代表には「否認できるのにできない」ように見える)。撤回は ``/unveto`` にある。
+
+    照合できない場合は ``ref=None`` と警告文を返す — **fail-closed**。ボタンが出ない不利益は
+    ``/veto`` で埋められるが、偽の通知にボタンを付ける不利益は埋められない。
+    """
+    ref = parse_deemed_notice(embed)
+    if ref is None:
+        return DeemedViewTarget(None)
+    try:
+        row = decisions_mod.current_decision(conn, ref)
+    except Exception as exc:  # noqa: BLE001 - 照合できないならボタンを付けない(fail-closed)
+        return DeemedViewTarget(None, f"deemed 決定の照合に失敗したため否認ボタンを付けない: {exc}")
+    if row is None:
+        return DeemedViewTarget(
+            None, f"deemed 決定が存在しない参照の通知(偽装の疑い): proposal_ref={ref}"
+        )
+    if row["recorded_decision"] != "deemed":
+        return DeemedViewTarget(
+            None,
+            f"みなし承認でない決定を指す deemed 通知: proposal_ref={ref} "
+            f"decision={row['recorded_decision']}",
+        )
+    if row["is_vetoed"]:
+        return DeemedViewTarget(None, f"既に否認済みのため否認ボタンを付けない: proposal_ref={ref}")
+    return DeemedViewTarget(ref)
 
 
 def build_veto_notice_embed(
@@ -314,6 +377,63 @@ def notice_message_id(conn: psycopg.Connection, notice_ref: str) -> str | None:
 # ────────────────────────────────────────────────────────────────────────────
 # 否認・撤回: 記録 + 通知(同一トランザクション)
 # ────────────────────────────────────────────────────────────────────────────
+def record_denied_attempt(action: str, proposal_ref: str, actor: str) -> int | None:
+    """非オーナーの否認操作の試行を、呼び出し側から独立した接続で ``#運営`` へ記録する。
+
+    **なぜ別接続なのか**: 拒否は例外送出で終わり、呼び出し側はトランザクションを rollback
+    する。同じ接続に警告を書けば拒否の痕跡ごと消える(独立役員審査 中-6)。オーナー検証は
+    呼び出し側が渡す 2 引数の比較でしかなく、コード経路からの偽装は防げないため、**事後に
+    痕跡が残ること**が実質的な防御になる。Run も自前で起こす(呼び出し側の Run は未コミットで
+    あり得るので ``press.outbox.run_id`` の FK が満たせない)。
+
+    記録に失敗しても拒否そのものは妨げない(ログのみ)。戻り値は投入した outbox id。
+    """
+    embed = {
+        "title": "⚠️ 権限のない否認操作を拒否しました",
+        "description": (
+            "オーナー以外のユーザー(またはコード経路)が承認決定の否認を試みました。"
+            "否認は代表の専権(定款第3条)であり、操作は記録されていません。"
+        ),
+        "color": COLOR_FLASH,
+        "fields": [
+            {"name": "操作", "value": action, "inline": True},
+            {"name": "提案参照", "value": proposal_ref, "inline": True},
+            {"name": "試行者", "value": actor, "inline": True},
+        ],
+        "footer": {"text": DISCLAIMER},
+    }
+    try:
+        from ryza.db.conn import connect
+        from ryza.provenance import start_run
+
+        run = start_run(
+            "governance.veto_denied", {"action": action, "proposal_ref": proposal_ref}
+        )
+        try:
+            with connect(autocommit=True) as c:
+                outbox_id = enqueue(c, OPS_CHANNEL, embed, run.run_id, urgent=True)
+            run.finish("success")
+        except Exception:
+            run.finish("failed")
+            raise
+    except Exception:  # noqa: BLE001 - 記録の失敗で拒否を妨げない
+        log.exception("非オーナーの否認試行を記録できなかった: %s %s", action, proposal_ref)
+        return None
+    return outbox_id
+
+
+def _require_owner(action: str, proposal_ref: str, actor: str, owner_ids: Iterable[str]) -> None:
+    """オーナー検証を **DB 読取より前** に行う(既存 killswitch/approvals と同じ順序)。
+
+    権限の無い呼び出しに現決定を読ませない。読取は情報の露出であり、拒否するなら
+    その前に拒否する(独立役員審査 中-6)。
+    """
+    if is_owner(actor, owner_ids):
+        return
+    record_denied_attempt(action, proposal_ref, actor)
+    raise NotOwnerError(f"非オーナーの否認操作を拒否: user={actor}")
+
+
 def _decision_row(conn: psycopg.Connection, proposal_ref: str) -> dict[str, Any]:
     row = decisions_mod.current_decision(conn, proposal_ref)
     if row is None:
@@ -346,6 +466,7 @@ def apply_veto(
         NotOwnerError: 非オーナーの否認操作(否認は代表の専権 —— 定款第3条)
         NotVetoableError: 対象が approve / deemed 以外
     """
+    _require_owner("veto", proposal_ref, vetoed_by, owner_ids)
     _require_shared_transaction(conn)
     row = _decision_row(conn, proposal_ref)
     if row["is_vetoed"]:
@@ -359,6 +480,10 @@ def apply_veto(
             conn, int(row["decision_id"]), reason,
             vetoed_by=vetoed_by, owner_ids=owner_ids,
             expected_proposal_ref=proposal_ref,
+            # 出所(どの経路で否認が記録されたか)を事後に辿れるようにする。
+            # 否認は代表の作為であり Run は必須でないが、記録経路がジョブ・Bot 内にある場合は
+            # 埋める(0021 のコメント。独立役員審査 重要-5 後段)。
+            run_id=run_id,
         )
         outbox_id = enqueue(
             conn, channel,
@@ -385,6 +510,7 @@ def withdraw_veto(
     (0021 独立役員審査 C-3: 撤回の表現が無いと ``UNIQUE(proposal_ref)`` により
     復旧手段が存在しない)。
     """
+    _require_owner("veto_withdrawal", proposal_ref, vetoed_by, owner_ids)
     _require_shared_transaction(conn)
     row = _decision_row(conn, proposal_ref)
     if not row["is_vetoed"]:
@@ -397,6 +523,7 @@ def withdraw_veto(
             conn, int(row["decision_id"]), reason,
             vetoed_by=vetoed_by, owner_ids=owner_ids,
             expected_proposal_ref=proposal_ref,
+            run_id=run_id,  # 出所の記録(重要-5 後段)
         )
         outbox_id = enqueue(
             conn, channel,
@@ -415,6 +542,7 @@ __all__ = [
     "AlreadyVetoedError",
     "AtomicityError",
     "DeemedNotice",
+    "DeemedViewTarget",
     "NotVetoedError",
     "UnknownProposalError",
     "VetoNotice",
@@ -425,5 +553,7 @@ __all__ = [
     "build_veto_withdrawal_embed",
     "notice_message_id",
     "parse_deemed_notice",
+    "record_denied_attempt",
+    "resolve_deemed_view",
     "withdraw_veto",
 ]

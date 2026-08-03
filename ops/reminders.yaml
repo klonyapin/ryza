@@ -384,8 +384,32 @@ reminders:
       type: issue_create
       title: "record_deemed_approval を #承認 通知経路へ配線する"
       labels: [impl]
-      body: "src/ryza/governance/decisions.record_deemed_approval は実装済みだが、まだ呼び出す経路が無く、みなし承認の実運用は手動記録のままである(governance-deemed-writer の①⑤が未了)。定款 v0.4 第3条は『通知と同時に発効』を定め、通知を欠いた発効は A-18 の無承認変更にあたるため、通知の投入(press.outbox / src/ryza/bot/approvals.py 経路)と deemed 行の INSERT は**同一トランザクション**に置く必要がある(片方だけ成功する状態を作らない)。実装内容: ①保護領域変更の PR が起票されたときに #承認 へ PR リンク付き通知を投げ、同一トランザクションで record_deemed_approval(proposal_ref=PR URL, notice_ref=通知メッセージ ID) を呼ぶ、②A-18-1 の `Approved:` トレーラ突合が deemed 行を承認記録として受理することを確認する(現状 A-18 はトレーラの存在検査までで decisions の実在照会をしていない)。**実在照合を実装するときは governance.decisions ではなく governance.current_decisions を読み、effective_decision='vetoed' の行を承認記録として受理しないこと**(独立役員審査 0021 C-5)— decisions を直読すると、代表が否認した承認を A-18 が承認として受理し、否認された変更が無承認変更として検出されない、③#承認 の否認ボタン → decisions.record_veto / record_veto_withdrawal の配線(オーナー検証・expected_proposal_ref 照合を通す)。(完了 2026-08-04: src/ryza/governance/notices.py を新設し①②③を実装。①announce_deemed_approval が press.outbox への #承認 embed 投入と deemed 行の INSERT を SAVEPOINT で束ね、片方の失敗で両方が消える(autocommit 接続は AtomicityError で拒否)。notice_ref は outbox:<press.outbox.id>(Discord メッセージ ID は配送後にしか確定しないため。notice_message_id で実メッセージへ解決)。CLI は python -m ryza.governance.decisions --deemed。②a18.verify_decision_refs が Approved トレーラの ID 形式参照を governance.current_decisions と突合し、vetoed / reject / 不在を受理しない(Issue URL 形式は従来どおり存在検査まで — GitHub API 未照合)。PR マージ経由でも否認済みトレーラは救済しない。③#承認 のみなし承認 embed に否認ボタン(押下 → 理由入力モーダル → apply_veto)、誤操作の復旧は /unveto → withdraw_veto。)"
-    status: done # 2026-08-04 src/ryza/governance/notices.py + a18 実在照合 + Bot 否認ボタン(独立役員審査の対象: bot/main.py・audit/a18.py・新規モジュール)
+      body: "src/ryza/governance/decisions.record_deemed_approval は実装済みだが、まだ呼び出す経路が無く、みなし承認の実運用は手動記録のままである(governance-deemed-writer の①⑤が未了)。定款 v0.4 第3条は『通知と同時に発効』を定め、通知を欠いた発効は A-18 の無承認変更にあたるため、通知の投入(press.outbox / src/ryza/bot/approvals.py 経路)と deemed 行の INSERT は**同一トランザクション**に置く必要がある(片方だけ成功する状態を作らない)。実装内容: ①保護領域変更の PR が起票されたときに #承認 へ PR リンク付き通知を投げ、同一トランザクションで record_deemed_approval(proposal_ref=PR URL, notice_ref=通知メッセージ ID) を呼ぶ、②A-18-1 の `Approved:` トレーラ突合が deemed 行を承認記録として受理することを確認する(現状 A-18 はトレーラの存在検査までで decisions の実在照会をしていない)。**実在照合を実装するときは governance.decisions ではなく governance.current_decisions を読み、effective_decision='vetoed' の行を承認記録として受理しないこと**(独立役員審査 0021 C-5)— decisions を直読すると、代表が否認した承認を A-18 が承認として受理し、否認された変更が無承認変更として検出されない、③#承認 の否認ボタン → decisions.record_veto / record_veto_withdrawal の配線(オーナー検証・expected_proposal_ref 照合を通す)。(完了 2026-08-04 — **ただし①のうち「PR 起票を検知して自動で通知する」部分は未実装**。実装したのは手動起動の機械化であり、人が CLI を叩かなければ通知は出ない。自動起票は deemed-auto-announce に分割した。以下は実装済みの範囲: ①announce_deemed_approval(src/ryza/governance/notices.py・新設)が press.outbox への #承認 embed 投入と deemed 行の INSERT を SAVEPOINT で束ね、片方の失敗で両方が消える(autocommit 接続は AtomicityError で拒否)。notice_ref は outbox:<press.outbox.id>(Discord メッセージ ID は配送後にしか確定しないため。notice_message_id で実メッセージへ解決)。起動口は CLI python -m ryza.governance.decisions --deemed のみ(呼び出し元ジョブは無い)。②a18.verify_decision_refs が Approved トレーラの参照を governance.current_decisions と突合し、vetoed / reject / 不在を受理しない。decision:<id> は ID 一致、それ以外は proposal_ref 一致(本リポジトリの承認記録は全件 PR URL のため後者が主経路 — 独立役員審査 重大-1)。裸の数字は Issue 番号と区別できないため照合せず notes に開示(重要-2)。PR マージ経由でも否認済みトレーラは救済しない。加えて A-18-5(通知が 60 分超未配送 = 通知なき発効)を追加(重要-3)。③#承認 のみなし承認 embed に否認ボタン(押下 → 理由入力モーダル → apply_veto。配送時に対応する deemed 決定の実在を照合してからボタンを付ける — 重要-4)、/veto(Bot 再起動でボタン View が失われるため)、誤操作の復旧は /unveto → withdraw_veto。否認は run_id を記録し出所を追える(重要-5 後段)。意見書: docs/reviews/deemed-wiring-independent-review.md)"
+    status: done # 2026-08-04 手動起動の機械化まで完了(自動起票は deemed-auto-announce へ分割)
+
+  - id: deemed-auto-announce
+    what: "保護領域 PR の起票を検知して、みなし承認の発効通知を自動で出す(現状は CLI の手動起動のみ)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "みなし承認の発効通知を PR 起票から自動化する"
+      labels: [impl]
+      body: "governance-deemed-notice-wiring は記録と通知の**原子性**(src/ryza/governance/notices.announce_deemed_approval)と手動起動の CLI(python -m ryza.governance.decisions --deemed)までを実装したが、**呼び出し元が存在しない**(独立役員審査 中-7)。したがって「保護領域の変更 PR が起票されたら #承認 へ通知して発効する」という定款第3条の運用は、依然として人が CLI を叩くことに依存しており、叩き忘れれば通知なき発効(A-18 の無承認変更)になる。実装内容: ①保護領域に触れる PR の検知(gh CLI か GitHub webhook。config/governance.yaml の protected_areas と PR の変更ファイルを突合)、②独立役員審査の完了を確認してから announce_deemed_approval を呼ぶ(審査前に発効させない)、③起動主体は ops-weekly ではなく PR イベント駆動が望ましい(週次だと最大7日の遅延が発効時刻とずれる)。前提: A-18-5(通知の未配送検知)は実装済みなので、自動化後の配送障害は監査側で検出できる。"
+    status: pending
+
+  - id: deemed-wiring-followup
+    what: "みなし承認配線の残課題(独立役員審査 軽微-11・軽微-12)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "deemed 配線の残課題: A-18 の照合接続と原子性テストの補強"
+      labels: [impl]
+      body: "docs/reviews/deemed-wiring-independent-review.md の軽微指摘。①軽微-11: a18.run_and_report は検査の全体(git 走査を含む)を1つの接続・1トランザクションで囲むため、承認記録の照合が長時間の idle-in-transaction を作る。照合専用の autocommit 接続に分けるか、照合だけ先に済ませて接続を閉じる。②軽微-12: 原子性テストが「記録の失敗で通知が消える」方向のみで、逆方向(通知の投入が失敗したとき記録も残らない)はフォールト注入で検証していない。あわせて decisions.main の IDLE 分岐(CLI が新規接続で announce する経路)と bot/main.py の配送分岐(VetoView 付与)がテストで未カバー。"
+    status: pending
 
   - id: governance-deemed-ratio-audit
     what: "監査部門の deemed_ratio 集計(形骸化アラート)を governance.current_decisions から実装する"
@@ -408,7 +432,7 @@ reminders:
       type: issue_create
       title: "decision_vetoes に origin 列(否認の出所)を追加するか判断する"
       labels: [impl]
-      body: "0021 は decision_vetoes.run_id を NULL 可とした。理由は『否認は代表の作為(意思表示)でありジョブの生成物ではないため、生成元 Run という概念が本来的に無い』であり、独立役員審査 0021 C-8 はこの結論を妥当と認めた(当初コメントの『Discord 経路は Run を持たない』は事実誤認 — press.outbox.run_id は NOT NULL で、Discord 経路でも start_run で Run は取得できる)。ただし run_id が NULL であることは『Run が無い』のか『埋め忘れ』なのかを区別しない。是正候補: origin 列(discord_button|cli|job|migration 等)を足し、どの経路から否認が記録されたかを明示する。判断材料: ①実際に否認が記録される経路が何種類できたか(#承認 のボタン配線後に確定する — governance-deemed-notice-wiring)、②監査(deemed_ratio・A-18)が出所別の集計を必要とするか。必要が無ければ『足さない』を明示的に決めて本リマインダーを done にすること(未決のまま放置しない)。migrations は保護領域のため独立役員審査+みなし承認の手続を経ること。"
+      body: "0021 は decision_vetoes.run_id を NULL 可とした。理由は『否認は代表の作為(意思表示)でありジョブの生成物ではないため、生成元 Run という概念が本来的に無い』であり、独立役員審査 0021 C-8 はこの結論を妥当と認めた(当初コメントの『Discord 経路は Run を持たない』は事実誤認 — press.outbox.run_id は NOT NULL で、Discord 経路でも start_run で Run は取得できる)。ただし run_id が NULL であることは『Run が無い』のか『埋め忘れ』なのかを区別しない。是正候補: origin 列(discord_button|cli|job|migration 等)を足し、どの経路から否認が記録されたかを明示する。判断材料: ①実際に否認が記録される経路が何種類できたか(#承認 のボタン配線後に確定する — governance-deemed-notice-wiring)、②監査(deemed_ratio・A-18)が出所別の集計を必要とするか。必要が無ければ『足さない』を明示的に決めて本リマインダーを done にすること(未決のまま放置しない)。migrations は保護領域のため独立役員審査+みなし承認の手続を経ること。【2026-08-04 判断材料が確定 — 優先度を上げる】否認の記録経路は Discord のみ3つ(#承認 の否認ボタン+モーダル / /veto / /unveto)で、いずれも run_id を記録するようになった(governance-deemed-notice-wiring・独立役員審査 重要-5 後段)。したがって『run_id が NULL = Run が無い』と『埋め忘れ』の区別は当面つくが、**オーナー検証が呼び出し側供給の2引数比較でしかない**ため(同審査 重要-5 前段)、事後に『どの経路から否認が記録されたか』を独立に確認できることが実質的な統制になる。origin 列(discord_button|slash_command|cli|job)の追加を『足す』方向で再評価すること。"
     status: pending
 
   - id: governance-role-separation

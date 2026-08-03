@@ -1,10 +1,12 @@
 """A-18 規則⇔実装トレーサビリティ監査(定款第6条・config/governance.yaml controls)。
 
-4つの検査を実行し、構造化 dict を返す:
+5つの検査を実行し、構造化 dict を返す:
 
   A-18-1 保護領域突合   … `protected_areas` の glob に触れた発効日以後のコミットを列挙し、
                           (a) ``Approved:`` トレーラ (b) GitHub マージ PR 経由(Merge pull request
-                          マージコミットの配下)のいずれも無いものを違反として列挙する
+                          マージコミットの配下)のいずれも無いものを違反として列挙する。
+                          DB 接続がある実行ではトレーラの参照先を ``current_decisions`` と
+                          突合し、否認済み・却下・不在は承認と見なさない
   A-18-2 文書⇔config    … 80-ips.md ⇔ config/ips.yaml、06-constitution.md ⇔ config/governance.yaml
                           のバージョン文字列一致を検査する
   A-18-3 宣言棚卸し     … controls のうち ``enforcement: declaration`` を列挙する(検査ではなく
@@ -14,6 +16,12 @@
                           (b) 件名が PR マージ形式(``Merge pull request``)でないマージコミット
                           を保護領域か否かにかかわらず違反として列挙する。例外なし
                           (``Approved:`` トレーラ付き直 push も違反 — 2026-08-03 代表指示)
+  A-18-5 通知なき発効   … ``decision='deemed'`` の通知参照(``outbox:<id>``)が指す
+                          ``press.outbox`` の行が ``UNNOTIFIED_DEEMED_MINUTES`` を超えて
+                          未配送なら違反として列挙する。定款第3条はみなし承認を「通知と同時に
+                          発効」と定めるが、**outbox への投入は配送ではない** — 配送が止まれば
+                          「発効したが誰も知らない」状態が続く(独立役員審査 重要-3)。
+                          DB 接続がある実行でのみ動く
 
 **read-only 原則**: 本モジュールは検査と警告(``press.outbox`` の ops チャンネルへの embed 投入)
 のみを行い、修正・巻き戻し・コミットは一切行わない。
@@ -25,11 +33,12 @@
 
 - PR 件名(``Merge pull request``)は自己申告であり GitHub API と未照合。件名偽装で承認を
   装える(実弾移行前提条件として API 照合を実装する — ops/reminders.yaml 登録済み)
-- ``Approved:`` トレーラのうち **Issue URL 形式**は実在を照会しない(存在検査まで)。
-  ``governance.decisions`` の **ID 形式**(``123`` / ``decision:123``)は DB 接続がある実行に
-  限り ``governance.current_decisions`` と突合し、否認済み(``effective_decision='vetoed'``)・
-  却下・不在は承認として受理しない(独立役員審査 0021 C-5)。``--dry-run`` や conn 未指定の
-  呼び出しでは照合を行わず、その旨を notes に載せる
+- ``Approved:`` トレーラの参照は、DB 接続がある実行に限り ``governance.current_decisions`` と
+  突合する(``decision:<id>`` は ID 一致、それ以外は ``proposal_ref`` 一致 — PR URL の承認記録が
+  この経路で解決される)。否認済み(``effective_decision='vetoed'``)・却下・不在は承認として
+  受理しない(独立役員審査 0021 C-5・重大-1)。**裸の数字は照合しない**(Issue 番号と区別
+  できず偶然一致が fail-open になる — 重要-2)。DB に対応行の無い参照(Issue 決議など)は
+  従来どおり存在検査までで、照合できなかったことを notes に載せる
 - GitHub の squash マージ(``... (#N)`` 形式の単独コミット)は「マージ PR」と判定しない。
   本リポジトリの承認手続はマージコミット(``Merge pull request``)で行われている(批准 PR #32 が
   実例)。squash 併用を始める場合は判定の拡張が必要
@@ -50,6 +59,7 @@ import logging
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -77,8 +87,9 @@ GOVERNANCE_PATH = "config/governance.yaml"
 # 既知の限界の常時開示(独立役員審査条件)。報告 embed の notes に毎回載せる。
 STANDARD_DISCLOSURES: tuple[str, ...] = (
     "PR 件名(Merge pull request)は自己申告で GitHub API 未照合(照合実装は実弾移行前提条件)",
-    "Approved トレーラの Issue URL は実在未照合(governance.decisions の ID は "
-    "current_decisions と突合し、否認済み・却下・不在を承認として受理しない)",
+    "Approved トレーラは current_decisions と突合(decision:<id> は ID 一致・それ以外は "
+    "proposal_ref 一致。否認済み・却下・不在は受理しない)。裸の数字と DB 外の承認記録"
+    "(Issue 決議)は照合対象外",
     "マージのコンフリクト解消差分(evil merge)は --cc で検査し、保護パスに触れる場合は"
     "マージ自身の Approved トレーラを要求",
     "A-18-4 のマージ判定は親数+PR 件名(A-18-1 と同一の検査)— 件名は自己申告で"
@@ -97,8 +108,21 @@ _PR_MERGE_RE = re.compile(r"^Merge pull request #\d+")
 # 見出し行のバージョン表記(例: 「# Ryza 投資方針書(IPS)v1.3」)。
 _DOC_VERSION_RE = re.compile(r"v(\d+(?:\.\d+)+)")
 
-# Approved トレーラの参照が governance.decisions の ID を指す表記(裸の数字 / decision:123)。
-_DECISION_REF_RE = re.compile(r"^(?:decision:)?(\d+)$")
+# Approved トレーラの参照が governance.decisions の ID を指す表記。接頭辞は必須
+# (裸の数字は Issue 番号と区別できない — 独立役員審査 重要-2)。
+_DECISION_REF_RE = re.compile(r"^decision:(\d+)$")
+
+# 裸の数字(照合不能として開示する参照)。
+_BARE_NUMBER_RE = re.compile(r"^\d+$")
+
+# みなし承認の通知参照(governance/notices.py の NOTICE_REF_PREFIX と同値)。
+# audit は governance を import せず定数を持つ(監査が被監査モジュールに依存しない)。
+_NOTICE_REF_PREFIX = "outbox:"
+
+# 通知が未配送のまま許容する時間。これを超えた deemed は「通知なき発効」として違反にする
+# (独立役員審査 重要-3)。Bot の配送ループは 5 秒間隔なので、60 分は配送系の一時障害を
+# 誤検知しない十分な余裕がありつつ、代表が気づかないまま1営業日が過ぎることを防ぐ。
+UNNOTIFIED_DEEMED_MINUTES = 60
 
 # 現決定 view の effective_decision のうち「発効している承認」。'vetoed' は含めない
 # (否認された承認をトレーラの参照先として受理しない — 独立役員審査 0021 C-5)。
@@ -202,51 +226,99 @@ def has_approval_trailer(message: str, trailer: str = "Approved:") -> bool:
 
 
 def decision_ref_id(ref: str) -> int | None:
-    """トレーラ参照が ``governance.decisions`` の ID 形式なら整数、違えば None。
+    """トレーラ参照が ``decision:<id>`` 形式なら ``governance.decisions.id``、違えば None。
 
-    受理する表記は裸の数字(``123``)と ``decision:123``。Issue URL 等は None を返し、
-    従来どおり存在検査までで扱う(URL の実在照合は GitHub API が必要 — 未実装)。
+    **裸の数字は受理しない**(独立役員審査 重要-2)。``Approved: 42`` は GitHub Issue #42 の
+    つもりで書かれうる表記であり、たまたま同じ ID の決定が存在すると**無関係な承認記録で
+    照合が通る**(不在なら fail-closed だが、偶然一致は fail-open)。接頭辞を必須にすると
+    偶然一致は起こらず、裸の数字は「照合できない参照」として notes に開示される。
     """
     m = _DECISION_REF_RE.match(ref)
     return int(m.group(1)) if m else None
 
 
-def verify_decision_refs(conn: Any, refs: list[str]) -> tuple[bool, list[str]]:
+@dataclass(frozen=True)
+class TrailerVerdict:
+    """``Approved:`` トレーラ参照の突合結果。"""
+
+    accepted: bool
+    #: 承認として受理できない参照の理由(``accepted=True`` でも空とは限らない — 軽微-10)
+    problems: list[str]
+    #: 照合できなかった参照(裸の数字・DB に対応行の無い URL)
+    unverifiable: list[str]
+
+
+def _verdict_for_ref(conn: Any, ref: str) -> tuple[str, str | None]:
+    """参照1件を突合し ``(判定, 理由)`` を返す。判定は ok / bad / unverifiable。"""
+    from ryza.governance.decisions import current_decision, current_decision_by_id
+
+    decision_id = decision_ref_id(ref)
+    if decision_id is not None:
+        row = current_decision_by_id(conn, decision_id)
+        label = f"承認記録 id={decision_id}"
+        if row is None:
+            return "bad", f"{label} が governance.decisions に存在しない"
+    elif _BARE_NUMBER_RE.match(ref):
+        # 裸の数字は Issue 番号とも読めるため、決定 ID として解釈しない(重要-2)。
+        return "unverifiable", f"参照 '{ref}' は照合不能(決定 ID なら decision:{ref} と書く)"
+    else:
+        # PR URL 等。deemed 記録の proposal_ref は PR URL そのものなので、ID 形式でなくても
+        # proposal_ref 一致で解決できる(独立役員審査 重大-1: 本リポジトリの履歴は全件 URL で
+        # あり、ID 形式だけを見る照合では 0021 C-5 の穴が実運用上ふさがらない)。
+        row = current_decision(conn, ref)
+        label = f"承認記録 '{ref}'"
+        if row is None:
+            # 承認記録が Issue 決議など DB 外にある場合はここに来る。従来どおり存在検査まで。
+            return "unverifiable", None
+    effective = str(row["effective_decision"])
+    if effective in APPROVED_DECISIONS:
+        return "ok", None
+    if effective == "vetoed":
+        return "bad", (
+            f"{label} は代表により否認済み"
+            f"(recorded={row['recorded_decision']} / 取消義務が発生している)"
+        )
+    return "bad", f"{label} は decision='{effective}' で承認ではない"
+
+
+def verify_decision_refs(conn: Any, refs: list[str]) -> TrailerVerdict:
     """トレーラ参照を ``governance.current_decisions`` と突合する。
 
-    Returns:
-        ``(承認として受理できるか, 受理できない理由)``。ID 形式の参照が1つも無ければ
-        照合対象が無いので ``(True, [])``(従来どおりトレーラの存在をもって受理)。
-        ID 形式が1つでもある場合は、**そのうち少なくとも1つが有効な承認**
-        (``effective_decision`` が ``approve`` / ``deemed``)であることを要求する。
+    受理の規則:
+
+    - 解決できた参照のうち **1つでも有効な承認**(``approve`` / ``deemed``)があれば受理する。
+      1コミットが複数の承認記録を挙げる様式(独立役員審査+代表承認など)を許すため
+    - 解決できた参照が**全て無効**(否認済み・却下・不在)なら受理しない
+    - 解決できた参照が**1つも無い**(裸の数字・DB 外の Issue 決議)なら、従来どおり
+      トレーラの存在をもって受理し、照合できなかったことを ``unverifiable`` に残す
+
+    受理した場合でも無効な参照は ``problems`` に残す(軽微-10)。「有効な承認と否認済みの
+    承認を両方挙げているコミット」は、違反ではないが取消義務の検討対象であり、監査報告から
+    消してよい事実ではない。
 
     **否認済みを受理しない**のが本関数の存在理由である(独立役員審査 0021 C-5)。
     ``governance.decisions`` を直読すると、代表が否認した承認を A-18 が承認として受理し、
     否認された変更(= 取消義務が発生している変更)が無承認変更として検出されない。
     現決定 view は否認を反映して ``vetoed`` を返すため、view 経由でのみ突合する。
     """
-    from ryza.governance.decisions import current_decision_by_id
-
-    ids = [i for i in (decision_ref_id(r) for r in refs) if i is not None]
-    if not ids:
-        return True, []
     problems: list[str] = []
-    for decision_id in ids:
-        row = current_decision_by_id(conn, decision_id)
-        if row is None:
-            problems.append(f"承認記録 id={decision_id} が governance.decisions に存在しない")
+    unverifiable: list[str] = []
+    resolved = 0
+    accepted = False
+    for ref in refs:
+        verdict, detail = _verdict_for_ref(conn, ref)
+        if verdict == "unverifiable":
+            if detail:
+                unverifiable.append(detail)
             continue
-        effective = str(row["effective_decision"])
-        if effective in APPROVED_DECISIONS:
-            return True, []
-        if effective == "vetoed":
-            problems.append(
-                f"承認記録 id={decision_id} は代表により否認済み"
-                f"(recorded={row['recorded_decision']} / 取消義務が発生している)"
-            )
-        else:
-            problems.append(f"承認記録 id={decision_id} は decision='{effective}' で承認ではない")
-    return False, problems
+        resolved += 1
+        if verdict == "ok":
+            accepted = True
+        elif detail:
+            problems.append(detail)
+    if resolved == 0:
+        accepted = True  # 照合対象が無い = 従来どおり存在検査で受理
+    return TrailerVerdict(accepted=accepted, problems=problems, unverifiable=unverifiable)
 
 
 def _find_introducing_merge(
@@ -265,13 +337,13 @@ def check_protected_commits(
     *,
     since_commit: str | None = RATIFICATION_COMMIT,
     conn: Any | None = None,
-) -> tuple[list[dict[str, Any]], int]:
-    """A-18-1: 保護領域に触れた無承認コミットの一覧と、検査したコミット数を返す。
+) -> tuple[list[dict[str, Any]], int, list[dict[str, Any]]]:
+    """A-18-1: 保護領域の無承認コミット・検査コミット数・トレーラ所見を返す。
 
     承認とみなす条件(定款附則):
-      (a) コミット本文の ``Approved:`` トレーラ。``conn`` が与えられ、参照が
-          ``governance.decisions`` の ID 形式なら :func:`verify_decision_refs` で実在照合し、
-          **否認済み・却下・不在は承認と見なさない**
+      (a) コミット本文の ``Approved:`` トレーラ。``conn`` が与えられれば
+          :func:`verify_decision_refs` で参照(``decision:<id>`` / ``proposal_ref`` 一致)を
+          実在照合し、**否認済み・却下・不在は承認と見なさない**
       (b) GitHub マージ PR 経由 = ``Merge pull request`` マージコミットの配下で main に到達
     ``since_commit``(批准コミット)以前のコミットは ``rev-list since..HEAD`` により対象外。
 
@@ -279,6 +351,9 @@ def check_protected_commits(
     主張しているコミットが、その記録の否認によって主張を失った場合、PR 経由であることを
     理由に承認扱いへ戻すと否認が監査から見えなくなる。否認は取消義務(定款第3条)を
     生じさせるので、取消されるまでは無承認変更として列挙されるのが正しい。
+
+    3つ目の戻り値は「受理はしたが問題のある参照」(有効な承認と否認済みの承認を併記した
+    コミット等)。違反ではないが取消義務の検討対象なので報告から落とさない(軽微-10)。
     """
     repo = str(repo_path)
     if since_commit and not _git_ok(repo, "cat-file", "-e", f"{since_commit}^{{commit}}"):
@@ -291,6 +366,7 @@ def check_protected_commits(
     fp_merges = _rev_list(repo, since_commit, "--first-parent", "--merges")
 
     violations: list[dict[str, Any]] = []
+    trailer_findings: list[dict[str, Any]] = []
     for sha in commits:
         parents = _git(repo, "log", "-1", "--format=%P", sha).split()
         is_merge = len(parents) > 1
@@ -309,10 +385,26 @@ def check_protected_commits(
         refs = approval_trailer_refs(message, trailer)
         trailer_reason: str | None = None
         if refs:
-            accepted, problems = (True, []) if conn is None else verify_decision_refs(conn, refs)
-            if accepted:
+            verdict = (
+                TrailerVerdict(True, [], []) if conn is None else verify_decision_refs(conn, refs)
+            )
+            if verdict.accepted:
+                # 受理はしたが否認済みの参照を併記している(軽微-10)、または照合できない
+                # 参照(裸の数字・DB 外の Issue 決議)を含む(重要-2)。どちらも違反では
+                # ないが、報告から落とすと「照合済み」と「照合できていない」が混ざる。
+                if verdict.problems or verdict.unverifiable:
+                    trailer_findings.append(
+                        {
+                            "commit": sha[:12],
+                            "subject": _git(repo, "log", "-1", "--format=%s", sha).strip(),
+                            "problems": verdict.problems,
+                            "unverifiable": verdict.unverifiable,
+                        }
+                    )
                 continue
-            trailer_reason = "Approved トレーラの承認記録が有効でない: " + "; ".join(problems)
+            trailer_reason = (
+                "Approved トレーラの承認記録が有効でない: " + "; ".join(verdict.problems)
+            )
 
         if trailer_reason is not None:
             reason = trailer_reason
@@ -335,7 +427,7 @@ def check_protected_commits(
                 "reason": reason,
             }
         )
-    return violations, len(commits)
+    return violations, len(commits), trailer_findings
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -477,6 +569,90 @@ def check_direct_pushes(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# A-18-5 通知なき発効(未配送のみなし承認)
+# ────────────────────────────────────────────────────────────────────────────
+def check_unnotified_deemed(
+    conn: Any, *, max_delay_minutes: int = UNNOTIFIED_DEEMED_MINUTES
+) -> tuple[list[dict[str, Any]], int]:
+    """A-18-5: 発効済みなのに通知が届いていないみなし承認を列挙する。
+
+    定款第3条はみなし承認を「``#承認`` への通知と同時に発効」と定め、
+    ``config/governance.yaml`` の ``deemed_approval.unnotified_change: violation`` は
+    通知なき発効を無承認変更として扱う。``governance/notices.py`` は記録と
+    **outbox への投入**を同一トランザクションに置くが、投入は配送ではない
+    (独立役員審査 重要-3)。配送が止まっていれば「発効したが誰も知らない」状態が続く。
+    したがって監査側で滞留を検出する: ``notice_ref``(``outbox:<id>``)の指す行が
+    ``max_delay_minutes`` を超えて ``sent_at IS NULL`` なら違反として報告する。
+
+    Returns:
+        ``(所見, 通知参照の形式が outbox: でない deemed 行の数)``。後者は本検査で
+        追跡できない記録(手作業で ``discord://`` 等を入れたもの)であり、notes に開示する。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, proposal_ref, decided_at, channel_msg_id
+            FROM governance.decisions
+            WHERE decision = 'deemed'
+            ORDER BY id
+            """
+        )
+        deemed_rows = cur.fetchall()
+
+    by_outbox: dict[int, tuple[int, str, Any]] = {}
+    untracked = 0
+    for decision_id, proposal_ref, decided_at, notice_ref in deemed_rows:
+        raw = (notice_ref or "")[len(_NOTICE_REF_PREFIX):] if notice_ref else ""
+        if not (notice_ref or "").startswith(_NOTICE_REF_PREFIX) or not raw.isdigit():
+            untracked += 1
+            continue
+        by_outbox[int(raw)] = (decision_id, proposal_ref, decided_at)
+    if not by_outbox:
+        return [], untracked
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, sent_at,
+                   EXTRACT(EPOCH FROM (now() - created_at)) / 60 AS waiting_minutes
+            FROM press.outbox
+            WHERE id = ANY(%s)
+            """,
+            (list(by_outbox),),
+        )
+        outbox_rows = {r[0]: (r[1], float(r[2])) for r in cur.fetchall()}
+
+    findings: list[dict[str, Any]] = []
+    for outbox_id, (decision_id, proposal_ref, _decided_at) in sorted(by_outbox.items()):
+        row = outbox_rows.get(outbox_id)
+        if row is None:
+            # 記録は残っているのに通知行が消えている = 通知の証跡が無い。
+            findings.append(
+                {
+                    "decision_id": decision_id,
+                    "proposal_ref": proposal_ref,
+                    "notice_ref": f"{_NOTICE_REF_PREFIX}{outbox_id}",
+                    "waiting_minutes": None,
+                    "reason": "通知(press.outbox)の行が存在しない",
+                }
+            )
+            continue
+        sent_at, waiting_minutes = row
+        if sent_at is not None or waiting_minutes <= max_delay_minutes:
+            continue
+        findings.append(
+            {
+                "decision_id": decision_id,
+                "proposal_ref": proposal_ref,
+                "notice_ref": f"{_NOTICE_REF_PREFIX}{outbox_id}",
+                "waiting_minutes": round(waiting_minutes, 1),
+                "reason": f"通知が未配送のまま {max_delay_minutes} 分を超過(通知なき発効)",
+            }
+        )
+    return findings, untracked
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # 本体・報告
 # ────────────────────────────────────────────────────────────────────────────
 def run_a18(
@@ -495,10 +671,14 @@ def run_a18(
     場合は従来どおりトレーラの存在検査までで、その旨を notes に載せる。
     """
     gov = load_governance(repo_path, governance_path)
-    violations, checked = check_protected_commits(
+    violations, checked, trailer_findings = check_protected_commits(
         repo_path, gov, since_commit=since_commit, conn=conn
     )
     direct_pushes, fp_checked = check_direct_pushes(repo_path, since_commit=pr_since_commit)
+    unnotified: list[dict[str, Any]] = []
+    untracked_deemed = 0
+    if conn is not None:
+        unnotified, untracked_deemed = check_unnotified_deemed(conn)
     return {
         "as_of": datetime.now(UTC).isoformat(),
         "since_commit": since_commit,
@@ -510,21 +690,53 @@ def run_a18(
         "checked_first_parent": fp_checked,
         "direct_pushes": direct_pushes,
         "decision_refs_verified": conn is not None,
+        "trailer_findings": trailer_findings,
+        "unnotified_deemed": unnotified,
         # 既知の限界は毎回開示する(独立役員審査条件)+ 個別の注記(登録漏れ・鮮度)。
         "notes": [
             *_coverage_notes(gov),
             *_staleness_note(repo_path),
             *([] if conn is not None else [
-                "DB 接続なしの実行のため Approved トレーラの承認記録(否認済みか)は未照合"
+                "DB 接続なしの実行のため Approved トレーラの承認記録(否認済みか)と"
+                "みなし承認の通知配送(A-18-5)は未照合"
+            ]),
+            *_trailer_notes(trailer_findings),
+            *([] if not untracked_deemed else [
+                f"通知参照が outbox: 形式でない deemed 記録が {untracked_deemed} 件"
+                "(手作業の記録 — A-18-5 の配送検査で追跡できない)"
             ]),
             *STANDARD_DISCLOSURES,
         ],
     }
 
 
+def _trailer_notes(trailer_findings: list[dict[str, Any]]) -> list[str]:
+    """照合できなかったトレーラ参照を注記にまとめる(重要-2 の開示)。"""
+    unverifiable = sorted({u for f in trailer_findings for u in f.get("unverifiable", [])})
+    if not unverifiable:
+        return []
+    return [f"照合できない Approved 参照: {'; '.join(unverifiable)}"]
+
+
+def vetoed_trailer_findings(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """受理されたが否認済み参照を含むコミット(軽微-10)。照合不能のみの所見は含めない。"""
+    return [f for f in result.get("trailer_findings", []) if f.get("problems")]
+
+
 def has_findings(result: dict[str, Any]) -> bool:
-    """警告(embed 投入)を要する所見があるか。"""
-    return bool(result["violations"] or result["mismatches"] or result["direct_pushes"])
+    """警告(embed 投入)を要する所見があるか。
+
+    照合できない参照(裸の数字)だけの所見は notes への開示にとどめ、報告の要否は
+    変えない。様式の不備であって統制違反ではないため、これで ⚠️ を点けると
+    「毎回 ⚠️」になり本物の違反が埋もれる。
+    """
+    return bool(
+        result["violations"]
+        or result["mismatches"]
+        or result["direct_pushes"]
+        or result.get("unnotified_deemed")
+        or vetoed_trailer_findings(result)
+    )
 
 
 def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
@@ -600,6 +812,43 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
                 "inline": False,
             }
         )
+    unnotified = result.get("unnotified_deemed") or []
+    if unnotified:
+        lines = [
+            f"- decision id={u['decision_id']} {u['proposal_ref']}"
+            f"({u['notice_ref']}: {u['reason']})"
+            for u in unnotified
+        ]
+        fields.append(
+            {
+                "name": "⚠️ A-18-5 通知なき発効(みなし承認の通知が未配送)",
+                "value": "\n".join(lines)[:1024],
+                "inline": False,
+            }
+        )
+    elif result.get("decision_refs_verified"):
+        fields.append(
+            {
+                "name": "A-18-5 みなし承認の通知配送",
+                "value": "✅ 未配送の滞留なし",
+                "inline": False,
+            }
+        )
+
+    vetoed_refs = vetoed_trailer_findings(result)
+    if vetoed_refs:
+        lines = [
+            f"- `{f['commit']}` {f['subject']}({'; '.join(f['problems'])})"
+            for f in vetoed_refs
+        ]
+        fields.append(
+            {
+                "name": "⚠️ 否認済みの承認記録を参照するコミット(取消義務の検討対象)",
+                "value": "\n".join(lines)[:1024],
+                "inline": False,
+            }
+        )
+
     if result["notes"]:
         notes_value = "\n".join(f"- {n}" for n in result["notes"])[:1024]
         fields.append({"name": "注記", "value": notes_value, "inline": False})
@@ -620,7 +869,11 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
 
 def enqueue_alert(conn: Any, result: dict[str, Any], run_id: int, *, channel: str = "ops") -> int:
     """検査結果 embed を ``press.outbox`` の ops チャンネルへ投入する(違反時は urgent)。"""
-    urgent = bool(result["violations"] or result["direct_pushes"])
+    # 通知なき発効(A-18-5)は governance.yaml が violation と定める statement なので、
+    # 保護領域違反・直 push と同じ緊急度で扱う。
+    urgent = bool(
+        result["violations"] or result["direct_pushes"] or result.get("unnotified_deemed")
+    )
     return enqueue(conn, channel, build_alert_embed(result), run_id, urgent=urgent)
 
 
@@ -699,10 +952,14 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
               file=sys.stderr)
     for d in result["direct_pushes"]:
         print(f"[直push] {d['commit']} {d['subject']}: {d['files']}", file=sys.stderr)
+    for u in result.get("unnotified_deemed", []):
+        print(f"[通知なき発効] decision id={u['decision_id']} {u['proposal_ref']}: {u['reason']}",
+              file=sys.stderr)
     print(
         f"A-18 完了(検査 {result['checked_commits']} コミット, 違反 {len(result['violations'])}, "
         f"不整合 {len(result['mismatches'])}, 宣言 {len(result['declarations'])}, "
-        f"直push {len(result['direct_pushes'])})",
+        f"直push {len(result['direct_pushes'])}, "
+        f"通知なき発効 {len(result.get('unnotified_deemed', []))})",
         file=sys.stderr,
     )
     return 1 if has_findings(result) else 0
