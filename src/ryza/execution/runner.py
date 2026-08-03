@@ -14,7 +14,11 @@ passed に留まって次回実行で再試行される。1 注文の失敗は�
   (evidence_id は execution 行を証憑として登録 — 指示書3)
 - デモ執行 MVP は現物 buy/sell のみ。short/cover は ledger の ``post_fill`` が未対応
   (信用・空売りの会計勘定 short_positions/borrowings の記帳 API が無い)ため、
-  ブローカーへ出さず rejected に落とす(理由付き — 将来タスクで解除)
+  ブローカーへ出さず rejected に落とす。**方針(設計リード裁定 2026-08-03)**:
+  T-017 第一陣(Ben/Jim)はロングオンリーで運用し、short 生成は ledger の信用記帳
+  API 実装後に解禁する。解禁時はこの執行側ガードの解除に先立ち、ゲート/マンデート側
+  の事前遮断(short 未対応 FM の注文を gate で block)も実装すること — 執行段の
+  rejected は最後の防衛線であり、通常経路で到達させない
 """
 
 from __future__ import annotations
@@ -82,6 +86,7 @@ def _execute_one(
 
     if row["side"] not in _LEDGER_SIDES:
         # ブローカーへ出す前に落とす: 約定してしまうと会計に記帳できず原子性違反になる。
+        # 解禁は ledger の信用記帳 API 実装後(モジュール docstring の方針参照)。
         advance_order_status(conn, order_id, "rejected")
         return {
             "order_id": order_id,

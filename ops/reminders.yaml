@@ -140,6 +140,18 @@ reminders:
       body: "現行の src/ryza/audit/a13.py は PR 件名(Merge pull request #N)の自己申告のみで承認と判定しており件名偽装でバイパス可能(独立役員審査 2026-08-03 で実証)。GitHub API で PR #N の実在・マージコミット SHA の一致・マージ実行者を照合する。定款第5条の実弾移行前提条件(ブランチ保護+トレーラ検査 CI)の実装判断と合わせて行う。"
     status: pending
 
+  - id: execution-recon-persistence
+    what: "執行照合の明細突合+ブレイク永続化(A-2 の完全な基盤化)。T-016 独立役員審査の条件①"
+    conditions:
+      - type: date_after
+        date: "2026-08-24"
+    action:
+      type: issue_create
+      title: "執行照合(executions×ledger 仕訳)の明細突合とブレイク永続化"
+      labels: [impl]
+      body: "T-016 の reconcile_executions(src/ryza/execution/close.py)は件数・金額の集計突合のみで、ブレイクは ops 通知+risk.nav_daily.detail の要約に留まり明細の永続記録が無い(独立役員審査 2026-08-03 指摘)。①execution 1 件 ↔ 仕訳 1 件の明細レベル突合、②ブレイクの追記オンリー永続化(ledger.reconciliations への統合または専用テーブル。ledger 本体変更は保護領域手続)、③A-2(照合状況とブレイク滞留)監査がそれを読む配線、を実装する。"
+    status: pending
+
   - id: a13-vm-wiring-check
     what: "VM への A-13 配線確認(A13_REPO_PATH — git checkout と DB の両方に届く実行環境)"
     conditions:

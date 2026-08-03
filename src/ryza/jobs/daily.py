@@ -268,7 +268,12 @@ def _build_breaks_embed(breaks: list[dict[str, Any]], *, as_of: datetime) -> dic
             )[:1024],
             "inline": False,
         }
-        for b in breaks[:10]  # embed の field 上限対策(全件は DB 側に記録がある)
+        # embed の field 上限対策で先頭 10 件のみ表示。永続化の現状(審査条件①):
+        # ポジション照合ブレイクは ledger.reconciliations に全件記録されるが、
+        # 執行照合(executions×仕訳)ブレイクはこの通知と risk.nav_daily.detail の
+        # 要約のみで明細の永続化は未実装 — ops/reminders.yaml
+        # (execution-recon-persistence)で将来タスクとして登録済み。
+        for b in breaks[:10]
     ]
     return {
         "title": f"⚠️ 執行・会計照合ブレイク {jst_str}",
