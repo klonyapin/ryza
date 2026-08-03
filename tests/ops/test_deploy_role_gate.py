@@ -65,24 +65,43 @@ def extract_gate_block(sql: str) -> str:
     return m.group(0)
 
 
+def extract_gate_statements(sql: str) -> list[str]:
+    """ゲートの実行に必要な文(権限ビュー + DO ブロック)を順に返す。"""
+    view = re.search(r"CREATE OR REPLACE TEMP VIEW ryza_gate_grants AS.*?;", sql, re.S)
+    assert view, "生成 SQL に権限ビュー ryza_gate_grants が無い(C-3 の列レベル併用)"
+    return [view.group(0), extract_gate_block(sql)]
+
+
 # ── 生成 SQL の静的検査(DB 不要)──────────────────────────────────────────────
 
 
 def test_generated_sql_contains_gate_with_all_assertions() -> None:
     sql = generate_role_sql("ryza_dashboard", "ryza_boardroom")
     gate = extract_gate_block(sql)
-    # 7項目それぞれが例外を上げること(ログ出力だけの検証クエリに戻っていないこと)
-    assert gate.count("RAISE EXCEPTION") == 7
+    # 8つの例外(4.1〜4.7 の各項目。4.5 は「対象表の実在」と「権限表数」の2本)
+    assert gate.count("RAISE EXCEPTION") == 8
     for marker in (
         "ロールが揃っていない",
         "ロール属性が想定外",
         "非 SELECT 権限が",
         "ops.discord_webhooks に権限を持つ",
+        "役員室の書込先",  # C-4: 0020 未適用 DB を正常と誤認しない
         "ops 権限表数が想定外",
         "想定外テーブルに権限を持つ",
         "追記オンリー違反",
     ):
         assert marker in gate, marker
+
+
+def test_gate_reads_the_combined_privilege_view() -> None:
+    """各検査が role_table_grants 直参照でなく列レベル併用のビューを見ていること(C-3)。"""
+    sql = generate_role_sql("ryza_dashboard", "ryza_boardroom")
+    gate = extract_gate_block(sql)
+    assert "information_schema.role_table_grants" not in gate
+    assert gate.count("FROM ryza_gate_grants") == 5
+    view = extract_gate_statements(sql)[0]
+    assert "information_schema.role_table_grants" in view
+    assert "information_schema.column_privileges" in view
 
 
 def test_generated_sql_substitutes_role_names_inside_the_gate() -> None:
@@ -142,7 +161,8 @@ def _grant_expected(conn: psycopg.Connection, dash: str, br: str) -> None:
 
 
 def _run_gate(conn: psycopg.Connection, dash: str, br: str) -> None:
-    conn.execute(extract_gate_block(generate_role_sql(dash, br)))
+    for stmt in extract_gate_statements(generate_role_sql(dash, br)):
+        conn.execute(stmt)
 
 
 def test_gate_passes_on_the_intended_configuration(gate_env) -> None:
@@ -234,5 +254,87 @@ def test_gate_aborts_when_override_log_is_mutable(gate_env) -> None:
     _create_boardroom(conn, br)
     _grant_expected(conn, dash, br)
     conn.execute(f'GRANT UPDATE ON ops.org_icon_override_log TO "{br}"')
+    with pytest.raises(errors.RaiseException, match="追記オンリー違反"):
+        _run_gate(conn, dash, br)
+
+
+def test_gate_aborts_when_target_tables_are_missing(gate_env) -> None:
+    """0020 未適用の DB を『権限 0 で一致』と誤認しない(C-4)。
+
+    是正前は期待値を実在表数から算出していたため、実在 0・GRANT 0 が一致と判定され、
+    役員室が何も書けないダッシュボードを正常として本番化しえた。
+
+    「表が無い DB」は実表を DROP せず、ゲートが参照する表名を実在しない名前へ
+    差し替えて再現する。DROP TABLE は ACCESS EXCLUSIVE ロックを取り、同じテスト DB を
+    使う他テストと干渉するため(tests/conftest.py の隔離方針)。
+    """
+    conn, dash, br = gate_env
+    _create_boardroom(conn, br)
+    _grant_expected(conn, dash, br)
+    absent = f"ops.absent_{uuid.uuid4().hex[:8]}"
+    stmts = [
+        s.replace("ops.org_icon_overrides", f"{absent}_a").replace(
+            "ops.org_icon_override_log", f"{absent}_b"
+        )
+        for s in extract_gate_statements(generate_role_sql(dash, br))
+    ]
+    with pytest.raises(errors.RaiseException, match="役員室の書込先"):
+        for stmt in stmts:
+            conn.execute(stmt)
+
+
+# ── 列レベル GRANT の検出(C-3)─────────────────────────────────────────────────
+
+
+def test_column_level_grant_is_invisible_to_role_table_grants(gate_env) -> None:
+    """なぜ column_privileges の併用が要るのかを実測で固定する。
+
+    列レベル GRANT は role_table_grants に1行も現れない。是正前のゲートはこの view
+    だけを見ていたため、列指定の GRANT は検査にもログにも映らず素通りしていた。
+    """
+    conn, _dash, br = gate_env
+    _create_boardroom(conn, br)
+    conn.execute(f'GRANT UPDATE (state) ON ops.trading_state TO "{br}"')
+    table_rows = conn.execute(
+        "SELECT count(*) FROM information_schema.role_table_grants WHERE grantee = %s",
+        (br,),
+    ).fetchone()[0]
+    column_rows = conn.execute(
+        "SELECT count(*) FROM information_schema.column_privileges WHERE grantee = %s",
+        (br,),
+    ).fetchone()[0]
+    assert table_rows == 0
+    assert column_rows > 0
+
+
+def test_gate_aborts_on_column_level_grant_to_kill_switch(gate_env) -> None:
+    """ops.trading_state への列 UPDATE(Kill Switch 状態の偽装経路)を検出する。"""
+    conn, dash, br = gate_env
+    _create_boardroom(conn, br)
+    conn.execute(f'GRANT SELECT ON ALL TABLES IN SCHEMA ops TO "{dash}"')
+    conn.execute(f'REVOKE ALL ON ops.discord_webhooks FROM "{dash}"')
+    # 権限表数は 2 のまま(4.5 を通過させ、4.6 の想定外テーブル検査を狙い撃ちする)
+    conn.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON ops.org_icon_overrides TO "{br}"')
+    conn.execute(f'GRANT UPDATE (state) ON ops.trading_state TO "{br}"')
+    with pytest.raises(errors.RaiseException, match="想定外テーブルに権限を持つ"):
+        _run_gate(conn, dash, br)
+
+
+def test_gate_aborts_on_column_level_write_to_readonly_role(gate_env) -> None:
+    """読取専用ロールへの列 INSERT を検出する。"""
+    conn, dash, br = gate_env
+    _create_boardroom(conn, br)
+    _grant_expected(conn, dash, br)
+    conn.execute(f'GRANT INSERT (icon_url) ON ops.org_icon_overrides TO "{dash}"')
+    with pytest.raises(errors.RaiseException, match="非 SELECT 権限が"):
+        _run_gate(conn, dash, br)
+
+
+def test_gate_aborts_on_column_level_update_of_override_log(gate_env) -> None:
+    """履歴表への列 UPDATE を検出する(追記オンリーの実効化)。"""
+    conn, dash, br = gate_env
+    _create_boardroom(conn, br)
+    _grant_expected(conn, dash, br)
+    conn.execute(f'GRANT UPDATE (icon_url) ON ops.org_icon_override_log TO "{br}"')
     with pytest.raises(errors.RaiseException, match="追記オンリー違反"):
         _run_gate(conn, dash, br)

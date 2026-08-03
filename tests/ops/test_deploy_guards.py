@@ -119,8 +119,9 @@ def repo(tmp_path: Path) -> tuple[Path, str]:
     return work, str(origin)
 
 
-def guard_git(root: str | Path, expected_origin: str) -> subprocess.CompletedProcess[str]:
-    return run_bash(f'. "{GUARDS}"; guard_git_state "{root}" "{expected_origin}"')
+def guard_git(root: str | Path, *allowed: str) -> subprocess.CompletedProcess[str]:
+    args = " ".join(f'"{a}"' for a in allowed)
+    return run_bash(f'. "{GUARDS}"; guard_git_state "{root}" {args}')
 
 
 def test_git_gate_passes_on_clean_head_matching_origin(repo: tuple[Path, str]) -> None:
@@ -212,6 +213,21 @@ def test_git_gate_aborts_outside_git_repository(tmp_path: Path) -> None:
     r = guard_git(plain, "https://github.com/klonyapin/ryza")
     assert r.returncode == 1
     assert "git リポジトリではない" in r.stderr
+
+
+def test_git_gate_accepts_any_entry_of_the_allowlist(repo: tuple[Path, str]) -> None:
+    """許可リストは複数表記(https / SSH)を並べる。どれか1つに一致すれば通る。"""
+    work, origin = repo
+    r = guard_git(work, "https://github.com/klonyapin/ryza", origin)
+    assert r.returncode == 0, r.stderr
+
+
+def test_git_gate_aborts_when_allowlist_is_empty(repo: tuple[Path, str]) -> None:
+    """許可リスト無しの呼び出しは『照合しない』ではなく呼び出し側のバグとして中断する。"""
+    work, _origin = repo
+    r = guard_git(work)
+    assert r.returncode == 1
+    assert "許可 origin が渡されていない" in r.stderr
 
 
 # ── 公開バインディング検査 ──────────────────────────────────────────────────────
@@ -345,12 +361,25 @@ def test_project_guard_aborts_when_fetch_fails(gcloud: GcloudStub) -> None:
 # ── pg_hba 検査(アドレス列限定)─────────────────────────────────────────────────
 
 
-def pg_hba_check(tmp_path: Path, content: str) -> subprocess.CompletedProcess[str]:
+def _write_hba(tmp_path: Path, content: str) -> Path:
     hba = tmp_path / "pg_hba.conf"
     hba.write_text(content, encoding="utf-8")
-    return run_bash(
-        f'. "{PG_HBA_LIB}"; pg_hba_unexpected_lines "{hba}" "{DESIRED_HBA}"'
-    )
+    return hba
+
+
+def pg_hba_check(tmp_path: Path, content: str) -> subprocess.CompletedProcess[str]:
+    hba = _write_hba(tmp_path, content)
+    return run_bash(f'. "{PG_HBA_LIB}"; pg_hba_unexpected_lines "{hba}" "{DESIRED_HBA}"')
+
+
+def pg_hba_guard(tmp_path: Path, content: str) -> subprocess.CompletedProcess[str]:
+    hba = _write_hba(tmp_path, content)
+    return run_bash(f'. "{PG_HBA_LIB}"; pg_hba_guard "{hba}" "{DESIRED_HBA}"')
+
+
+def pg_hba_has_line(tmp_path: Path, content: str) -> subprocess.CompletedProcess[str]:
+    hba = _write_hba(tmp_path, content)
+    return run_bash(f'. "{PG_HBA_LIB}"; pg_hba_has_line "{hba}" "{DESIRED_HBA}"')
 
 
 SAFE_HBA = f"""\
@@ -440,6 +469,82 @@ def test_pg_hba_aborts_on_broad_line_sharing_the_subnet_cidr(tmp_path: Path) -> 
     assert "trust" in r.stdout
 
 
+def test_pg_hba_aborts_on_samehost(tmp_path: Path) -> None:
+    """samehost はサーバ自身の全 IP(VPC 内部 IP を含む)でループバック限定ではない(C-6)。"""
+    r = pg_hba_check(tmp_path, SAFE_HBA + "host    all    all    samehost    trust\n")
+    assert r.returncode == 1
+    assert "samehost" in r.stdout
+
+
+# ── pg_hba_guard: 終了コードの3分岐(C-2)────────────────────────────────────────
+
+
+def test_pg_hba_guard_returns_zero_when_clean(tmp_path: Path) -> None:
+    r = pg_hba_guard(tmp_path, SAFE_HBA)
+    assert r.returncode == 0, r.stderr
+    assert "想定外の non-localhost host 行なし" in r.stdout
+
+
+def test_pg_hba_guard_aborts_on_unexpected_line(tmp_path: Path) -> None:
+    r = pg_hba_guard(tmp_path, SAFE_HBA + "host    all    all    0.0.0.0/0    trust\n")
+    assert r.returncode == 1
+    assert "想定外の non-localhost host 行がある" in r.stderr
+    assert "0.0.0.0/0" in r.stderr
+
+
+def test_pg_hba_guard_aborts_when_the_check_itself_fails(tmp_path: Path) -> None:
+    """検査不能(ファイルが読めない)を『想定外なし』と混同しない — 3分岐の要点。"""
+    missing = tmp_path / "does-not-exist.conf"
+    r = run_bash(f'. "{PG_HBA_LIB}"; pg_hba_guard "{missing}" "{DESIRED_HBA}"')
+    assert r.returncode == 1
+    assert "検査自体が失敗" in r.stderr
+
+
+def test_pg_hba_unexpected_lines_signals_check_failure_with_rc2(tmp_path: Path) -> None:
+    """rc は 0/1 以外(=検査失敗)を返せること。pg_hba_guard の3分岐の前提。"""
+    missing = tmp_path / "does-not-exist.conf"
+    r = run_bash(f'. "{PG_HBA_LIB}"; pg_hba_unexpected_lines "{missing}" "{DESIRED_HBA}"')
+    assert r.returncode == 2
+
+
+def test_pg_hba_guard_survives_set_e(tmp_path: Path) -> None:
+    """リモートは `set -euo pipefail`。非ゼロ戻り値で関数内が途中終了しないこと。"""
+    hba = _write_hba(tmp_path, SAFE_HBA + "host    all    all    0.0.0.0/0    trust\n")
+    r = run_bash(
+        f'set -euo pipefail; . "{PG_HBA_LIB}"; '
+        f'if pg_hba_guard "{hba}" "{DESIRED_HBA}"; then echo CONTINUED; else echo ABORTED; fi'
+    )
+    assert r.returncode == 0
+    assert "ABORTED" in r.stdout
+    assert "0.0.0.0/0" in r.stderr
+
+
+# ── pg_hba_has_line: 追記の要否を検査と同じ正規化で判定(C-7)──────────────────
+
+
+def test_pg_hba_has_line_detects_exact_line(tmp_path: Path) -> None:
+    r = pg_hba_has_line(tmp_path, SAFE_HBA)
+    assert r.returncode == 0
+
+
+def test_pg_hba_has_line_detects_whitespace_variant(tmp_path: Path) -> None:
+    """空白の詰め方だけが違う既存行を『未追記』と誤判定すると重複追記になる。"""
+    squeezed = "host ryza ryza_dashboard,ryza_boardroom 10.138.0.0/20 scram-sha-256"
+    r = pg_hba_has_line(tmp_path, SAFE_HBA.replace(DESIRED_HBA, squeezed))
+    assert r.returncode == 0
+
+
+def test_pg_hba_has_line_ignores_commented_out_variant(tmp_path: Path) -> None:
+    """コメントアウトされた同内容の行は『追記済み』ではない。"""
+    r = pg_hba_has_line(tmp_path, SAFE_HBA.replace(DESIRED_HBA, f"# {DESIRED_HBA}"))
+    assert r.returncode == 1
+
+
+def test_pg_hba_has_line_returns_one_when_absent(tmp_path: Path) -> None:
+    r = pg_hba_has_line(tmp_path, SAFE_HBA.replace(DESIRED_HBA, ""))
+    assert r.returncode == 1
+
+
 # ── 本体スクリプトとの配線(切り出しによるドリフト防止)─────────────────────────
 
 
@@ -458,7 +563,12 @@ def test_deploy_script_sources_the_guard_libraries() -> None:
 
 @pytest.mark.parametrize(
     "func",
-    ["guard_git_state", "guard_service_public_bindings", "guard_project_public_bindings"],
+    [
+        "guard_git_state",
+        "guard_service_public_bindings",
+        "guard_project_public_bindings",
+        "pg_hba_guard",
+    ],
 )
 def test_deploy_script_wires_guards_with_abort(func: str) -> None:
     """ゲート呼び出しに `|| exit 1` が付いていること。付け忘れ = 統制の無効化。"""
@@ -477,3 +587,111 @@ def test_deploy_script_has_no_row_wide_pg_hba_match() -> None:
     """行全体の localhost マッチ(是正前の実装)が復活していないこと。"""
     text = DEPLOY.read_text(encoding="utf-8")
     assert "samehost|localhost" not in text
+
+
+def test_deploy_script_verifies_pg_hba_library_loaded() -> None:
+    """eval 直後に関数の存在を確かめること(読み込み失敗の沈黙防止 — C-2)。"""
+    text = DEPLOY.read_text(encoding="utf-8")
+    assert "declare -F pg_hba_unexpected_lines >/dev/null || exit 1" in text
+    assert "declare -F pg_hba_guard >/dev/null || exit 1" in text
+
+
+def test_deploy_script_uses_normalized_append_check() -> None:
+    """追記判定が検査と同じ正規化であること。grep -qF に戻っていないこと(C-7)。"""
+    text = DEPLOY.read_text(encoding="utf-8")
+    assert "pg_hba_has_line" in text
+    assert 'grep -qF "\\${DESIRED_HBA}"' not in text
+
+
+# ── ロールゲートの配線: psql が例外で必ず落ちること(C-1)───────────────────────
+
+
+def _joined_lines(text: str) -> list[str]:
+    """バックスラッシュ継続を1論理行にまとめる(パイプライン全体を1行として見る)。"""
+    out: list[str] = []
+    buf = ""
+    for raw in text.splitlines():
+        buf += raw[:-1] + " " if raw.endswith("\\") else raw
+        if not raw.endswith("\\"):
+            out.append(buf)
+            buf = ""
+    if buf:
+        out.append(buf)
+    return out
+
+
+def _psql_pipeline() -> str:
+    """ロール定義 SQL を流し込む psql パイプライン(論理行)を1本だけ取り出す。"""
+    lines = [ln for ln in _joined_lines(DEPLOY.read_text(encoding="utf-8")) if " psql " in ln]
+    # シェルコメント(#)と SQL コメント(--)は除く
+    active = [ln for ln in lines if not ln.lstrip().startswith(("#", "--"))]
+    assert len(active) == 1, f"psql の呼び出しが 1 本でない: {active}"
+    return active[0]
+
+
+def test_role_sql_psql_uses_on_error_stop() -> None:
+    """ON_ERROR_STOP が無いと RAISE EXCEPTION が出ても psql は 0 で終わり、ゲートが無効化される。"""
+    assert "-v ON_ERROR_STOP=1" in _psql_pipeline()
+
+
+def test_role_sql_psql_failure_is_not_swallowed() -> None:
+    """`|| true` / `|| :` が付くと例外が握り潰され、ゲートが素通りする。"""
+    pipeline = _psql_pipeline()
+    assert "|| true" not in pipeline
+    assert "|| :" not in pipeline
+
+
+def test_remote_heredoc_has_errexit() -> None:
+    """リモート側が set -euo pipefail でなければ psql の非ゼロ終了が無視される。"""
+    text = DEPLOY.read_text(encoding="utf-8")
+    m = re.search(r'--command "sudo bash -s" <<REMOTE\n(.*?)\nREMOTE\n', text, re.S)
+    assert m, "リモートヒアドキュメントを抽出できない"
+    assert m.group(1).splitlines()[0].strip() == "set -euo pipefail"
+
+
+# ── origin 許可リストのハードコード(C-5)──────────────────────────────────────
+
+
+def test_deploy_script_hardcodes_the_origin_allowlist() -> None:
+    """env で origin 期待値を差し替えられる限り、origin 照合は統制として成立しない。"""
+    text = DEPLOY.read_text(encoding="utf-8")
+    # コメント中の言及(なぜ env 上書きを廃したかの説明)は許すが、コードには残さない
+    code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+    assert not [ln for ln in code if "EXPECTED_ORIGIN" in ln]
+    assert '"https://github.com/klonyapin/ryza"' in text
+    assert '"git@github.com:klonyapin/ryza.git"' in text
+    assert 'guard_git_state "${ROOT}" "${ALLOWED_ORIGINS[@]}"' in text
+
+
+ALLOWLIST = ("https://github.com/klonyapin/ryza", "git@github.com:klonyapin/ryza.git")
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://github.com/klonyapin/ryza",
+        "https://github.com/klonyapin/ryza.git",
+        "git@github.com:klonyapin/ryza.git",
+    ],
+)
+def test_hardcoded_allowlist_accepts_all_three_url_forms(
+    repo: tuple[Path, str], origin: str
+) -> None:
+    """本番の許可リストが https(.git 有無)と SSH の3表記を通すこと。
+
+    origin を GitHub の URL に差し替えると fetch はネットワークが無いので失敗するが、
+    origin 照合はその手前で行われる。「origin が想定と違う」で落ちないことを見る。
+    """
+    work, _origin = repo
+    _git(work, "remote", "set-url", "origin", origin)
+    r = guard_git(work, *ALLOWLIST)
+    assert "origin が想定と違う" not in r.stderr
+
+
+def test_hardcoded_allowlist_rejects_a_lookalike_repository(repo: tuple[Path, str]) -> None:
+    """似た URL(別オーナー)は通さない。"""
+    work, _origin = repo
+    _git(work, "remote", "set-url", "origin", "https://github.com/klonyapin-evil/ryza")
+    r = guard_git(work, *ALLOWLIST)
+    assert r.returncode == 1
+    assert "origin が想定と違う" in r.stderr

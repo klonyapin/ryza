@@ -82,8 +82,16 @@ LLM_KEY_SECRET="${LLM_KEY_SECRET:-anthropic-api-key}"              # 役員室�
 AR_REPO="${AR_REPO:-ryza}"
 RUNTIME_SA_ID="${RUNTIME_SA_ID:-ryza-dashboard}"                   # 専用実行 SA(中-4)
 PGVER="${PGVER:-17}"
+
 # 承認済みコードの出所。origin がこれ以外を指していたらデプロイしない(再審査 条件4)。
-EXPECTED_ORIGIN="${EXPECTED_ORIGIN:-https://github.com/klonyapin/ryza}"
+# **env で上書きできない**(第3回審査 C-5)。上書きできる限り、攻撃者は origin を
+# 自分のリモートに差し替え EXPECTED_ORIGIN を同じ値にするだけでゲートを満たせてしまい、
+# 「origin URL の照合」という統制そのものが成立しない。許可するのは本リポジトリの
+# 3表記(https の .git 有無 + SSH)だけで、比較時に末尾 .git を落として突き合わせる。
+ALLOWED_ORIGINS=(
+  "https://github.com/klonyapin/ryza"
+  "git@github.com:klonyapin/ryza.git"
+)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SSH=(gcloud compute ssh "${VM}" --zone "${ZONE}" --project "${PROJECT}")
@@ -99,7 +107,7 @@ echo "project=${PROJECT} region=${REGION} vm=${VM} service=${SERVICE} user=${DAS
 
 # ── 0. 承認済みコード一致の検証(重大-1・定款第5条)────────────────────────────
 echo "-- 稼働コードの検証: 作業ツリー clean かつ HEAD == origin/main"
-CODE_VERSION="$(guard_git_state "${ROOT}" "${EXPECTED_ORIGIN}")" || exit 1
+CODE_VERSION="$(guard_git_state "${ROOT}" "${ALLOWED_ORIGINS[@]}")" || exit 1
 echo "-- code_version=${CODE_VERSION}(origin/main と一致)"
 
 # イメージタグはコミット SHA(:latest は使わない — どのコードが動いているかを不変にする)。
@@ -273,18 +281,33 @@ SELECT format('GRANT INSERT ON ops.org_icon_override_log TO %I', '__BR_ROLE__')
 -- (リネージの証跡性。再審査 条件3)。列名は migrations/0001_meta.sql に一致させること。
 GRANT INSERT, UPDATE (finished_at, status, cost) ON meta.runs TO "__BR_ROLE__";
 
--- ── 3) 証跡(デプロイログに残す)─────────────────────────────────────────────
+-- ── 3) 権限の全経路を束ねた一時ビュー(第3回審査 C-3)────────────────────────
+-- information_schema.role_table_grants だけを見ると**列レベル GRANT が見えない**。
+-- `GRANT UPDATE (state) ON ops.trading_state TO ryza_boardroom` は role_table_grants に
+-- 1行も現れないため、Kill Switch を書き換えられる権限が証跡にもゲートにも映らず
+-- 素通りする(実測で確認済み — tests/ops/test_deploy_role_gate.py)。
+-- column_privileges は列レベル GRANT を見せ、かつ表レベル GRANT も列へ展開する。
+-- ただし DELETE / TRUNCATE は列権限に存在しないため、両者の UNION が必要。
+CREATE OR REPLACE TEMP VIEW ryza_gate_grants AS
+  SELECT grantee::text AS grantee, table_schema::text AS table_schema,
+         table_name::text AS table_name, privilege_type::text AS privilege_type
+    FROM information_schema.role_table_grants
+  UNION
+  SELECT grantee::text, table_schema::text, table_name::text, privilege_type::text
+    FROM information_schema.column_privileges;
+
+-- ── 3.1) 証跡(デプロイログに残す)───────────────────────────────────────────
 \echo '-- ロール属性(rolsuper/rolinherit は false、memberships は 0 であること)'
 SELECT r.rolname, r.rolcanlogin, r.rolsuper, r.rolinherit,
        (SELECT count(*) FROM pg_auth_members m WHERE m.member = r.oid) AS memberships
   FROM pg_roles r WHERE r.rolname IN ('__DASH_ROLE__', '__BR_ROLE__') ORDER BY 1;
-\echo '-- 読取専用ロールの非 SELECT 権限(0 であること)'
+\echo '-- 読取専用ロールの非 SELECT 権限(0 であること。列レベル GRANT を含む)'
 SELECT count(*) AS dashboard_write_grants
-  FROM information_schema.role_table_grants
+  FROM ryza_gate_grants
  WHERE grantee = '__DASH_ROLE__' AND privilege_type <> 'SELECT';
 \echo '-- 読取専用ロールの秘密テーブルへの権限(0 であること)'
 SELECT count(*) AS dashboard_secret_grants
-  FROM information_schema.role_table_grants
+  FROM ryza_gate_grants
  WHERE grantee = '__DASH_ROLE__'
    AND table_schema || '.' || table_name IN ('ops.discord_webhooks');
 
@@ -293,21 +316,21 @@ SELECT count(*) AS dashboard_secret_grants
 -- 効いたか/余計な表に広がっていないかを、デプロイのたびにログへ残して検証する。
 \echo '-- 役員室ロールが ops で権限を持つ表(org_icon_overrides と org_icon_override_log の2表のみであること)'
 SELECT table_name, string_agg(privilege_type, ',' ORDER BY privilege_type) AS privileges
-  FROM information_schema.role_table_grants
+  FROM ryza_gate_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
  GROUP BY table_name ORDER BY table_name;
 \echo '-- 役員室ロールの ops 権限の表数(2 であること。0 なら 0020 未適用で GRANT がスキップされた)'
 SELECT count(DISTINCT table_name) AS boardroom_ops_tables
-  FROM information_schema.role_table_grants
+  FROM ryza_gate_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops';
 \echo '-- 役員室ロールが ops の想定外テーブルに持つ権限(0 であること — trading_state/flags/discord_webhooks 等)'
 SELECT count(*) AS boardroom_unexpected_ops_grants
-  FROM information_schema.role_table_grants
+  FROM ryza_gate_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
    AND table_name NOT IN ('org_icon_overrides', 'org_icon_override_log');
 \echo '-- 履歴表への非 INSERT 権限(0 であること — 追記オンリー。UPDATE/DELETE/TRUNCATE を持たない)'
 SELECT count(*) AS boardroom_log_mutation_grants
-  FROM information_schema.role_table_grants
+  FROM ryza_gate_grants
  WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
    AND table_name = 'org_icon_override_log' AND privilege_type <> 'INSERT';
 
@@ -344,44 +367,50 @@ BEGIN
     RAISE EXCEPTION 'ロール属性が想定外(super/inherit/継承メンバーシップは不可・LOGIN 必須): %', bad;
   END IF;
 
-  -- 4.3 読取専用ロールに非 SELECT 権限が無いこと
-  SELECT count(*) INTO n FROM information_schema.role_table_grants
+  -- 4.3 読取専用ロールに非 SELECT 権限が無いこと(列レベル GRANT を含む — C-3)
+  SELECT count(*) INTO n FROM ryza_gate_grants
    WHERE grantee = '__DASH_ROLE__' AND privilege_type <> 'SELECT';
   IF n <> 0 THEN
-    RAISE EXCEPTION '読取専用ロール __DASH_ROLE__ に非 SELECT 権限が % 件ある', n;
+    RAISE EXCEPTION '読取専用ロール __DASH_ROLE__ に非 SELECT 権限が % 件ある(列レベル GRANT を含む)', n;
   END IF;
 
   -- 4.4 秘密テーブルへの権限が無いこと(ops.discord_webhooks — 0017 冒頭)
-  SELECT count(*) INTO n FROM information_schema.role_table_grants
+  SELECT count(*) INTO n FROM ryza_gate_grants
    WHERE grantee = '__DASH_ROLE__'
      AND table_schema || '.' || table_name IN ('ops.discord_webhooks');
   IF n <> 0 THEN
     RAISE EXCEPTION '読取専用ロール __DASH_ROLE__ が秘密テーブル ops.discord_webhooks に権限を持つ(% 件)', n;
   END IF;
 
-  -- 4.5 役員室ロールの ops 権限が「存在する対象2表ぶん」と一致すること。
+  -- 4.5 役員室ロールの ops 権限が対象2表ちょうどであること。
   --     上の GRANT は to_regclass ガード付きで 0020 未適用の DB では黙ってスキップ
-  --     されるため、期待値を「実在する表の数」として数える(0020 適用済みなら 2)。
+  --     されるため、まず**対象表が実在すること自体**を要求する(C-4)。実在数を
+  --     そのまま期待値にすると、0020 未適用の DB(実在 0・GRANT 0)が「一致」と
+  --     判定され、役員室が何も書けないダッシュボードを正常として本番化してしまう。
   expected_ops_tables := (to_regclass('ops.org_icon_overrides') IS NOT NULL)::int
                        + (to_regclass('ops.org_icon_override_log') IS NOT NULL)::int;
-  SELECT count(DISTINCT table_name) INTO n FROM information_schema.role_table_grants
-   WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops';
-  IF n <> expected_ops_tables THEN
+  IF expected_ops_tables <> 2 THEN
     RAISE EXCEPTION
-      '役員室ロールの ops 権限表数が想定外(期待 %, 実際 %)。GRANT が効いていないか余計な表に広がっている',
-      expected_ops_tables, n;
+      '役員室の書込先(ops.org_icon_overrides / ops.org_icon_override_log)が揃っていない(実在 % / 期待 2)。migrations 0020 が未適用の DB へデプロイしようとしている',
+      expected_ops_tables;
+  END IF;
+  SELECT count(DISTINCT table_name) INTO n FROM ryza_gate_grants
+   WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops';
+  IF n <> 2 THEN
+    RAISE EXCEPTION
+      '役員室ロールの ops 権限表数が想定外(期待 2, 実際 %)。GRANT が効いていないか余計な表に広がっている', n;
   END IF;
 
   -- 4.6 想定外の ops 表への権限が無いこと(trading_state / flags / discord_webhooks 等)
-  SELECT count(*) INTO n FROM information_schema.role_table_grants
+  SELECT count(*) INTO n FROM ryza_gate_grants
    WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
      AND table_name NOT IN ('org_icon_overrides', 'org_icon_override_log');
   IF n <> 0 THEN
-    RAISE EXCEPTION '役員室ロールが ops の想定外テーブルに権限を持つ(% 件)', n;
+    RAISE EXCEPTION '役員室ロールが ops の想定外テーブルに権限を持つ(% 件・列レベル GRANT を含む)', n;
   END IF;
 
   -- 4.7 履歴表は追記オンリー(非 INSERT 権限を持たない)
-  SELECT count(*) INTO n FROM information_schema.role_table_grants
+  SELECT count(*) INTO n FROM ryza_gate_grants
    WHERE grantee = '__BR_ROLE__' AND table_schema = 'ops'
      AND table_name = 'org_icon_override_log' AND privilege_type <> 'INSERT';
   IF n <> 0 THEN
@@ -437,15 +466,18 @@ fi
 #     判定は**アドレス列のみ**(ops/lib/pg_hba_check.sh)。行全体の文字列マッチは
 #     コメントや DB 名の 'localhost' で誤判定するため使わない(再審査 次回 PR 対応)。
 eval "\$(printf '%s' '${PG_HBA_LIB_B64}' | base64 -d)"
+# eval が失敗しても set -e は素通りしうる(base64 の出力が空でも eval は成功する)。
+# 関数が定義されていないまま進むと以降の検査呼び出しが「コマンドなし」で終わり、
+# 統制が沈黙する。読み込めたことをここで明示的に確かめる(第3回審査 C-2)。
+declare -F pg_hba_unexpected_lines >/dev/null || exit 1
+declare -F pg_hba_has_line >/dev/null || exit 1
+declare -F pg_hba_guard >/dev/null || exit 1
 DESIRED_HBA="host    ${DB_NAME}    ${DB_ROLE},${BOARDROOM_ROLE}    ${SUBNET_CIDR}    scram-sha-256"
-UNEXPECTED="\$(pg_hba_unexpected_lines "\${HBA}" "\${DESIRED_HBA}" || true)"
-if [ -n "\${UNEXPECTED}" ]; then
-  echo "ERROR: pg_hba.conf に想定外の non-localhost host 行がある(先勝ち規則で本設定が無効化される)。" >&2
-  printf '%s\n' "\${UNEXPECTED}" >&2
-  echo "       内容を確認し、不要な行を削除してから再実行すること(自動削除はしない)。" >&2
-  exit 1
-fi
-if ! grep -qF "\${DESIRED_HBA}" "\${HBA}"; then
+# pg_hba_guard は 0=想定外なし / 1=想定外あり / その他=検査自体の失敗 を3分岐し、
+# 後ろ2つを中断に倒す(検査できない状態を「安全」と混同しない)。
+pg_hba_guard "\${HBA}" "\${DESIRED_HBA}" || exit 1
+# 追記の要否は検査と**同一の正規化**で判定する(空白ゆらぎでの重複追記を防ぐ — C-7)。
+if ! pg_hba_has_line "\${HBA}" "\${DESIRED_HBA}"; then
   printf '%s\n' "\${DESIRED_HBA}" >> "\${HBA}"
   NEED_RELOAD=1
   echo "pg_hba に追記: \${DESIRED_HBA}"

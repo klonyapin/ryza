@@ -21,9 +21,18 @@
 # 未コミット変更や未 push のコミットが本番へ入る経路をここで塞ぐ。
 # 抜け道(--force 等)は意図的に用意しない — 用意すると統制目的が消えるため。
 # 成功時のみ stdout にコミット SHA(= code_version)を出す。
-guard_git_state() {  # $1=リポジトリルート $2=期待する origin URL
-  local root="$1" expected_origin="$2"
-  local origin_url dirty head origin_main
+# 第2引数以降は**許可する origin URL の列挙**(呼び出し側がハードコードする)。
+# env で1件を差し替える形にしないのは、差し替えられる時点で origin 照合が統制として
+# 成立しないため(第3回審査 C-5)。比較は末尾 .git を落として行う。
+guard_git_state() {  # $1=リポジトリルート $2..=許可する origin URL(1個以上)
+  local root="$1"
+  shift
+  local origin_url dirty head origin_main allowed matched
+
+  if [ "$#" -eq 0 ]; then
+    echo "ERROR: guard_git_state に許可 origin が渡されていない(呼び出し側のバグ)。" >&2
+    return 1
+  fi
 
   if ! git -C "${root}" rev-parse --git-dir >/dev/null 2>&1; then
     echo "ERROR: ${root} は git リポジトリではない。デプロイは承認済み main の checkout から行う。" >&2
@@ -33,10 +42,17 @@ guard_git_state() {  # $1=リポジトリルート $2=期待する origin URL
   # origin が本物のリポジトリを指すことを確認する。HEAD == origin/main だけでは、
   # origin を攻撃者のリモートに差し替えれば任意コードが「承認済み」を騙れる(再審査 条件4)。
   origin_url="$(git -C "${root}" remote get-url origin 2>/dev/null || true)"
-  if [ "${origin_url%.git}" != "${expected_origin%.git}" ]; then
-    echo "ERROR: origin が想定と違う(取得='${origin_url}' 期待='${expected_origin}')。" >&2
+  matched=0
+  for allowed in "$@"; do
+    if [ -n "${origin_url}" ] && [ "${origin_url%.git}" = "${allowed%.git}" ]; then
+      matched=1
+      break
+    fi
+  done
+  if [ "${matched}" -ne 1 ]; then
+    echo "ERROR: origin が想定と違う(取得='${origin_url}' 許可='$*')。" >&2
     echo "       origin を差し替えれば HEAD==origin/main は容易に満たせるため、ここで中断する。" >&2
-    echo "       SSH リモート(git@github.com:...)を使っている場合は EXPECTED_ORIGIN で明示すること。" >&2
+    echo "       許可リストは deploy-dashboard.sh にハードコードしてある(env では変えられない)。" >&2
     return 1
   fi
 
