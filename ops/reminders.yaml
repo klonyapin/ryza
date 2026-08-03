@@ -998,3 +998,15 @@ reminders:
       labels: [impl, ledger]
       body: "MTM リプレイ審査(新-6 裁定)で門を「その日のバー」に限定した結果、当日バー欠測のまま再締めされた日は以後 stale でないため、後からバーが取り込まれても自動では再訪されない(mtm_pending のまま取得原価で恒久)。安全側の縮退だが新-3 の害が当該日に限り残る。是正案: 再締めの stale 検出に「mtm_pending かつ当日バーが現在は存在する日」を加える(水位方式と同型の1クエリ)。ledger は保護領域 — 独立審査手続を要する。"
     status: pending
+
+  - id: protect-equivalence-tests
+    what: "クエリ書き換えの対照テスト2ファイルを invariant_tests として保護領域登録"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "protected_areas: 等価性対照テスト(stale/navflow)の登録"
+      labels: [governance]
+      body: "クエリ書き換え審査(査-1): tests/ledger/test_stale_query_rewrite.py と tests/risk/test_navflow_query_rewrite.py は会計・リスクの同値性を固定する対照だが protected_areas 外のため、意味変更時に凍結 SQL を審査なしで書き換えて対照を無効化できる。tests/test_ips.py の先例どおり area: invariant_tests で登録する(governance.yaml は L1 — 次回 L1 バッチ)。"
+    status: pending
