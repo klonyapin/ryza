@@ -281,6 +281,25 @@ def _verdict_for_ref(conn: Any, ref: str) -> tuple[str, str | None]:
     return "bad", f"{label} は decision='{effective}' で承認ではない"
 
 
+def trailer_approves(
+    conn: Any | None, message: str, trailer: str = "Approved:"
+) -> TrailerVerdict | None:
+    """コミットメッセージのトレーラを検証する。トレーラが無ければ ``None``。
+
+    「トレーラがあるか」(:func:`has_approval_trailer`)と「その承認が今も有効か」を1つに
+    まとめた読み口。**承認の有効性を判定する箇所は必ずここを通す** — 素の
+    ``has_approval_trailer`` で分岐すると、その経路だけ否認済み承認を受理する穴になる。
+
+    ``conn`` が ``None`` なら照合できないので、従来どおりトレーラの存在をもって受理する。
+    """
+    refs = approval_trailer_refs(message, trailer)
+    if not refs:
+        return None
+    if conn is None:
+        return TrailerVerdict(accepted=True, problems=[], unverifiable=[])
+    return verify_decision_refs(conn, refs)
+
+
 def verify_decision_refs(conn: Any, refs: list[str]) -> TrailerVerdict:
     """トレーラ参照を ``governance.current_decisions`` と突合する。
 
@@ -382,12 +401,12 @@ def check_protected_commits(
             continue
 
         message = _git(repo, "log", "-1", "--format=%B", sha)
-        refs = approval_trailer_refs(message, trailer)
+        # 承認の有効性判定は trailer_approves に集約する。PR 承継など「別のコミットの
+        # トレーラで承認する」規則を足すときも、この関数を通せば否認済み承認を
+        # 承継させずに済む(素の has_approval_trailer で分岐しないこと)。
+        verdict = trailer_approves(conn, message, trailer)
         trailer_reason: str | None = None
-        if refs:
-            verdict = (
-                TrailerVerdict(True, [], []) if conn is None else verify_decision_refs(conn, refs)
-            )
+        if verdict is not None:
             if verdict.accepted:
                 # 受理はしたが否認済みの参照を併記している(軽微-10)、または照合できない
                 # 参照(裸の数字・DB 外の Issue 決議)を含む(重要-2)。どちらも違反では

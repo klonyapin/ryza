@@ -20,3 +20,30 @@
   中-8(defer+to_thread)、軽微-9(マーカー検証と判定順)、軽微-10(否認済み参照の独立列挙)。
 - リマインダー登録: 重要-5 前段は既存 `veto-origin-column` の優先度note追記、軽微-11(autocommit 照合接続)、
   軽微-12(原子性の逆方向フォールト注入・CLI IDLE 分岐)を `deemed-wiring-followup`(期限 2026-08-17)に。
+
+## 是正の実装記録(2026-08-04・実装エージェント)
+
+裁定の全項目を本 PR で実装した。対応箇所は以下のとおり。
+
+| 指摘 | 対応 |
+| --- | --- |
+| 重大-1 | `a18._verdict_for_ref` が非 ID 参照を `current_decisions.proposal_ref` 一致で解決(PR URL が主経路)。行が無ければ従来の存在検査 |
+| 重要-2 | `_DECISION_REF_RE` を `decision:<id>` のみに限定。裸の数字は `unverifiable` として notes 開示 |
+| 重要-3 | A-18-5 `check_unnotified_deemed`(`outbox:<id>` が 60 分超未配送 → 違反・urgent) |
+| 重要-4 | `notices.resolve_deemed_view` が deemed 決定の実在(かつ未否認)を照合してからボタン付与。不在は警告ログ+ボタンなし(fail-closed) |
+| 重要-5 後段 | `apply_veto` / `withdraw_veto` が `run_id` を否認記録へ渡す |
+| 中-6 | `_require_owner` を DB 読取前に実行。拒否は `record_denied_attempt` が別接続(autocommit)で #運営 へ記録 |
+| 中-7 | reminders の done 記述を実態化し、自動起票を `deemed-auto-announce`(期限 2026-08-17)へ分割 |
+| 中-8 | `_run_governance_action` が `defer(ephemeral)` + `asyncio.to_thread` |
+| 軽微-9 | `build_deemed_notice_embed` がマーカー混入・空参照を拒否。配送判定は deemed 優先 |
+| 軽微-10 | 受理した場合でも否認済み参照は `trailer_findings` に列挙し embed の専用フィールドへ |
+| 軽微-11・12 | `deemed-wiring-followup`(期限 2026-08-17)に登録 |
+| 重要-5 前段 | `veto-origin-column` の body に判断材料の確定を追記(origin 列を「足す」方向で再評価) |
+
+**PR 承継ライン(`a18-ack-l1`)との統合について**: 承認の有効性判定を
+`a18.trailer_approves(conn, message, trailer)` に集約した。承継規則が「マージ M のトレーラで
+配下を承認する」と判定する箇所は、素の `has_approval_trailer` ではなく本関数を通すこと —
+通さないと**否認済みの PR トレーラが配下コミット群に承継され**、重大-1 の是正が承継経路から
+迂回される。`check_protected_commits` の戻り値は本ラインが `(violations, checked,
+trailer_findings)`、承継ラインが `(violations, inherited, checked)` であり、統合時は
+両方の所見を持つ形へ揃える必要がある(関心は独立しており、判定順の競合は無い)。
