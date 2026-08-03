@@ -1162,4 +1162,23 @@ reminders:
       title: "protected_areas: 等価性対照テスト(stale/navflow)の登録"
       labels: [governance]
       body: "クエリ書き換え審査(査-1): tests/ledger/test_stale_query_rewrite.py と tests/risk/test_navflow_query_rewrite.py は会計・リスクの同値性を固定する対照だが protected_areas 外のため、意味変更時に凍結 SQL を審査なしで書き換えて対照を無効化できる。tests/test_ips.py の先例どおり area: invariant_tests で登録する(governance.yaml は L1 — 次回 L1 バッチ)。"
+    # 完了 2026-08-04(L1 バッチ)。protected_areas に area: invariant_tests で 8 件を登録:
+    # 指示の 4 件(test_stale_query_rewrite / test_navflow_query_rewrite / test_engine_invariance
+    # + engine_snapshot.json)に加え、棚卸しで同じ穴を持つと判断した test_migrations.py・
+    # test_deploy_guards.py・test_deploy_role_gate.py・gate/test_rules.py。登録基準は
+    # 「実装から独立した参照(凍結 SQL・ゴールデン・発効値の写し・構造の存在検査)を持ち、
+    # 参照を先に書き換えると以後の保護領域変更が差分に現れなくなるもの」。見送りの判断理由は
+    # config/governance.yaml の棚卸しコメントに記録した。
+    status: done # 2026-08-04 governance.yaml に 8 件登録(L1 バッチ)
+
+  - id: protect-invariant-tests-phase2
+    what: "「唯一の CI 執行点だが実装側が未保護」なテスト群の扱い — モジュール自体を保護領域にするかの審査"
+    conditions:
+      - type: date_after
+        date: "2026-08-25"
+    action:
+      type: issue_create
+      title: "protected_areas: 未保護モジュールの不変条件テスト(fm/sizing・prompting・execution config)"
+      labels: [governance]
+      body: "protect-equivalence-tests の棚卸し(2026-08-04)で保留にした3件。tests/fm/test_sizing.py は不変原則1(LLM の確信度をサイジングに入れない)の**唯一の CI 執行点**、tests/research/test_prompting.py(+ tests/press/test_writer.py のデータ境界回帰)はプロンプト注入フェンスの唯一の執行点、tests/execution/test_config.py は config/execution.yaml 発効値の写しである。いずれも対応する実装・設定(src/ryza/fm/**・src/ryza/research/prompting.py・config/execution.yaml)が protected_areas に無いため、テストだけを登録すると未保護モジュールを事実上の保護領域に格上げすることになる(実装を変えればテストが落ち、通すには保護ファイルの改変=審査が要る)。判断すべきは『テストだけ登録するのか、モジュール自体を登録するのか、どちらもしないのか』であり、L1 のテスト登録として決める範囲を超える。とくに不変原則1 は CLAUDE.md の第1原則であり、現状は CI 上の担保がテスト1本の書き換えで外せる。"
     status: pending
