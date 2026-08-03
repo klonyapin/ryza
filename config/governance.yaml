@@ -24,28 +24,53 @@ representative_reserved:
   - strategy_promotion
   - kill_switch_resume
 
-# 定款第4条: 文書4層と改訂権限
+# 定款第4条: 変更対象4層と改訂権限。
+# 層帰属は最上位一致優先(glob が重複する場合は上位層の手続が勝つ)。
+# 起草と承認の分離: 保護領域・決議対象は起票者と承認者を分離する(05-governance §6-4)。
 document_layers:
+  precedence: highest_layer_match_wins
   L1:
-    docs: [docs/design/06-constitution.md]
-    draft_by: [representative, cio]
-    review_by: [independent_officer] # 盲検
+    docs:
+      - path: docs/design/06-constitution.md
+        draft_by: [representative, cio]
+      - path: config/governance.yaml
+        draft_by: [representative, cio]
+    review_by: [independent_officer] # 盲検 = 議論規約3(起草者・代表の選好を伝えないプロンプト分離)
     approve_by: [representative]
   L2:
-    docs: [docs/design/80-ips.md, docs/design/70-writing-standard.md, docs/design/05-governance.md]
-    draft_by: [representative] # IPS。他 L2 文書は cio も可(個別に ips_amendment 参照)
+    docs:
+      - path: docs/design/80-ips.md
+        draft_by: [representative] # IPS は起票も代表のみ(定款第3条2号)
+      - path: docs/design/70-writing-standard.md
+        draft_by: [cio]
+      - path: docs/design/05-governance.md
+        draft_by: [cio]
     review_by: [independent_officer]
     approve_by: [representative]
   L3:
-    docs: [docs/design/81-fm-mandates.md, docs/design/*.md, personas/*/charter.md]
-    draft_by: [cio, department_job]
+    docs:
+      - path: docs/design/81-fm-mandates.md
+        draft_by: [cio]
+      - path: docs/design/*.md
+        draft_by: [cio, department_job]
+      - path: personas/*/charter.md
+        draft_by: [cio]
     review_by: [independent_officer] # 重要変更のみ
     approve_by: [representative] # 投資委員会
   L4:
-    docs: [config/*.yaml, docs/tasks/*.md]
-    draft_by: [design_lead, department_job]
+    docs:
+      - path: config/*.yaml
+        draft_by: [design_lead, department_job]
+      - path: docs/tasks/*.md
+        draft_by: [design_lead]
+      - path: src/**
+        draft_by: [design_lead, department_job]
+      - path: migrations/*.sql
+        draft_by: [design_lead]
+      - path: ops/**
+        draft_by: [design_lead]
     review_by: [design_lead]
-    approve_by: [design_lead] # ただし protected_areas に該当する場合は代表承認必須
+    approve_by: [design_lead] # ただし protected_areas に該当する場合は代表承認必須(承認トレーラ必須)
 
 # 定款第5条: 保護領域(変更に代表の承認記録が必須。A-13 が git 履歴と突合)
 protected_areas:
@@ -69,16 +94,51 @@ protected_areas:
     area: compliance_gate
   - path: config/mandates/*.yaml
     area: mandates
+  - path: docs/design/81-fm-mandates.md
+    area: mandates
+  - path: migrations/*.sql # スキーマ全体(帳簿分離・証憑制約は migrations に宿る。C-1/懸念1-S1)
+    area: schema
+  - path: src/ryza/bot/main.py # Kill Switch の配線・コマンド登録(懸念1-S2)
+    area: kill_switch
+  - path: src/ryza/bot/approvals.py # 承認フロー(懸念1-S2)
+    area: kill_switch
+  - path: tests/test_ips.py # 不変条件テスト自体を保護(懸念1)。拡充時に invariant テストを追記
+    area: invariant_tests
+  - path: ops/deploy-bot.sh # デプロイ経路(懸念1-S3)
+    area: deploy_path
+  - path: ops/deploy-daily.sh
+    area: deploy_path
+  - path: ops/deploy-ops-weekly.sh
+    area: deploy_path
+  - path: CLAUDE.md # 不変原則・議論規約の写し(C-1)
+    area: constitution
+  # risk_limits: リスクエンジン実装時に src パスを追記すること(C-2。それまで機械可読側は config/ips.yaml の
+  #   hard_limits が実体であり、その保護は area: ips でカバー済み)
   # audit: 監査部門コードは実装時にパスを追記すること(A-13 が「宣言のみ」として警告する)
+
+# 承認記録の様式(定款第5条・C-5): 保護領域の変更コミットは本文末尾に
+#   Approved: <GitHub Issue URL または governance.decisions の ID>
+# トレーラを必須とする。A-13-1 はこのトレーラと承認記録を突合する。
+approval_trailer: "Approved:"
 
 # 定款第6条: 統制テーブル(J-SOX RCM 様式の応用)。A-13 監査ジョブが verification を実行する。
 # enforcement: schema(DB 制約)| gate(実行時ゲート)| ci(テスト・lint)| audit(監査ジョブ)| declaration(宣言のみ)
 controls:
   - rule: 定款第5条(保護領域の無承認変更禁止)
     risk: 保護コード・文書が承認なく書き換えられる
-    enforcement: audit
+    enforcement: audit # 実弾移行前に ci(ブランチ保護+トレーラ検査)へ昇格すること(第5条前提条件)
     kind: 発見
-    verification: 保護パスの変更コミットと承認記録(Issue 決議 / governance.decisions)の突合(A-13-1)
+    verification: 保護パスの変更コミットの Approved トレーラと承認記録(Issue 決議 / governance.decisions)の突合(A-13-1)
+  - rule: 定款第5条(不変条件テストによる振る舞い保護)
+    risk: 保護パスに触れない新規ファイル(migration 追加・配線変更)で保護対象の振る舞いが無効化される
+    enforcement: ci
+    kind: 予防
+    verification: 帳簿間参照禁止・Kill Switch 経路存在・マンデート整合の不変条件テスト(tests/test_ips.py ほか。拡充は A-13 実装タスクに含める)
+  - rule: 定款第5条(稼働コード=承認済みコードの一致)
+    risk: デプロイスクリプト改変や未承認ブランチからのデプロイで承認履歴と稼働実体が乖離する
+    enforcement: declaration # deploy スクリプトへの main-SHA 検証実装まで宣言
+    kind: 予防
+    verification: deploy-* が main の HEAD SHA を記録し A-13 が VM 上の稼働 SHA と突合(未実装)
   - rule: 定款第6条2項(発効文書と config の整合)
     risk: 文書は改訂されたがエンジン参照値が旧いまま乖離する
     enforcement: audit
@@ -93,7 +153,7 @@ controls:
     risk: マンデートが IPS より緩い上限を持つ
     enforcement: gate
     kind: 予防
-    verification: src/ryza/ips.py validate_mandates(CI: tests/test_ips.py)
+    verification: src/ryza/ips.py validate_mandates(CI は tests/test_ips.py)
   - rule: 第7条禁止(帳簿間参照の禁止 — 不変原則2)
     risk: ファンド帳簿と運営帳簿が混合する
     enforcement: schema
