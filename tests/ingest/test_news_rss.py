@@ -19,6 +19,8 @@ def test_load_feeds_active_only():
     names = {f.name for f in feeds}
     # 官公庁・中銀は確定枠（active）で必ず含まれる（§2）。
     assert {"日銀", "財務省", "金融庁", "FRB"} <= names
+    # T-012 一括拡張: 主要国統計局・国際機関。
+    assert {"総務省統計局", "米労働統計局BLS", "ECB", "BOE", "IMF"} <= names
 
 
 def test_ingest_one_ok(conn, run, store, fetcher):
