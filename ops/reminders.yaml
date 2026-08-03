@@ -298,6 +298,30 @@ reminders:
       body: "独立役員 再審査 2026-08-03(docs/reviews/dashboard-deploy-independent-review.md 再審査記録「次回 PR 対応」)。条件付き承認のマージ阻止要因ではないが、着手期限を切って残す。(1) ロール検証クエリのゲート化: ops/deploy-dashboard.sh のロール定義 SQL 末尾にある dashboard_write_grants などの検証クエリは現在ログ出力のみで、値が想定外でもデプロイが続行する。DO ブロックで例外を上げるか結果を読んで中断する。(2) pg_hba 検査の CIDR 列限定: 現在は行全体の文字列マッチのため、コメントやデータベース名に localhost を含む行を誤って安全と判定しうる。アドレス列を取り出して判定する。(3) デプロイ統制のリグレッションテスト: git ゲート(dirty・HEAD != origin/main・origin URL 不一致)と公開バインディング検査が『実際に中断する』ことを検証するテストが無い。統制コードは壊れても静かに通るため、**Phase 5 の Cloud Build トリガー化(dashboard-cloudbuild-trigger)に着手する前に必須**とする。"
     status: pending
 
+  - id: governance-decision-vetoes-schema
+    what: "みなし承認の事後否認を記録する追記オンリーテーブル governance.decision_vetoes(定款 v0.4 第3条が定める否認権の証跡。独立役員審査 0019 C-1)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "governance.decision_vetoes(みなし承認の事後否認記録)を追加する"
+      labels: [impl]
+      body: "定款 v0.4 第3条は『みなし承認は通知と同時に発効し、代表はいつでも否認できる。否認された変更は遅滞なく取り消し、派生効果を #運営 へ報告する』と定めるが、この否認を記録する場所がスキーマに無い(独立役員審査 0019 C-1)。governance.decisions は 0007 の UNIQUE(proposal_ref) で 1提案=1行に固定されているため、否認を新規行として INSERT できず、既存行を UPDATE すると `Approved:` トレーラが指す承認記録の意味を遡及的に改変してしまう(A-13 の突合が過去に遡って壊れる)。結果として、監査部門が追う deemed_ratio(否認ゼロの長期継続=形骸化アラート)は構造的に発火不能な状態にある。是正: governance.decisions を参照する追記オンリーの governance.decision_vetoes テーブル(decision_id への FK・否認者・否認理由・取消コミット revert_commit・取消不能な派生効果の参照・run_id、UPDATE/DELETE 禁止トリガは 0013 の minutes/stances と同型)を migrations で追加し、A-13 と deemed_ratio 集計がこれを読む配線を行う。**順序制約: 本テーブルは governance-deemed-writer(みなし承認の記録 writer)の実装 PR より前にマージすること** — writer が先に入ると、否認できない deemed 行が本番データとして積み上がり、後から否認証跡を遡及付与できない。migrations は保護領域のため独立役員審査+みなし承認の手続を経ること。"
+    status: pending
+
+  - id: governance-deemed-writer
+    what: "みなし承認を governance.decisions に decision='deemed' で記録する writer の実装(0019 でスキーマは通ったが書き手が居ない。独立役員審査 0019 C-3)"
+    conditions:
+      - type: date_after
+        date: "2026-08-24"
+    action:
+      type: issue_create
+      title: "みなし承認の記録 writer(decision='deemed')を実装する"
+      labels: [impl]
+      body: "0019 で governance.decisions.decision に 'deemed' を許容したが、実際にその行を書くコードが無いため、定款 v0.4 第3条3号の記録要件(『みなし承認も governance.decisions に deemed として記録し、監査対象とする』)は未充足のままである(独立役員審査 0019 C-3)。実装内容: ①#承認 への PR リンク付き通知(src/ryza/bot/approvals.py 経路)と同一トランザクションで deemed 行を INSERT する、②decided_by は 'system:<source>' 形式(0019 の decisions_deemed_system_actor_check)、③3専決事項の kind には付けない(decisions_deemed_not_reserved_check がスキーマ側で拒否する — アプリ側でも事前に弾いて分かりやすいエラーにする)、④proposal_ref は PR URL 等の一意参照とし二重記録を UNIQUE で防ぐ、⑤A-13-1 の `Approved:` トレーラ突合が deemed 行を承認記録として受理することを確認。**順序制約: governance-decision-vetoes-schema(否認記録テーブル)のマージ後に着手すること** — 否認を記録できない状態で deemed 行を量産すると、代表が否認権を行使しても証跡を残せない。"
+    status: pending
+
   - id: db-role-separation-webhook-url
     what: "DB ロール分離: ops.discord_webhooks(webhook URL)の読取を配送コンポーネント専用ロールへ限定(実弾移行前提)"
     conditions:
