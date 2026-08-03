@@ -9,8 +9,10 @@
 5. 冪等: 既発火(status が fired)はスキップ、当週ダイジェストは二重投稿しない
 6. DRY_RUN=1 で書き込みせずログのみ
 7. 形骸化の監査(決議精緻化審査 2026-08-03 の裁定による新設統制。05-governance §6-5 の
-   趣旨に連なる): 批判を経ない決議の直近件数・連続数をダイジェストに1行載せ、連続または
-   累積が閾値に達したら警告する(opt-in)
+   趣旨に連なる): 批判を経ない決議の直近件数・連続数を1行載せる。**本番の判定主体は
+   A-18(A-18-6)**であり、本ジョブ(Cloud Run Job)は DB に届かないため既定では
+   報告先を指す参照1行を出す(``RESOLUTION_STATUS_DELEGATED``)。DB へ届く実行環境で
+   ``BOARDROOM_AUDIT=1`` を設定した場合のみ本ジョブ自身も判定する(opt-in)
 
 条件エバリュエータ(reminders.yaml v2):
   date_after / issue_label_open / task_file_glob / bq_table_missing
@@ -245,9 +247,15 @@ def find_or_create_digest_issue(client: GitHubClient) -> dict[str, Any] | None:
 # A-18 監査の実行状態(未配線時の既定)。ダイジェストに必ず1行載せ、沈黙を多義的にしない。
 A18_STATUS_UNWIRED = "スキップ(A18_REPO_PATH 未配線)"
 
-# 決議の形骸化監査の実行状態(未配線時の既定)。A-18 と同じく
-# **必ず1行載せる**: 「アラートが無い」と「そもそも見ていない」を沈黙で同一視させない。
-RESOLUTION_STATUS_UNWIRED = "スキップ(BOARDROOM_AUDIT 未配線)"
+# 決議の形骸化監査の実行状態(既定)。A-18 と同じく **必ず1行載せる**:
+# 「アラートが無い」と「そもそも見ていない」を沈黙で同一視させない。
+#
+# 既定は「スキップ」ではなく**報告先の参照**である(ops-weekly VM 移設審査 2026-08-04
+# 重大-2 と同型の対処): 「スキップ」という語が毎週出続けると、統制が外された状態と
+# 正常状態が同じ文字列になり、無害化が正常表示に化ける。本ジョブ(Cloud Run Job)は
+# VM 内 PostgreSQL に届かないため判定を持たず、判定は A-18(A-18-6・監査専用 clone から
+# 週次実行し #運営 へ届く)が行う。読み手が次に見る場所を1行で指す。
+RESOLUTION_STATUS_DELEGATED = "A-18-6(週次監査・#運営)で報告 — 本ジョブでは判定しない"
 
 
 def build_digest(
@@ -256,7 +264,7 @@ def build_digest(
     fired: list[str],
     marker: str,
     a18_status: str = A18_STATUS_UNWIRED,
-    resolution_status: str = RESOLUTION_STATUS_UNWIRED,
+    resolution_status: str = RESOLUTION_STATUS_DELEGATED,
 ) -> str:
     """ダイジェスト本文(Markdown)を組み立てる。先頭に当週マーカーを埋める(冪等判定用)。"""
     since = (now - timedelta(days=7)).isoformat()
@@ -282,6 +290,7 @@ def build_digest(
     lines.append(f"### A-18 監査: {a18_status}")
     lines.append("")
     # 形骸化の監査: 批判を経ない決議の直近件数・連続数(05 §6-5 の趣旨に連なる新設統制)。
+    # 既定は報告先(A-18-6)への参照。「スキップ」を常設せず、読み手が次に見る場所を指す。
     lines.append(f"### 決議の批判経由: {resolution_status}")
     return "\n".join(lines)
 
@@ -291,7 +300,7 @@ def post_digest(
     now: datetime,
     fired: list[str],
     a18_status: str = A18_STATUS_UNWIRED,
-    resolution_status: str = RESOLUTION_STATUS_UNWIRED,
+    resolution_status: str = RESOLUTION_STATUS_DELEGATED,
 ) -> bool:
     """当週ダイジェストを投稿する。既に当週分があれば投稿しない(冪等)。投稿したら True。"""
     week = iso_week(now)
@@ -319,7 +328,7 @@ def run_weekly(
     bq_checker: BqChecker = default_bq_table_missing,
     reminders_path: str = REMINDERS_PATH,
     a18_status: str = A18_STATUS_UNWIRED,
-    resolution_status: str = RESOLUTION_STATUS_UNWIRED,
+    resolution_status: str = RESOLUTION_STATUS_DELEGATED,
 ) -> list[str]:
     """週次ジョブ本体。発火したリマインダー id 一覧を返す。"""
     now = now or datetime.now(UTC)
@@ -399,15 +408,19 @@ def resolution_audit_status() -> str:
     達するか、走査窓内の累積が ``boardroom.CONFIRMATION_COUNT_ALERT`` 件に達した週は
     行頭が ⚠ になる(交互に確認を外す運用は連続数だけでは検出できない)。
 
-    DB(``governance.minute_resolutions``)を読むため、DB へ届く実行環境
-    (GCE VM 等)で ``BOARDROOM_AUDIT=1`` を設定したときだけ走る。現行の Cloud Run 版
-    ops-weekly は DB に届かないため未設定 = スキップであり、その事実も1行として
-    ダイジェストに出す(A-18 と同じ流儀 — 沈黙を多義的にしない)。失敗は握って週次ジョブ
-    本体は継続する(監査の失敗でリマインダー発火まで止めない)。
+    DB(``governance.minute_resolutions``)を読むため、DB へ届く実行環境で
+    ``BOARDROOM_AUDIT=1`` を設定したときだけ走る。**本番の判定主体は本ジョブではなく
+    A-18(``audit.a18.check_resolution_bypass`` = A-18-6)である**: 現行の Cloud Run 版
+    ops-weekly は VM 内 PostgreSQL に届かず、届かせるには実行基盤の移設が要る一方、
+    A-18 は既に監査専用 clone から週次で走り #運営 へ届く(ops-weekly VM 移設審査
+    2026-08-04 の代替案(d)・設計リード裁定)。本関数は DB へ届く環境(ローカル検証・
+    将来の Cloud SQL 移行後など)のための opt-in として残す。既定では判定せず、
+    報告先を指す1行を返す — A-18 と同じ流儀で**必ず1行載せる**(沈黙を多義的にしない)。
+    失敗は握って週次ジョブ本体は継続する(監査の失敗でリマインダー発火まで止めない)。
     """
     if os.environ.get("BOARDROOM_AUDIT") != "1":
-        log.info("決議の形骸化監査はスキップ(BOARDROOM_AUDIT 未設定)")
-        return RESOLUTION_STATUS_UNWIRED
+        log.info("決議の形骸化監査は本ジョブでは判定しない(判定主体は A-18-6)")
+        return RESOLUTION_STATUS_DELEGATED
     from ryza.db.conn import connect
     from ryza.governance.boardroom import (
         confirmation_status_line,

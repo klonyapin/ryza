@@ -1121,3 +1121,101 @@ def test_enqueue_alert_direct_push_is_urgent(conn, run_id):
         cur.execute("SELECT urgent FROM press.outbox WHERE id = %s", (oid,))
         (urgent,) = cur.fetchone()
     assert urgent is True  # 直 push も統制違反として urgent
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# A-18-6 決議の批判経由(形骸化の監査)
+#
+# 決議精緻化審査(2026-08-03)の新設統制。当初は週次ジョブ ops-weekly のダイジェストに
+# 載せる設計だったが、ops-weekly は Cloud Run Job で VM 内 PostgreSQL に届かず、配線には
+# 実行基盤の移設が要った。移設案は「監査が可変の稼働コードから走る」「env の1行削除が
+# 『未配線』= 移設前と同一表示に化ける」穴を生んだため、既に監査専用 clone から週次で走り
+# #運営 へ届く A-18 側へ載せた(VM 移設審査 2026-08-04 代替案(d)・設計リード裁定)。
+#
+# 走査窓・閾値は boardroom 側の定義を再利用する(監査側で再定義すると二重定義が静かにずれる)。
+# テスト DB は他ワークツリーと共有しうるが、連続は**最新から**数えるため直下の k 件で決まる。
+# ────────────────────────────────────────────────────────────────────────────
+def _seed_bypassed_resolutions(conn, run_id: int, count: int) -> None:
+    """「批判を経ない決議」(confirmed_without_critic=true)を count 件積む。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO governance.minutes (meeting, held_at, attendees, body_md, run_id)"
+            " VALUES ('investment_committee', now(), %s, '自由記述の議事録', %s)"
+            " RETURNING minute_id",
+            (["representative"], run_id),
+        )
+        minute_id = cur.fetchone()[0]
+        for i in range(count):
+            cur.execute(
+                "INSERT INTO governance.minute_resolutions"
+                " (minute_id, seq, title, resolution_md, resolved_by,"
+                "  confirmed_without_critic)"
+                " VALUES (%s, %s, %s, '本文', 'representative', true)",
+                (minute_id, i + 1, f"確認付き決議{i}"),
+            )
+
+
+def test_resolution_bypass_alerts_on_streak(conn, run_id):
+    """批判を経ない決議が連続すると alert になり、1行に内訳が出る。"""
+    from ryza.governance.boardroom import CONFIRMATION_STREAK_ALERT
+
+    _seed_bypassed_resolutions(conn, run_id, CONFIRMATION_STREAK_ALERT)
+    bypass = a18.check_resolution_bypass(conn)
+    assert bypass["alert"] is True
+    assert bypass["streak"] >= CONFIRMATION_STREAK_ALERT
+    assert bypass["line"].startswith("⚠ 形骸化の疑い")
+    conn.rollback()
+
+
+def test_resolution_bypass_reports_line_even_without_alert(conn, run_id):
+    """閾値未満でも行は返す(「アラートが無い」と「見ていない」を同一視させない)。"""
+    _seed_bypassed_resolutions(conn, run_id, 1)
+    bypass = a18.check_resolution_bypass(conn)
+    assert bypass["line"]
+    assert bypass["scanned"] >= 1
+    conn.rollback()
+
+
+def test_run_a18_includes_resolution_bypass_with_conn(repo, conn):
+    """conn 付き実行では A-18-6 が結果に入る(conn 無しでは None + 未照合の注記)。"""
+    r, since = repo
+    with_conn = a18.run_a18(r, since_commit=since, pr_since_commit=since, conn=conn)
+    assert with_conn["resolution_bypass"] is not None
+    assert "line" in with_conn["resolution_bypass"]
+
+    without = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert without["resolution_bypass"] is None
+    assert any("A-18-6" in n for n in without["notes"])
+    conn.rollback()
+
+
+def test_embed_carries_resolution_bypass_line(conn, run_id):
+    """⚠ 行が #運営 の embed に載り、報告そのものの要否(has_findings)も立てる。"""
+    from ryza.governance.boardroom import CONFIRMATION_STREAK_ALERT
+
+    _seed_bypassed_resolutions(conn, run_id, CONFIRMATION_STREAK_ALERT)
+    result = _result([], [])
+    result["resolution_bypass"] = a18.check_resolution_bypass(conn)
+    assert a18.has_findings(result) is True
+
+    embed = a18.build_alert_embed(result)
+    field = next(f for f in embed["fields"] if "A-18-6" in f["name"])
+    assert "⚠️" in field["name"]
+    assert "批判を経ない決議" in field["value"]
+    assert "要対応" in embed["title"]
+    conn.rollback()
+
+
+def test_embed_shows_resolution_line_when_not_alerting():
+    """閾値未満では ⚠️ を点けず、行だけ載せる(毎回 ⚠️ にして本物を埋もれさせない)。"""
+    result = _result([], [])
+    result["resolution_bypass"] = {
+        "scanned": 4, "confirmed": 1, "undetermined": 0, "bypassed": 1,
+        "streak": 0, "alert": False,
+        "line": "直近 4 件中 1 件が批判を経ない決議(確認付き 1 / 判定不能 0)/ 連続 0 件",
+    }
+    assert a18.has_findings(result) is False
+    embed = a18.build_alert_embed(result)
+    field = next(f for f in embed["fields"] if "A-18-6" in f["name"])
+    assert "⚠️" not in field["name"]
+    assert "所見なし" in embed["title"]
