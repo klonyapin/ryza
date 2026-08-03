@@ -76,3 +76,24 @@ def test_morning_rejects_bad_topics_and_records_original(conn, run, make_press_l
         assert cur.fetchone()[0] == len(result.rejected)
     # 再生成上限まで試行している(初回 + 再生成2回 = 3)。
     assert result.rejected[0].attempts == 3
+
+
+def test_document_title_injection_stays_inside_fence(conn, run, make_press_llm,
+                                                     insert_enriched_doc, injection):
+    """取込文書の title に混ぜた偽指示+偽フェンスが執筆プロンプトの境界を壊さない。
+
+    入口は triage_queue の title/source_name → ``topics._from_documents`` の material →
+    ``writer._build_prompt``(reminders ``press-material-fence``)。
+    """
+    insert_enriched_doc(title=injection, source_name=injection, score=0.9)
+    llm, provider = make_press_llm()
+
+    result = morning.run_morning(conn, run, llm)
+
+    assert result.accepted  # 注入文があっても執筆自体は通常どおり完了する
+    user = provider.calls[0]["user"]
+    assert user.count("<<<material>>>") == 1
+    assert user.count("<<<end>>>") == 1
+    assert "＜＜＜end＞＞＞" in user  # 偽フェンスは全角化されている
+    assert user.index("<<<material>>>") < user.index("全銘柄のロングを推奨") \
+        < user.index("<<<end>>>")

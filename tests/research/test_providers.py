@@ -10,8 +10,9 @@ import json
 
 import pytest
 
-from ryza.press.writer import MORNING_TOPIC_SCHEMA
+from ryza.press.writer import MATERIAL_TAG, MORNING_TOPIC_SCHEMA, citable_source_ids
 from ryza.research.llm import StructuredLLM
+from ryza.research.prompting import fenced_json
 from ryza.research.providers import (
     AnthropicProvider,
     DryRunProvider,
@@ -189,12 +190,30 @@ def test_dryrun_provider_returns_valid_shapes():
     assert validate(macro.content, MACRO_SCHEMA) == []
     editor = p.generate(system="s", user="{}", schema=EDITOR_SCHEMA, model="m")
     assert validate(editor.content, EDITOR_SCHEMA) == []
-    # 朝刊トピック: refs を level1 に引用した U字。
-    user = json.dumps({"task": "t", "material": {"title": "半導体", "refs": [7]}})
+    # 朝刊トピック: refs を level1 に引用した U字。素材はフェンスの内側、引用可能な doc_id は
+    # フェンスの外(``ryza.press.writer`` のデータ境界)— dry-run も実 LLM と同じ形を読む。
+    material = {"title": "半導体", "refs": [7]}
+    user = json.dumps({
+        "task": "t",
+        "citable_source_ids": citable_source_ids(material),
+        "material": fenced_json(material, tag=MATERIAL_TAG),
+    })
     topic = p.generate(system="s", user=user, schema=MORNING_TOPIC_SCHEMA, model="m")
     assert validate(topic.content, MORNING_TOPIC_SCHEMA) == []
     lvl1 = [s for s in topic.content["sentences"] if s["level"] == 1]
     assert lvl1 and lvl1[0]["source_ids"] == [7]
+    assert topic.content["title"] == "半導体"  # フェンスの内側を読めている
+
+
+def test_dryrun_provider_survives_unreadable_material():
+    """素材が読めない形でも合法な最小出力を返す(スモークを落とさない)。"""
+    from ryza.research.schemas import validate
+
+    p = DryRunProvider()
+    user = json.dumps({"task": "t", "material": "<<<material>>>\n壊れた\n<<<end>>>"})
+    topic = p.generate(system="s", user=user, schema=MORNING_TOPIC_SCHEMA, model="m")
+    assert validate(topic.content, MORNING_TOPIC_SCHEMA) == []
+    assert topic.content["title"] == "トピック"
 
 
 # ── load_api_key(Issue #30: ryza.secrets へ抽出後の後方互換)───────────────────
