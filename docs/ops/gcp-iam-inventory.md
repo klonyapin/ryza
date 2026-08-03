@@ -1,9 +1,9 @@
 # GCP IAM 棚卸し(ryza-main)
 
 - 対象プロジェクト: `ryza-main`(プロジェクト番号 287074591154・組織に属さない単独プロジェクト)
-- as_of: **2026-08-04**(すべて読み取りコマンドの実測。§7 に再現手順)
+- as_of: **2026-08-04**(§1〜§7 は読み取りコマンドの実測。§7 に再現手順)
 - 根拠となる指摘: `ops/reminders.yaml` の `gcp-iam-inventory`、`docs/reviews/ops-weekly-vm-independent-review.md` L11・L21(低・旧経路の IAM 残滓)
-- 本書は**棚卸しと提案のみ**で、IAM の変更は一切行っていない。是正の実施は `ops/reminders.yaml` の `gcp-iam-remediation`(期限 2026-08-24)に分離した
+- §1〜§7 は**棚卸しと提案**である。**是正の前半(追加系 R-0・R-4)は 2026-08-04 に実施済みで、記録は §8**。削除を伴う R-1〜R-3 は未実施で、代表確認後にそのまま実行できる手順書を §9 に置いた
 
 このプロジェクトの権限設計は「Secret だけが最小権限で、それ以外は無制限」という二極構造になっている。Secret の payload 読み取りは Secret 単位の `secretAccessor` で正しく絞られている一方、その同じサービスアカウント(以下 SA)がプロジェクト全体に `roles/editor`(11,889 権限)を持つため、Secret を除くすべての資源 —— VM・Cloud Run・Artifact Registry・BigQuery・Scheduler —— を作成・改変・削除できる。しかも `compute.instances.setMetadata` を含むため、この SA の資格情報を得た者は VM に SSH 鍵を注入して root を取り、結局は VM が読める全 Secret に到達する。したがって Secret 単位の絞り込みは**同一 SA からの経路に対しては実効性を持たない**。以下は付与の実測、宣言(`ops/deploy-*.sh`)との差分、是正提案の順に述べる。
 
@@ -43,7 +43,8 @@
 | `anthropic-api-key` | compute SA, ryza-dashboard SA | — | `deploy-daily.sh:74`, `deploy-dashboard.sh:622-626` |
 | `ryza-dashboard-db-url` | ryza-dashboard SA | — | `deploy-dashboard.sh:616-620` |
 | `ryza-boardroom-db-url` | ryza-dashboard SA | — | 同上 |
-| `jquants-api-key` / `jquants-refresh-token` / `fred-api-key` / `estat-app-id` | compute SA | — | **宣言なし**(手動付与。データ取込の実配線に対応) |
+| `jquants-api-key` / `fred-api-key` / `estat-app-id` | compute SA | — | 棚卸し時は**宣言なし**(手動付与)。**2026-08-04 に `deploy-daily.sh:78-107` へ宣言を追加(R-4 実施済み・§8)** |
+| `jquants-refresh-token` | compute SA | — | **宣言なし・かつコードから未使用**(J-Quants V2 は API キー認証のみ。V1 の遺物)。→ §8.3 要調査 |
 | `ryza-db-password` / `ryza-boardroom-db-password` | (バインディングなし) | — | 中間素材。`deploy-dashboard.sh` が実行者権限で読み URL Secret に合成する |
 
 ### 1.4 リソース単位
@@ -51,9 +52,9 @@
 | リソース | ポリシー | 評価 |
 |---|---|---|
 | Cloud Run サービス `ryza-dashboard` | `roles/run.invoker` = IAP サービスエージェントのみ | 宣言どおり。ただし §1.1 のプロジェクトレベル `run.invoker` が**継承で上乗せ**される(→ P-3) |
-| Cloud Run Job `ops-weekly` | 空(`etag: ACAB`) | 起動は §1.1 のプロジェクトレベル `run.invoker` に依存している |
+| Cloud Run Job `ops-weekly` | 棚卸し時は空(`etag: ACAB`)。**2026-08-04 に compute SA へ `roles/run.invoker` を付与(R-0 ①・§8)** | 棚卸し時点では起動が §1.1 のプロジェクトレベル `run.invoker` に依存していた。現在はリソースレベルで自立しており、R-2 の削除に耐える |
 | Artifact Registry `ryza` / `cloud-run-source-deploy` | 空 | プロジェクトレベルの `editor` / `builds.builder` で足りている |
-| BigQuery データセット `billing_export` | `projectWriters`=WRITER, `projectOwners`=OWNER, `projectReaders`=READER, `billing-export-bigquery@system`=OWNER, 代表=OWNER | **`projectWriters` は `roles/editor` 保持者** = compute SA。つまり compute SA は請求エクスポートに**書き込み・テーブル削除ができる** |
+| BigQuery データセット `billing_export` | `projectWriters`=WRITER, `projectOwners`=OWNER, `projectReaders`=READER, `billing-export-bigquery@system`=OWNER, `euplotes04@gmail.com`=OWNER。**2026-08-04 に compute SA=READER を追加(R-0 ②・§8)** | **`projectWriters` は `roles/editor` 保持者** = compute SA。つまり compute SA は請求エクスポートに**書き込み・テーブル削除ができる**。READER の明示付与により、`editor` 剥離後も `tables.list` は残る |
 | IAP(`ryza-dashboard`) | `roles/iap.httpsResourceAccessor` = 代表1名 | 宣言どおり(`deploy-dashboard.sh:674-682`) |
 | GCS バケット `ryza-main_cloudbuild` / `run-sources-…` | legacy(projectEditor/Owner/Viewer)のみ | 公開バインディングなし |
 | ファイアウォール | `default-allow-ssh` `default-allow-rdp` `default-allow-icmp` が `0.0.0.0/0`、`ryza-allow-dashboard-db` は `10.138.0.0/20`→tcp:5432/tag `ryza-db` | 後者は宣言どおり。前者は default VPC の既定(→ P-6・IAM 外の残課題) |
@@ -117,9 +118,11 @@
 
 ---
 
-## 4. 是正提案(優先度付き・実施は別タスク)
+## 4. 是正提案(優先度付き)
 
 **実施順序に依存関係がある。** R-1 を先にやると ops-weekly と Scheduler が壊れる。必ず R-0 → R-1 の順で行う。
+
+**進捗(2026-08-04 時点)**: **R-0・R-4 は実施済み(§8)**。R-1・R-2・R-3 は未実施で、手順書は §9。R-5 は R-1 完了後に再評価。R-6・R-7 は未実施でコマンドのみ §10 に記載。
 
 | 優先 | ID | 内容 | 前提 | リスク |
 |---|---|---|---|---|
@@ -179,3 +182,186 @@ gcloud compute firewall-rules list --project ryza-main
 gcloud logging read 'protoPayload.serviceName="secretmanager.googleapis.com"' \
   --project ryza-main --freshness 90d --order=asc
 ```
+
+---
+
+## 8. 是正の実施記録 — 前半(追加系 R-0・R-4)/ 2026-08-04
+
+追加系だけを先に実施したのは、**R-1(`editor` 剥離)を安全に実行できる状態を作ることが目的**だからである。以下はすべて「追加のみ・冪等・失敗しても現状より権限が減らない」操作に限っており、削除は一件も行っていない。剥離そのものは §9 の手順書に分離し、代表確認を待つ。
+
+### 8.1 実行したコマンドと結果
+
+| ID | コマンド | 結果 |
+|---|---|---|
+| R-0 ① | `gcloud run jobs add-iam-policy-binding ops-weekly --region us-west1 --project ryza-main --member=serviceAccount:287074591154-compute@developer.gserviceaccount.com --role=roles/run.invoker` | 成功。Job ポリシーが空(`etag: ACAB`)→ `run.invoker` 1 バインディング(`etag: BwZYKsWNL1I=`)。**Scheduler の起動経路がプロジェクトレベル付与から独立した** |
+| R-0 ② | `bq update --source <acl.json> ryza-main:billing_export`(既存 5 エントリを保持し READER を 1 件追加) | 成功。`access` が 5 → 6 件。追加分は `{"role": "READER", "userByEmail": "287074591154-compute@developer.gserviceaccount.com"}` |
+| R-4 / R-0 ③ | `gcloud secrets add-iam-policy-binding {jquants-api-key, fred-api-key, estat-app-id} --member=serviceAccount:287074591154-compute@… --role=roles/secretmanager.secretAccessor` | 3 件とも成功(既存と同一のため実質 no-op)。付与後のバインディングは各 Secret とも `secretAccessor` 1 件のみで、**増分ゼロを実測で確認** |
+
+R-0 ② でリソースレベル API(`bq get-iam-policy`)を使わなかったのは、データセットの `get-iam-policy` が **allowlist 制**で本プロジェクトでは使えない(`This feature requires allowlisting`)ためである。代替として ACL の read-modify-write を使ったが、これは全置換であり既存エントリを落とす危険がある。そこで**実行前の ACL を退避し、既存 5 エントリを機械的にコピーしたうえで 1 件だけ追加**する手順を取り、適用後に 6 件すべてを再取得して照合した。同じ操作を繰り返す場合も、既存エントリの写経ではなくこの read-modify-write を守ること。
+
+### 8.2 宣言に取り込んだもの(`ops/deploy-daily.sh`)
+
+D-3 の穴は「VM を作り直すと取込だけが静かに落ちる」という形で顕在化する。取込側は鍵が無ければ理由付きで skip する縮退設計(Issue #38)であり、**失敗が例外ではなく欠落として出る**ため、気づくのは朝刊の中身が薄いときになる。そこで `deploy-daily.sh` の §1b として 3 Secret の accessor 付与を宣言に加えた。未登録の Secret については警告に留めて中断しない —— e-Stat 等の鍵が未登録の段階でも日次サイクル自体は設置できるべきだからである。
+
+### 8.3 宣言化せず「要調査」に送ったもの
+
+| 対象 | 実測 | 判断 |
+|---|---|---|
+| `discord-bot-token` の `secretVersionAdder`(compute SA) | 2026-08-02T16:35:16Z に手動付与。`git log -S secretVersionAdder` は全 ref で 0 件、`src/` に新版を積むコードも 0 件 | **出所不明のため宣言化しない。** 宣言に書けば「必要だから付いている」という誤った証拠を作ることになる。削除は R-3(§9.4) |
+| `jquants-refresh-token` の `secretAccessor`(compute SA) | J-Quants **V2 は API キー認証のみ**で refresh token を使わない(`src/ryza/ingest/jquants.py` の `api_key()` docstring)。リポジトリ全体での参照は当該コメント 1 件のみ | **宣言化しない**(R-4 の対象 4 件から意図的に外した)。Secret 自体と accessor の削除可否は代表判断。V1 の遺物であれば Secret ごと廃棄が筋 |
+| `billing_export` データセットの `euplotes04@gmail.com`=OWNER | プロジェクトレベルの owner(`mileage_embassy_9x@icloud.com`)とも、`gcloud auth list` に出る 3 アカウントとも一致しない第4のアカウント | **本棚卸しでは正体を特定できていない。** 請求エクスポート設定時に使った請求先アカウント側の管理者と推測されるが未確認。運営帳簿の一次証憑に OWNER を持つ以上、代表による認否が要る |
+
+### 8.4 R-1 実施時に注意すべき挙動(コード読みで発見)
+
+`src/ryza/ops/weekly.py` の `default_bq_table_missing` は BigQuery 例外を**すべて「テーブル欠落」に丸めている**:
+
+```python
+    except Exception:  # noqa: BLE001 - データセット不在等はすべて欠落扱い
+        return True
+```
+
+したがって R-1 で BigQuery の読み取り権を失った場合、ops-weekly は**エラーを上げずに「テーブルが無い」と判断し、`billing-export-verify` 系の Issue を誤って起票する**。権限喪失が沈黙するのではなく「誤った証拠を出す」形で現れるため、§9.2 の陽性確認では ops-weekly の終了コードだけでなく**起票された Issue の中身**まで見ること。R-0 ② の READER 付与はこの経路を守るためのものである。
+
+---
+
+## 9. 削除系(R-1〜R-3)の実施手順書 — **代表確認後に実行**
+
+**本節は未実施である。** 実行前に代表の確認を得ること。R-0 が完了しているため前提は満たされているが、順序(R-1 → R-2 → R-3)と時間帯の制約は残る。
+
+### 9.0 実施前の共通条件
+
+- **時間帯**: 09:00 JST 帯(日次サイクル)と月曜 01:00 UTC 帯(ops-weekly)を避ける
+- **退避**: 実施前に現行ポリシーを保存する。これがロールバックの原本になる
+  ```bash
+  gcloud projects get-iam-policy ryza-main --format=json > /tmp/ryza-iam.before.json
+  ```
+- **etag 競合の検出**: `remove-iam-policy-binding` は競合時に黙って失敗しうる。**各手順の後に必ず再取得して差分を目視すること**(「消したつもりで消えていない」の唯一の検出手段)
+
+### 9.1 R-1 — プロジェクトレベル `roles/editor` の剥離
+
+```bash
+gcloud projects remove-iam-policy-binding ryza-main \
+  --member="serviceAccount:287074591154-compute@developer.gserviceaccount.com" \
+  --role="roles/editor" --condition=None
+
+# 確認(このコマンドの出力が空であること)
+gcloud projects get-iam-policy ryza-main --format=json \
+  | python3 -c 'import json,sys; p=json.load(sys.stdin); print([b for b in p["bindings"] if b["role"]=="roles/editor" and any("287074591154-compute" in m for m in b["members"])])'
+```
+
+### 9.2 R-1 直後の陽性確認(4系統・**すべて必須**)
+
+```bash
+# ① Bot 死活
+gcloud compute ssh ryza-bot --zone us-west1-a --project ryza-main \
+  --command 'systemctl is-active ryza-bot && journalctl -u ryza-bot -n 30 --no-pager'
+
+# ② 日次サイクル(--dry-run で実 API を叩かずに Secret 取得経路だけ通す)
+gcloud compute ssh ryza-bot --zone us-west1-a --project ryza-main --command \
+  'cd /opt/ryza && sudo RYZA_DATABASE_URL=postgresql://ryza:ryza@localhost:5432/ryza \
+     .venv/bin/python -m ryza.jobs.daily --dry-run'
+
+# ③ ops-weekly(Job 実行。§8.4 のとおり終了コードだけでなく起票内容も見る)
+gcloud run jobs execute ops-weekly --region us-west1 --project ryza-main --wait
+
+# ④ A-18 監査
+gcloud compute ssh ryza-bot --zone us-west1-a --project ryza-main \
+  --command 'systemctl start ryza-a18.service && journalctl -u ryza-a18 -n 50 --no-pager'
+```
+
+②では **jquants / fred / estat の skip 理由がログに出ていないこと**を確認する。理由付き skip が出ていれば Secret 取得が壊れており、R-0 ③ の付与が効いていない。
+
+### 9.3 R-2 — プロジェクトレベル `run.invoker` / `bigquery.dataViewer` の削除
+
+R-0 ①② で同等の権限がリソースレベルに存在するため、この 2 つは既に冗長である。
+
+```bash
+gcloud projects remove-iam-policy-binding ryza-main \
+  --member="serviceAccount:287074591154-compute@developer.gserviceaccount.com" \
+  --role="roles/run.invoker" --condition=None
+
+gcloud projects remove-iam-policy-binding ryza-main \
+  --member="serviceAccount:287074591154-compute@developer.gserviceaccount.com" \
+  --role="roles/bigquery.dataViewer" --condition=None
+```
+
+**陽性テスト(必須・未検証項目の解消)**: compute SA の ID トークンで `ryza-dashboard` を叩き、**拒否されること**を確認する。これは §3 P-3 が残した唯一の未検証点である。
+
+削除と同時に `ops/deploy-ops-weekly.sh:90-93,111-114` をリソースレベル付与へ書き換えること(**保護領域 `deploy_path` のため独立役員審査+承認記録が必要**)。書き換え後の形は R-0 ①② と同じコマンドである。**スクリプトを直さずに削除だけ行うと、次回のデプロイでプロジェクトレベル付与が復活する。**
+
+### 9.4 R-3 — `discord-bot-token` の `secretVersionAdder` 削除
+
+```bash
+gcloud secrets remove-iam-policy-binding discord-bot-token --project ryza-main \
+  --member="serviceAccount:287074591154-compute@developer.gserviceaccount.com" \
+  --role="roles/secretmanager.secretVersionAdder"
+
+# 確認: secretAccessor 1 件だけが残ること
+gcloud secrets get-iam-policy discord-bot-token --project ryza-main --format=json
+```
+
+### 9.5 ロールバック手順
+
+いずれの手順も**再付与で原状復帰できる**(削除したのはバインディングだけで、SA・Secret・リソースは触っていない)。
+
+```bash
+# R-1 の巻き戻し
+gcloud projects add-iam-policy-binding ryza-main \
+  --member="serviceAccount:287074591154-compute@developer.gserviceaccount.com" \
+  --role="roles/editor" --condition=None
+
+# R-2 の巻き戻し
+gcloud projects add-iam-policy-binding ryza-main \
+  --member="serviceAccount:287074591154-compute@developer.gserviceaccount.com" \
+  --role="roles/run.invoker" --condition=None
+gcloud projects add-iam-policy-binding ryza-main \
+  --member="serviceAccount:287074591154-compute@developer.gserviceaccount.com" \
+  --role="roles/bigquery.dataViewer" --condition=None
+
+# R-3 の巻き戻し(用途が判明した場合のみ。原則として戻さない)
+gcloud secrets add-iam-policy-binding discord-bot-token --project ryza-main \
+  --member="serviceAccount:287074591154-compute@developer.gserviceaccount.com" \
+  --role="roles/secretmanager.secretVersionAdder"
+```
+
+IAM の伝播には**最大 7 分**かかりうる。再付与直後に陽性確認が通らなくても、7 分待ってから再試行すること(慌てて追加の権限を撒くと棚卸しの意味が失われる)。原本 `/tmp/ryza-iam.before.json` との照合で、意図しない差分が無いことを最後に確認する。
+
+---
+
+## 10. R-6 / R-7 — クリーンアップ(**本タスクでは未実行・コマンドの文書化のみ**)
+
+AR の旧世代削除は削除系のため実行していない。`ryza` リポジトリは現在 **1902 MB**、クリーンアップポリシーは**未設定**(`gcloud artifacts repositories describe ryza` に `cleanupPolicies` フィールドが無い)。
+
+**必ず `--dry-run` を先に実行し、削除対象の一覧を目視してから適用すること。** 稼働中イメージ(`ryza/dashboard` の `4bb5ba9490cef6a0c3c21a3ce46548dcca0b57cb`、`ryza/ops-weekly` の `:20260802072633`)が対象に入っていないことの確認が要る。
+
+```bash
+# ポリシー定義(タグ付きは最新 5 世代を保持・無タグは 7 日で削除)
+cat > /tmp/ar-cleanup.json <<'JSON'
+[
+  {
+    "name": "delete-untagged",
+    "action": {"type": "Delete"},
+    "condition": {"tagState": "UNTAGGED", "olderThan": "7d"}
+  },
+  {
+    "name": "keep-recent-tagged",
+    "action": {"type": "Keep"},
+    "mostRecentVersions": {"keepCount": 5}
+  }
+]
+JSON
+
+# ① まず dry-run で適用対象を確認する(削除は起きない)
+gcloud artifacts repositories set-cleanup-policies ryza \
+  --location=us-west1 --project ryza-main \
+  --policy=/tmp/ar-cleanup.json --dry-run
+
+# ② 目視で問題なければ dry-run を外して適用
+gcloud artifacts repositories set-cleanup-policies ryza \
+  --location=us-west1 --project ryza-main --policy=/tmp/ar-cleanup.json
+
+# 確認
+gcloud artifacts repositories describe ryza --location=us-west1 --project ryza-main
+```
+
+`ryza-secret-drop` イメージ 2 件と `cloud-run-source-deploy` リポジトリの削除、および R-7(`deploy-ops-weekly.sh` の `latest` タグ廃止・SHA タグ固定への統一)は、いずれも**本タスクの範囲外**として未実施である。R-7 はスクリプト改訂を伴うため、R-2 の書き換えと同じ PR にまとめると審査が 1 回で済む。
