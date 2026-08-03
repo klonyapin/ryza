@@ -216,23 +216,94 @@ def page_cost(conn) -> None:
 
 
 # ── 市場観 ────────────────────────────────────────────────────────────────────
+# regime / key_risks / changes の実データ構造(リサーチ層の生成物)を人間可読に描画する。
+# 未知のドメイン・スタンス・変更種別は生の値をそのまま出す(隠さない)。
+_REGIME_DOMAIN_LABELS = {
+    "jp_equity": "日本株",
+    "us_equity": "米国株",
+    "rates": "金利",
+    "fx": "為替",
+}
+_REGIME_STANCE_LABELS = {
+    "risk_on": "リスクオン",
+    "risk_off": "リスクオフ",
+    "neutral": "中立",
+    "tightening": "引き締め",
+    "easing": "緩和",
+}
+_CHANGE_KIND_LABELS = {
+    "key_risk_confidence": "リスク確信度の更新",
+    "key_risk_added": "リスクの追加",
+    "key_risk_removed": "リスクの解除",
+    "regime_shift": "レジーム変更",
+}
+
+
+def _render_key_risk(risk: dict) -> None:
+    statement = risk.get("statement") or risk.get("risk_id", "(記述なし)")
+    confidence = risk.get("confidence")
+    with st.container(border=True):
+        st.markdown(f"**{risk.get('risk_id', '')}**")
+        st.write(statement)
+        if confidence is not None:
+            pct = min(max(float(confidence), 0.0), 1.0)
+            st.progress(pct, text=f"確信度 {pct:.0%}")
+        if risk.get("observable"):
+            st.caption(f"確認ポイント: {risk['observable']}")
+        if risk.get("refs"):
+            refs = ", ".join(map(str, risk["refs"]))
+            st.caption(f"根拠文書: {len(risk['refs'])} 件(doc_id: {refs})")
+
+
+def _render_change(change: dict) -> None:
+    kind = change.get("kind", "")
+    label = _CHANGE_KIND_LABELS.get(kind, kind)
+    detail = change.get("detail", {})
+    if kind == "key_risk_confidence":
+        st.markdown(
+            f"- **{label}**: `{detail.get('risk_id', '?')}` の確信度 "
+            f"{detail.get('from', '?')} → {detail.get('to', '?')}"
+        )
+    elif detail.get("risk_id"):
+        st.markdown(f"- **{label}**: `{detail['risk_id']}`")
+    else:
+        st.markdown(f"- **{label}**: {detail}")
+
+
 def page_market_view(conn) -> None:
     st.header("市場観(docs.market_view)")
+    st.caption(
+        "リサーチ層が文書・指標から更新している市場の見立て。"
+        "確信度は自己申告値で、発注サイズには使われない(不変原則1)。"
+    )
     view = queries.fetch_current_market_view(conn)
     if view is None:
         st.info("市場観は未初期化")
     else:
         st.caption(f"view_id {view['view_id']} / 版時刻 {view['ts']} / run {view['run_id']}")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("レジーム")
-            st.json(view["regime"])
-        with col2:
-            st.subheader("注目リスク")
-            st.json(view["key_risks"])
-        if view["changes"]:
+        st.subheader("レジーム(市場の基調判断)")
+        regime = view["regime"] or {}
+        cols = st.columns(max(len(regime), 1))
+        for col, (domain, stance) in zip(cols, sorted(regime.items()), strict=False):
+            col.metric(
+                _REGIME_DOMAIN_LABELS.get(domain, domain),
+                _REGIME_STANCE_LABELS.get(stance, stance),
+            )
+        st.subheader("注目リスク")
+        risks = view["key_risks"] or []
+        if not risks:
+            st.info("登録されたリスクなし")
+        for risk in risks:
+            _render_key_risk(risk)
+        changes = view["changes"] or {}
+        applied = changes.get("applied") or []
+        rejected = changes.get("rejected") or []
+        if applied or rejected:
             st.subheader("前版からの差分")
-            st.json(view["changes"])
+            for change in applied:
+                _render_change(change)
+            if rejected:
+                st.caption(f"棄却された変更案: {len(rejected)} 件")
 
     st.subheader("日次スナップショット(確定版)")
     snapshots = queries.fetch_market_view_snapshots(conn, limit=14)
