@@ -263,6 +263,8 @@ def run_jim(
         "scanned": scanned,
         "entries": len(entries),
         "exits": len(exits),
+        # E6(point-in-time ユニバース)の充足状況。リプレイ結果に必ず添える(審査 C-4)。
+        "pit_universe": base.universe_pit_status(conn, as_of=as_of),
         **result.as_dict(),
     }
 

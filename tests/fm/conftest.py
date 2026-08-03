@@ -41,9 +41,15 @@ def _isolate_market(conn):
     """並行ワークツリーの残留を不可視にする(トランザクション内 DELETE・rollback で復元)。
 
     ユニバース走査は分類テーブル全体を読むため、残留行があると件数 assert が壊れる。
+    分類履歴(0026)は追記オンリーでトリガが DELETE を拒むため、DDL がトランザクション
+    内で巻き戻る性質を使って一時的に外す(tests/governance/test_devchat.py と同じ手口。
+    ガードが**有効なまま**であることは tests/test_migrations.py が別途固定する)。
     """
     with conn.cursor() as cur:
         cur.execute("DELETE FROM market.instrument_classification")
+        cur.execute("ALTER TABLE market.instrument_classification_history DISABLE TRIGGER USER")
+        cur.execute("DELETE FROM market.instrument_classification_history")
+        cur.execute("ALTER TABLE market.instrument_classification_history ENABLE TRIGGER USER")
         cur.execute("DELETE FROM market.bars")
 
 

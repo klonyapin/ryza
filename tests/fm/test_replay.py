@@ -16,6 +16,7 @@ import pytest
 from ryza.fm import ben, jim
 from ryza.fm.config import BenConfig
 from ryza.research.llm import FixtureProvider, StructuredLLM
+from ryza.risk.classify import history_coverage_since
 
 BOOK = "DEMO_FUND"
 MODEL = "test-mid"
@@ -27,6 +28,24 @@ REPLAY_DELTA = timedelta(weeks=12)
 @pytest.fixture
 def replay_as_of() -> datetime:
     return datetime.now(UTC) - REPLAY_DELTA
+
+
+def _assert_e6_disclosure(conn, result: dict, as_of: datetime) -> None:
+    """リプレイ結果は E6(point-in-time ユニバース)の充足状況を必ず持つ(審査 C-4)。
+
+    但し書きが外れる条件は「分類履歴が as_of をカバーしていること」だけである。
+    移行(0026)より前の as_of では未達表示のまま — 期待値を固定せず、カバレッジと
+    一致することを検証する(テスト DB の適用時刻に依存させない)。
+    """
+    status = result["pit_universe"]
+    since = history_coverage_since(conn)
+    assert since is not None
+    assert status["replay"] is True and status["source"] == "history"
+    assert status["e6_covered"] == (as_of >= since)
+    if status["e6_covered"]:
+        assert status["note"] is None
+    else:
+        assert "E6" in status["note"]
 
 
 def _ben_cfg(**overrides) -> BenConfig:
@@ -65,6 +84,7 @@ def test_jim_replay_cycle(
     )
 
     result = jim.run_jim(conn, run, book_id=BOOK, as_of=replay_as_of)
+    _assert_e6_disclosure(conn, result, replay_as_of)
     assert result["universe"] == 1 and result["entries"] == 1
     assert result["passed"] == 1 and result["blocked"] == 0
     order = result["orders"][0]
@@ -113,6 +133,7 @@ def test_ben_replay_cycle(
     result = ben.run_ben(
         conn, run, llm, model=MODEL, book_id=BOOK, as_of=replay_as_of, cfg=_ben_cfg()
     )
+    _assert_e6_disclosure(conn, result, replay_as_of)
     assert result["candidates"] == 1 and result["passed"] == 1
     prompt = provider.calls[0]["user"]
     assert "過去の開示" in prompt and "未来のニュース" not in prompt

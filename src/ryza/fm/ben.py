@@ -390,8 +390,11 @@ def run_ben(
     mandate = mandates[FM]
 
     universe = base.load_universe(conn, mandate, as_of=as_of)
+    # E6 の充足状況。**空ユニバースの理由**でもある(履歴が as_of をカバーしていない
+    # なら「静かに空」ではなく未カバーとして表示される — 審査 C-4)。
+    pit = base.universe_pit_status(conn, as_of=as_of)
     if not universe:
-        return {"universe": 0, "skipped": "ユニバースが空(分類待ち)"}
+        return {"universe": 0, "pit_universe": pit, "skipped": "ユニバースが空(分類待ち)"}
     candidates = {c.instrument_id: c for c in universe}
     positions = base.load_positions(conn, book_id)
     held = held_positions(positions, FM)
@@ -429,6 +432,7 @@ def run_ben(
     quarantined_holdings = sum(1 for h in holdings if h["entry_thesis_quarantined"])
     return {
         "universe": len(universe),
+        "pit_universe": pit,
         "candidates": sum(1 for i in intents if i.direction == "buy"),
         "closes": sum(1 for i in intents if i.direction == "close"),
         "quarantined_holdings": quarantined_holdings,
