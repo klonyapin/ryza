@@ -27,7 +27,10 @@
 
 - 永続記憶(``governance.stances``)は role 単位で読み書きする(``personas.recent_stances``)
 - 着任プロンプト(人格・charter)は役職ごとに独立(``personas.assume_role``)
-- 盲検レビュー(戦略昇格・IPS 改訂案の評価)は本モジュールを経由しない別経路
+- 盲検レビュー(戦略昇格・IPS 改訂案の評価)は本モジュールを経由しない別経路であり、
+  さらに ``personas.assume_role(blind=True)`` が本モジュールの書いた stance
+  (``source='office_chat'`` — 0022)を着任プロンプトから外す。会議で聞いた代表の
+  選好が「自分の過去の主張」の形で盲検経路へ透過するのを防ぐ(独立役員審査 C-3)
 
 会議で聞いた他役職の発言が自分の永続記憶に混入しないことは、``role_digest_input`` の
 **決定論フィルタ**(当該 role と代表の発言だけを要約入力にする)と role 別の書込で
@@ -95,6 +98,11 @@ TRANSCRIPT_WINDOW = 30
 
 # 批判義務を負う役職(05 §3: 全ての重要決定に最低1つの懸念を出す)。決定論ガードの対象。
 CRITIC_ROLE = "independent_officer"
+
+# 役員室由来の stance の出所種別(0022 の governance.stances.source)。
+# 0013 minutes.meeting='office_chat' と同じ語で揃える(議事録と stance の出所が
+# 一致していないと、後から突合するときに対応表が要る)。
+CHAT_STANCE_SOURCE = "office_chat"
 
 # ── 重要決定の決定論ガード(2026-08-03 代表指示)────────────────────────────────
 # 独立役員の批判義務(05 §3)を**ルータ(LLM)の判断だけに依存させない**ための保険。
@@ -884,7 +892,14 @@ def record_chat_stances(
     minute_id: int,
     run_id: int,
 ) -> list[int]:
-    """要約済みの主張・懸念を ``governance.stances`` へ追記する(出所 = 当該議事録)。"""
+    """要約済みの主張・懸念を ``governance.stances`` へ追記する(出所 = 当該議事録)。
+
+    ``source='office_chat'``(0022)を明示して書く。役員室は会議形式であり、ここで
+    形成された主張は代表・他役職の発言を聞いた文脈のものなので、盲検レビューの
+    着任(``personas.assume_role(blind=True)``)では読み込ませない — 会議で聞いた
+    代表の選好が「自分の過去の主張」の形で盲検経路へ透過するのを防ぐ(議論規約3・
+    独立役員審査 boardroom-meeting C-3)。
+    """
     return [
         record_stance(
             conn,
@@ -893,6 +908,7 @@ def record_chat_stances(
             summary=s["summary"],
             run_id=run_id,
             minute_id=minute_id,
+            source=CHAT_STANCE_SOURCE,
         )
         for s in stances
     ]
@@ -900,6 +916,7 @@ def record_chat_stances(
 
 __all__ = [
     "BOARDROOM_ROLES",
+    "CHAT_STANCE_SOURCE",
     "CRITIC_ROLE",
     "FACILITATOR_SPEAKER",
     "FACILITATOR_TEXT",

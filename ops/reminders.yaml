@@ -309,8 +309,8 @@ reminders:
       type: issue_create
       title: "governance.decision_vetoes(みなし承認の事後否認記録)を追加する"
       labels: [impl]
-      body: "定款 v0.4 第3条は『みなし承認は通知と同時に発効し、代表はいつでも否認できる。否認された変更は遅滞なく取り消し、派生効果を #運営 へ報告する』と定めるが、この否認を記録する場所がスキーマに無い(独立役員審査 0019 C-1)。governance.decisions は 0007 の UNIQUE(proposal_ref) で 1提案=1行に固定されているため、否認を新規行として INSERT できず、既存行を UPDATE すると `Approved:` トレーラが指す承認記録の意味を遡及的に改変してしまう(A-18 の突合が過去に遡って壊れる)。結果として、監査部門が追う deemed_ratio(否認ゼロの長期継続=形骸化アラート)は構造的に発火不能な状態にある。是正: governance.decisions を参照する追記オンリーの governance.decision_vetoes テーブル(decision_id への FK・否認者・否認理由・取消コミット revert_commit・取消不能な派生効果の参照・run_id、UPDATE/DELETE 禁止トリガは 0013 の minutes/stances と同型)を migrations で追加し、A-18 と deemed_ratio 集計がこれを読む配線を行う。**順序制約: 本テーブルは governance-deemed-writer(みなし承認の記録 writer)の実装 PR より前にマージすること** — writer が先に入ると、否認できない deemed 行が本番データとして積み上がり、後から否認証跡を遡及付与できない。migrations は保護領域のため独立役員審査+みなし承認の手続を経ること。"
-    status: pending
+      body: "定款 v0.4 第3条は『みなし承認は通知と同時に発効し、代表はいつでも否認できる。否認された変更は遅滞なく取り消し、派生効果を #運営 へ報告する』と定めるが、この否認を記録する場所がスキーマに無い(独立役員審査 0019 C-1)。governance.decisions は 0007 の UNIQUE(proposal_ref) で 1提案=1行に固定されているため、否認を新規行として INSERT できず、既存行を UPDATE すると `Approved:` トレーラが指す承認記録の意味を遡及的に改変してしまう(A-18 の突合が過去に遡って壊れる)。結果として、監査部門が追う deemed_ratio(否認ゼロの長期継続=形骸化アラート)は構造的に発火不能な状態にある。是正: governance.decisions を参照する追記オンリーの governance.decision_vetoes テーブル(decision_id への FK・否認者・否認理由・取消コミット revert_commit・取消不能な派生効果の参照・run_id、UPDATE/DELETE 禁止トリガは 0013 の minutes/stances と同型)を migrations で追加し、A-18 と deemed_ratio 集計がこれを読む配線を行う。**順序制約: 本テーブルは governance-deemed-writer(みなし承認の記録 writer)の実装 PR より前にマージすること** — writer が先に入ると、否認できない deemed 行が本番データとして積み上がり、後から否認証跡を遡及付与できない。migrations は保護領域のため独立役員審査+みなし承認の手続を経ること。(完了 2026-08-03: migrations/0021_decision_vetoes.sql — decision_vetoes テーブル + governance.current_decisions view。A-18 / deemed_ratio 集計への配線は未実施のため後続リマインダー governance-deemed-ratio-audit に分離した)"
+    status: done # 2026-08-03 migrations/0021 で対応(順序制約どおり deemed writer と同一 PR・先行定義)
 
   - id: governance-deemed-writer
     what: "みなし承認を governance.decisions に decision='deemed' で記録する writer の実装(0019 でスキーマは通ったが書き手が居ない。独立役員審査 0019 C-3)"
@@ -321,7 +321,55 @@ reminders:
       type: issue_create
       title: "みなし承認の記録 writer(decision='deemed')を実装する"
       labels: [impl]
-      body: "0019 で governance.decisions.decision に 'deemed' を許容したが、実際にその行を書くコードが無いため、定款 v0.4 第3条3号の記録要件(『みなし承認も governance.decisions に deemed として記録し、監査対象とする』)は未充足のままである(独立役員審査 0019 C-3)。実装内容: ①#承認 への PR リンク付き通知(src/ryza/bot/approvals.py 経路)と同一トランザクションで deemed 行を INSERT する、②decided_by は 'system:<source>' 形式(0019 の decisions_deemed_system_actor_check)、③3専決事項の kind には付けない(decisions_deemed_not_reserved_check がスキーマ側で拒否する — アプリ側でも事前に弾いて分かりやすいエラーにする)、④proposal_ref は PR URL 等の一意参照とし二重記録を UNIQUE で防ぐ、⑤A-18-1 の `Approved:` トレーラ突合が deemed 行を承認記録として受理することを確認。**順序制約: governance-decision-vetoes-schema(否認記録テーブル)のマージ後に着手すること** — 否認を記録できない状態で deemed 行を量産すると、代表が否認権を行使しても証跡を残せない。"
+      body: "0019 で governance.decisions.decision に 'deemed' を許容したが、実際にその行を書くコードが無いため、定款 v0.4 第3条3号の記録要件(『みなし承認も governance.decisions に deemed として記録し、監査対象とする』)は未充足のままである(独立役員審査 0019 C-3)。実装内容: ①#承認 への PR リンク付き通知(src/ryza/bot/approvals.py 経路)と同一トランザクションで deemed 行を INSERT する、②decided_by は 'system:<source>' 形式(0019 の decisions_deemed_system_actor_check)、③3専決事項の kind には付けない(decisions_deemed_not_reserved_check がスキーマ側で拒否する — アプリ側でも事前に弾いて分かりやすいエラーにする)、④proposal_ref は PR URL 等の一意参照とし二重記録を UNIQUE で防ぐ、⑤A-18-1 の `Approved:` トレーラ突合が deemed 行を承認記録として受理することを確認。**順序制約: governance-decision-vetoes-schema(否認記録テーブル)のマージ後に着手すること** — 否認を記録できない状態で deemed 行を量産すると、代表が否認権を行使しても証跡を残せない。(完了 2026-08-03: src/ryza/governance/decisions.py の record_deemed_approval / record_veto / current_decision。②③④は実装済み。①#承認 通知経路との同一トランザクション配線と⑤A-18-1 の受理確認は未実施 — 後続リマインダー governance-deemed-notice-wiring に分離した)"
+    status: done # 2026-08-03 src/ryza/governance/decisions.py で writer を実装(0021 と同一 PR・順序制約充足)
+
+  - id: governance-deemed-notice-wiring
+    what: "みなし承認 writer を #承認 通知経路へ配線(通知と記録を同一トランザクションに置く)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "record_deemed_approval を #承認 通知経路へ配線する"
+      labels: [impl]
+      body: "src/ryza/governance/decisions.record_deemed_approval は実装済みだが、まだ呼び出す経路が無く、みなし承認の実運用は手動記録のままである(governance-deemed-writer の①⑤が未了)。定款 v0.4 第3条は『通知と同時に発効』を定め、通知を欠いた発効は A-18 の無承認変更にあたるため、通知の投入(press.outbox / src/ryza/bot/approvals.py 経路)と deemed 行の INSERT は**同一トランザクション**に置く必要がある(片方だけ成功する状態を作らない)。実装内容: ①保護領域変更の PR が起票されたときに #承認 へ PR リンク付き通知を投げ、同一トランザクションで record_deemed_approval(proposal_ref=PR URL, notice_ref=通知メッセージ ID) を呼ぶ、②A-18-1 の `Approved:` トレーラ突合が deemed 行を承認記録として受理することを確認する(現状 A-18 はトレーラの存在検査までで decisions の実在照会をしていない)。**実在照合を実装するときは governance.decisions ではなく governance.current_decisions を読み、effective_decision='vetoed' の行を承認記録として受理しないこと**(独立役員審査 0021 C-5)— decisions を直読すると、代表が否認した承認を A-18 が承認として受理し、否認された変更が無承認変更として検出されない、③#承認 の否認ボタン → decisions.record_veto / record_veto_withdrawal の配線(オーナー検証・expected_proposal_ref 照合を通す)。"
+    status: pending
+
+  - id: governance-deemed-ratio-audit
+    what: "監査部門の deemed_ratio 集計(形骸化アラート)を governance.current_decisions から実装する"
+    conditions:
+      - type: date_after
+        date: "2026-09-07"
+    action:
+      type: issue_create
+      title: "deemed_ratio(みなし承認率・否認ゼロ継続)の監査集計を実装する"
+      labels: [impl]
+      body: "config/governance.yaml の deemed_approval.audit_metric は deemed_ratio を監査指標に指定し、定款 v0.4 第3条『形骸化の防止』は『監査部門はみなし承認率(否認ゼロの継続)を追跡し、長期継続は通知が読まれていない兆候として代表へアラートする』と定める。0021 で governance.decision_vetoes と governance.current_decisions view が入り、集計に必要なデータは揃ったが、集計コード自体は未実装である。実装内容: ①governance.current_decisions を読み、期間内の deemed 件数 / 否認件数 / 否認ゼロの連続期間を算出する監査検査(src/ryza/audit/)、②閾値(例: 否認ゼロが N 件・M 週継続)を config/governance.yaml に持たせ、超過時に #承認 または #運営 へアラート、③議論規約5(懸念ゼロの連続は監査アラート対象)と同型の扱いにする。前提: governance-deemed-notice-wiring が入って deemed 行が実際に積まれていること(0件のまま集計しても意味が無い)。"
+    status: pending
+
+  - id: veto-origin-column
+    what: "governance.decision_vetoes に否認の出所を表す origin 列を足すか判断する(独立役員審査 0021 C-8)"
+    conditions:
+      - type: date_after
+        date: "2026-08-24"
+    action:
+      type: issue_create
+      title: "decision_vetoes に origin 列(否認の出所)を追加するか判断する"
+      labels: [impl]
+      body: "0021 は decision_vetoes.run_id を NULL 可とした。理由は『否認は代表の作為(意思表示)でありジョブの生成物ではないため、生成元 Run という概念が本来的に無い』であり、独立役員審査 0021 C-8 はこの結論を妥当と認めた(当初コメントの『Discord 経路は Run を持たない』は事実誤認 — press.outbox.run_id は NOT NULL で、Discord 経路でも start_run で Run は取得できる)。ただし run_id が NULL であることは『Run が無い』のか『埋め忘れ』なのかを区別しない。是正候補: origin 列(discord_button|cli|job|migration 等)を足し、どの経路から否認が記録されたかを明示する。判断材料: ①実際に否認が記録される経路が何種類できたか(#承認 のボタン配線後に確定する — governance-deemed-notice-wiring)、②監査(deemed_ratio・A-18)が出所別の集計を必要とするか。必要が無ければ『足さない』を明示的に決めて本リマインダーを done にすること(未決のまま放置しない)。migrations は保護領域のため独立役員審査+みなし承認の手続を経ること。"
+    status: pending
+
+  - id: governance-role-separation
+    what: "governance スキーマ(承認・否認・議事録)の DB ロール分離を実弾移行前提条件に加える(独立役員審査 0021 C-9)"
+    conditions:
+      - type: date_after
+        date: "2026-09-01"
+    action:
+      type: issue_create
+      title: "governance スキーマの DB ロール分離(実弾移行前提条件)"
+      labels: [impl]
+      body: "0021 は decision_vetoes・decisions・minutes・stances に追記オンリートリガ+REVOKE UPDATE,DELETE,TRUNCATE を掛けたが、**REVOKE は所有者ロールには効かない**。現構成はアプリ・ジョブ・マイグレーションが単一ロール(ryza)で動き、そのロールがこれらの表の所有者であるため、REVOKE は実質 no-op であり、所有者は `ALTER TABLE ... DISABLE TRIGGER` でトリガ自体を無効化できる(独立役員審査 0021 C-9(i))。つまり承認・否認・議事録の追記オンリー性は『アプリが行儀よく振る舞うこと』にしか依存していない。既存の db-role-separation-webhook-url(配送コンポーネントの webhook URL 読取制限)は governance スキーマを対象に含めていないため、本件を別リマインダーとして登録する。是正: ①governance スキーマの表を専用の所有者ロールに移し、アプリロールには INSERT/SELECT のみを付与する、②マイグレーション実行ロールのみが DDL を持つ、③A-18 か別監査で『トリガが有効であること』を定期検査する(ロール分離が完了するまでの補償統制として先に入れてもよい)。デモ期間は単一利用者 VM・非公開 DB のため残余リスクを受容するが、実弾移行の前提条件とする。"
     status: pending
 
   - id: db-role-separation-webhook-url
@@ -356,8 +404,8 @@ reminders:
       type: issue_create
       title: "governance.stances に出所種別(source_kind)を追加し、盲検着任で会議由来を除外する"
       labels: [impl]
-      body: "独立役員審査(docs/reviews/boardroom-meeting-independent-review.md C-3)の後続是正。役員室が会議形式になったことで、stances には『会議で他役職・代表の発言を聞いた文脈で形成された主張』が入る。盲検レビュー(戦略昇格・IPS 改訂案の評価。議論規約3)で独立役員が着任するとき、この会議由来の stance を読むと代表の選好が盲検経路へ透過しうる。実装内容: ①migrations/ に governance.stances.source_kind(例: office_meeting|committee|review|manual)を追加する保護領域マイグレーション(独立役員審査+Approved トレーラ必須)、②boardroom.record_chat_stances は office_meeting を書く、③personas.recent_stances に除外オプションを足し、盲検着任経路は会議由来を読まない、④既存行のバックフィル方針(既存は office_meeting 相当か unknown か)を決めて記録。**順序: ①のマイグレーションは保護領域のため独立役員審査を先に通すこと**"
-    status: pending
+      body: "独立役員審査(docs/reviews/boardroom-meeting-independent-review.md C-3)の後続是正。役員室が会議形式になったことで、stances には『会議で他役職・代表の発言を聞いた文脈で形成された主張』が入る。盲検レビュー(戦略昇格・IPS 改訂案の評価。議論規約3)で独立役員が着任するとき、この会議由来の stance を読むと代表の選好が盲検経路へ透過しうる。実装内容: ①migrations/ に governance.stances.source_kind(例: office_meeting|committee|review|manual)を追加する保護領域マイグレーション(独立役員審査+Approved トレーラ必須)、②boardroom.record_chat_stances は office_meeting を書く、③personas.recent_stances に除外オプションを足し、盲検着任経路は会議由来を読まない、④既存行のバックフィル方針(既存は office_meeting 相当か unknown か)を決めて記録。**順序: ①のマイグレーションは保護領域のため独立役員審査を先に通すこと**(完了 2026-08-03: migrations/0022_stances_source.sql。列名は source、語彙は direct|office_chat|committee — 0013 minutes.meeting の語と揃えた。②boardroom.record_chat_stances は source='office_chat' を書く。③personas.recent_stances に include_sources(allowlist)、assume_role に blind 引数を追加し、盲検着任は personas.BLIND_INCLUDED_SOURCES(現状 direct のみ)に載る出所だけを読む — 独立役員審査 0021 C-6 により denylist から allowlist へ変更(新しい出所・source 指定漏れが盲検へ fail-open で透過するため)。④既存行は DEFAULT 'direct' 据え置き — 本番・テスト DB とも stances は 0 行で誤ラベルが生じず、追記オンリー表への由来別バックフィルは UPDATE 禁止トリガの一時無効化を要するため見送った)"
+    status: done # 2026-08-03 migrations/0022 + personas.assume_role(blind=) で対応
 
   - id: governance-protect-deploy-dashboard
     what: "ops/deploy-dashboard.sh を config/governance.yaml の protected_areas へ登録(独立役員審査 0020 C-4)"

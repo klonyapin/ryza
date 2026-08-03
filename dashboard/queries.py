@@ -476,19 +476,26 @@ def load_site_status(path: Path | None = None) -> dict[str, Any] | None:
 
 # ── 承認・通知(組織サイト化 — 2026-08-03 代表指示)────────────────────────────
 def fetch_decisions(conn: psycopg.Connection, *, limit: int = 50) -> list[dict[str, Any]]:
-    """承認フローの決定履歴(``governance.decisions``・0007)。
+    """承認フローの現決定(``governance.current_decisions`` view・0021)。
 
-    みなし承認(定款第3条 v0.4)は ``decision='deemed'`` で記録される設計
-    (governance.yaml deemed_approval)。現行スキーマの CHECK は
-    approve|reject|question のみのため deemed 行はまだ存在しないが、UI 側は
-    decision 値で「みなし/明示」を区別する(スキーマ拡張時に自動追随)。
+    **``governance.decisions`` を直読しない**(独立役員審査 0021 C-5): 直読すると
+    代表が否認した承認が「承認済み」のまま表示され、ダッシュボードが定款第3条の
+    否認権が行使された事実を隠す。view は否認履歴を合成し、否認中の決定に
+    ``effective_decision='vetoed'`` / ``is_vetoed=true`` を返す。
+
+    みなし承認(定款第3条 v0.4)は ``recorded_decision='deemed'``(0019)。
+    明示承認との区別は監査部門の deemed_ratio(形骸化アラート)の前提であり、
+    UI 側もこの値で「みなし/明示」を出し分ける。
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, proposal_ref, kind, decision, decided_by, note, decided_at
-            FROM governance.decisions
-            ORDER BY id DESC
+            SELECT decision_id AS id, proposal_ref, kind,
+                   recorded_decision AS decision, effective_decision, is_vetoed,
+                   decided_by, note, decided_at,
+                   veto_kind, vetoed_by, veto_reason, revert_commit, vetoed_at
+            FROM governance.current_decisions
+            ORDER BY decision_id DESC
             LIMIT %s
             """,
             (limit,),
