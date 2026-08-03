@@ -45,6 +45,7 @@ ALL_PAGES = [
     "組織",
     "規則",
     "役員室",
+    "開発室",
     "開発ステータス",
 ]
 
@@ -149,6 +150,20 @@ def _seed(conn, run, *, sufficient: bool = True) -> None:
             VALUES ('approval', %s, false, %s)
             """,
             (Jsonb({"title": "承認依頼: T-018"}), run.run_id),
+        )
+        # 開発室(0024)。追記オンリーのため残留行はトリガを外して消す(rollback で復元)。
+        cur.execute("ALTER TABLE ops.dev_chat DISABLE TRIGGER USER")
+        cur.execute("DELETE FROM ops.dev_chat")
+        cur.execute("ALTER TABLE ops.dev_chat ENABLE TRIGGER USER")
+        # 1 件目は 10 分前の未中継(中継が止まっている状態 — 独立役員審査 中-7 の
+        # 滞留警告の系統)。残り 2 件は直近の会話。
+        cur.execute(
+            """
+            INSERT INTO ops.dev_chat (sender, body, created_at) VALUES
+                ('representative', '滞留している連絡', now() - interval '10 minutes'),
+                ('representative', '代表からの連絡', now()),
+                ('design_lead', '設計リードの返信', now())
+            """
         )
 
 
@@ -408,3 +423,44 @@ def test_approvals_summary_row_counts_and_oldest_age(app):
     text = _texts(app("承認・通知"))
     assert "未配送の通知" in text
     assert "最古" in text
+
+
+# ── 開発室(0024・代表指示 2026-08-03)────────────────────────────────────────
+def test_dev_chat_declares_the_asynchronous_contract(app):
+    """ページ冒頭で「非同期・実働はセッション側」を明示する(代表の期待値管理)。"""
+    captions = [str(c.value) for c in app("開発室").caption]
+    notice = next((c for c in captions if "設計リードへの連絡窓口" in c), None)
+    assert notice is not None, captions
+    assert "非同期" in notice and "セッション側" in notice
+
+
+def test_dev_chat_renders_thread_in_chronological_order(conn, app):
+    bodies = [str(m.value) for m in app("開発室").markdown]
+    assert "代表からの連絡" in bodies and "設計リードの返信" in bodies
+    # 代表 → 設計リードの順(新しい順にしない)。
+    assert bodies.index("代表からの連絡") < bodies.index("設計リードの返信")
+
+
+def test_dev_chat_shows_relay_state_of_representative_messages(app):
+    captions = [str(c.value) for c in app("開発室").caption]
+    assert any("中継待ち" in c for c in captions), captions
+
+
+def test_dev_chat_warns_when_relay_is_stalled(app):
+    """独立役員審査 中-7: 中継が止まっていることを「中継待ち」で沈黙させない。"""
+    at = app("開発室")
+    warnings = [str(w.value) for w in at.warning]
+    stalled = next((w for w in warnings if "中継されていない" in w), None)
+    assert stalled is not None, warnings
+    assert "1 件" in stalled and "bot.devchat.relay" in stalled
+    # 個々の吹き出しにも滞留を出す(赤字)。
+    assert any(":red[" in str(c.value) for c in at.caption)
+
+
+def test_dev_chat_input_appends_to_the_thread(conn, app):
+    at = app("開発室")
+    at.chat_input[0].set_value("追加の連絡").run()
+    assert not at.exception
+    from ryza.governance import devchat
+
+    assert devchat.fetch_thread(conn)[-1].body == "追加の連絡"
