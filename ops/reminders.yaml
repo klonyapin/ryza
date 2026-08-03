@@ -192,7 +192,31 @@ reminders:
       type: issue_create
       title: "governance.decisions に審査対象 SHA を追加し A-18 の reviewed と突合する"
       labels: [impl]
-      body: "様式 v2 の `reviewed=<sha40>` はトレーラの書き手の申告であり、『独立審査が実際にその SHA を見た』ことを A-18 は独立に確認できない。現在の機械検査は『reviewed が当該マージの第2親の祖先であること』までで、`reviewed=<マージ直前のブランチ head>` と書けば被覆は v1 と同じになる(独立役員審査 PoC 再現済み)。恒久対策は照合先を作ること: ①`governance.decisions`(または新テーブル)に審査対象コミット SHA 列を追加するマイグレーション(保護領域 — schema)、②独立審査エージェント/承認フロー(`src/ryza/governance/notices.py`・`src/ryza/bot/approvals.py`)が審査対象 SHA を記録する、③A-18-1 が `reviewed` と承認記録の SHA を突合し、不一致は承継の起点にしない(fail-safe)。②の記録主体が人間の手作業のままなら申告性は解消されないため、審査エージェントの出力から機械的に埋まる経路にすること。出典: docs/reviews/g-a18-protect-independent-review.md「トレーラ v2 審査記録」重要-3。**追記(2026-08-04・後続配線審査 後-2)**: 同じ穴が CLI 側にもある。`python -m ryza.governance.decisions --deemed-for-pr`/`--kind pr` は `--review <独立役員審査の参照>` を必須にしたが、**値の実在は検査せず**(`--review 嘘` が通る)、通知本文の文字列として残るだけで `governance.decisions` の構造化列にはならない。したがって「審査を経たと書かせる」抑止であって「審査を経たことの証明」ではなく、事後の機械照合もできない。本タスクで審査対象 SHA 列を足すときに、**`--review` の値も同じ構造化列(審査参照 + 対象 SHA)に載せ、実在検査(docs/reviews のファイル実在・審査エージェントの出力との突合)を掛ける**こと。列が入るまでの間、A-18 は審査の有無を検査できない。"
+      body: "様式 v2 の `reviewed=<sha40>` はトレーラの書き手の申告であり、『独立審査が実際にその SHA を見た』ことを A-18 は独立に確認できない。現在の機械検査は『reviewed が当該マージの第2親の祖先であること』までで、`reviewed=<マージ直前のブランチ head>` と書けば被覆は v1 と同じになる(独立役員審査 PoC 再現済み)。恒久対策は照合先を作ること: ①`governance.decisions`(または新テーブル)に審査対象コミット SHA 列を追加するマイグレーション(保護領域 — schema)、②独立審査エージェント/承認フロー(`src/ryza/governance/notices.py`・`src/ryza/bot/approvals.py`)が審査対象 SHA を記録する、③A-18-1 が `reviewed` と承認記録の SHA を突合し、不一致は承継の起点にしない(fail-safe)。②の記録主体が人間の手作業のままなら申告性は解消されないため、審査エージェントの出力から機械的に埋まる経路にすること。出典: docs/reviews/g-a18-protect-independent-review.md「トレーラ v2 審査記録」重要-3。**追記(2026-08-04・後続配線審査 後-2)**: 同じ穴が CLI 側にもある。`python -m ryza.governance.decisions --deemed-for-pr`/`--kind pr` は `--review <独立役員審査の参照>` を必須にしたが、**値の実在は検査せず**(`--review 嘘` が通る)、通知本文の文字列として残るだけで `governance.decisions` の構造化列にはならない。したがって「審査を経たと書かせる」抑止であって「審査を経たことの証明」ではなく、事後の機械照合もできない。本タスクで審査対象 SHA 列を足すときに、**`--review` の値も同じ構造化列(審査参照 + 対象 SHA)に載せ、実在検査(docs/reviews のファイル実在・審査エージェントの出力との突合)を掛ける**こと。列が入るまでの間、A-18 は審査の有無を検査できない。(完了 2026-08-04 — ①migrations/0029 が `governance.decisions` に `reviewed_sha`(40桁hex小文字の CHECK・NULL 可)と `review_ref`(空白のみ禁止)を追加し、`governance.current_decisions` view にも通した。**既存行は NULL のままで後から埋められない**(0021 の追記オンリートリガが UPDATE を拒否する)ため、過去の決定を遡って審査済みに見せる経路は開かない。②`record_deemed_approval` / `announce_deemed_approval` が両列を受け取り、CLI は `--deemed-for-pr` で **PR の head SHA を gh から取得して自動格納**(手入力させないことで発効時刻に固定する)・`--review` を `review_ref` に構造化・`--reviewed-sha` の手動指定も可。審査参照はリポジトリ内パス形式なら実在を検査するが**警告のみで拒否しない**(遡及登録とリポジトリ外の審査を塞がないため)。③監査に **A-18-8**(src/ryza/audit/a18.check_reviewed_sha_agreement)を新設 — トレーラ行単位で `reviewed=<sha40>` と参照先決定の `reviewed_sha` が**両方ある**ものを突合し、不一致を所見にする(分母 = 突合できた件数を緑にも必ず出す。記録側 NULL の件数は notes で開示)。**元の③との差異**: リマインダーは『不一致は承継の起点にしない(fail-safe)』としていたが、実装は**所見にとどめ承継判定は変えていない**(設計リード指示)。理由は爆風半径 —— 承継を落とすと1件の記入ミスが PR 全体のコミットを一斉に無承認変更へ変え、A-18-1 の信号が埋もれる。fail-safe へ強めるかは移行後の実測(不一致の発生源が記入ミスか改変か)を見て再判断すること。**残る限界**: `reviewed_sha` も `reviewed=` も発効を起票した側が書く申告であり、**審査エージェント自身の署名は無い** —— 同じ値を両方に書けば一致する。捕まえられるのは片側だけの改変・取り違え(別 PR の SHA の複写、マージ後のトレーラ書き換え)に限られる。②の『審査エージェントの出力から機械的に埋まる経路』は未達で、後続の `reviewed-sha-from-review-agent` として残す)"
+    status: done # 2026-08-04 0029 + writer/CLI + A-18-8 まで。審査エージェント出力からの自動記入は未了(後続リマインダー)
+
+  - id: reviewed-sha-from-review-agent
+    what: "審査対象 SHA を**審査エージェントの出力から**機械的に埋める(decision-reviewed-sha の残り — 申告性の本丸)"
+    conditions:
+      - type: date_after
+        date: "2026-09-01"
+    action:
+      type: issue_create
+      title: "reviewed_sha を独立審査エージェントの出力から記録する(起票者の申告をやめる)"
+      labels: [impl]
+      body: "decision-reviewed-sha は照合先(migrations/0029 の `governance.decisions.reviewed_sha` / `review_ref`)と突合(A-18-8)まで実装したが、**値の書き手は依然として発効を起票した設計リードである**。`--deemed-for-pr` が gh から head SHA を取るのは手入力の排除であって、審査主体の証言ではない —— 起票者がトレーラと記録の両方に同じ嘘を書けば A-18-8 は一致で通る。したがって現状の統制は『片側だけの改変・取り違えの検出』であり、『独立審査が実際にその SHA を見たことの証明』ではない。実装内容: ①独立審査エージェント(プロンプト分離で走る審査ジョブ)が意見書を出すときに、審査対象コミット SHA を機械可読な形(docs/reviews の front matter か専用テーブル)で出力する、②`--deemed-for-pr` / `announce_deemed_approval` はその出力を読んで `reviewed_sha` / `review_ref` を埋め、**起票者が渡した値と食い違えば発効を止める**(ここは fail-safe にできる — 起票者の申告ではなく審査側の記録が正になるため)、③A-18-8 を『審査記録に由来する reviewed_sha の割合』の開示に拡張する。判断材料: 発火時点の A-18 報告で `compared_reviewed_shas` と `trailer_only_reviewed` の推移(突合が実際に働いている件数)を確認すること。前提: 審査エージェントの実行が現状ワークツリー内の手動起動であるため、②の自動化には審査ジョブの成果物置き場の確定が要る。出典: docs/reviews/g-a18-protect-independent-review.md 重要-3、ops/reminders.yaml decision-reviewed-sha の完了注記。"
+    status: pending
+
+  - id: reviewed-sha-mismatch-fail-safe
+    what: "A-18-8 の不一致に対する fail-safe 全面化(承継の起点にしない)の要否 — 中間案(記録側採用)の実測後に再判断"
+    conditions:
+      - type: date_after
+        date: "2026-10-01"
+    action:
+      type: issue_create
+      title: "A-18-8 の不一致を承継の遮断(fail-safe 全面化)に格上げするか判断する"
+      labels: [governance]
+      body: "**中間案は採用済み(2026-08-04 独立役員審査 SHA-1 + 設計リード裁定)**: トレーラと承認記録の両方に SHA があり食い違う場合、A-18-1 の承継範囲は**記録側 `reviewed_sha`** を採用する(`a18.resolve_reviewed_scope`)。記録側は発効通知の時点に固定され追記オンリーで改変困難であり、48h 異議期間が実際に係属した内容を指すため。したがって『発効通知の後に積んだコミットをマージ時トレーラで承認済みにする』経路は塞がれている。**残る再判断対象は fail-safe の全面化**、すなわち『不一致があればその起点 PR の承継を全部落とす』へ強めるかである。現状は承継を記録側まで縮めるだけで、記録側 SHA の祖先であるコミットは承継され続ける。判断材料: ①発火時点までに A-18-8 が出した不一致の件数と原因内訳(記入ミス / 別 PR の SHA の複写 / マージ後のトレーラ書き換え)、②`compared_reviewed_shas`(突合できた**決定**数)— **不一致 0 件は『穴が無い』ではなく『まだ突合が働いていない』ことが多い**ので分母を先に見る、③`record_only_reviewed`(記録側にはあるがトレーラが v1 = 承継が無制限のまま A-18-8 が無音になる決定数)。③が高止まりしているなら、fail-safe 全面化より先に `trailer-v1-sunset`(reviewed 必須化)を進めるほうが効く。**未着手の関連課題**(審査の敵対的検証より): `reviewed_sha` がマージの第2親と一致する件数(= 実質的に被覆無制限)と、squash/rebase マージで A-18-1 が承継を拒否する一方 A-18-8 が緑になるケースの開示は未実装 — 緑の意味を正しく読ませるには本判断と同時に手当てすること。"
     status: pending
 
   - id: risk-limits-state-freshness-gate

@@ -324,6 +324,8 @@ def announce_deemed_approval(
     title: str | None = None,
     role: str = DEFAULT_NOTICE_ROLE,
     channel: str = APPROVAL_CHANNEL,
+    reviewed_sha: str | None = None,
+    review_ref: str | None = None,
 ) -> DeemedNotice:
     """``#承認`` への通知投入と ``deemed`` 行の記録を**同一トランザクション**で行う。
 
@@ -334,6 +336,10 @@ def announce_deemed_approval(
         run_id: 投入元の Run(``press.outbox.run_id`` は NOT NULL)
         source: 発効源。``decided_by`` は ``'system:<source>'`` になる
         note / title / role / channel: 補足・見出し・発信者役職・通知先チャンネル
+        reviewed_sha / review_ref: 審査対象コミットと独立役員審査の参照(0029)。
+            承認記録の構造化列に入り、監査 A-18-8 が ``Approved:`` トレーラの
+            ``reviewed=<sha40>`` と突合する。通知本文への表示は呼び出し側の責務
+            (:func:`ryza.governance.decisions.build_pr_notice`)
 
     Raises:
         AtomicityError: autocommit 接続(原子性を保証できない)
@@ -345,13 +351,16 @@ def announce_deemed_approval(
     記録側が失敗すれば SAVEPOINT ごと巻き戻り、通知も残らない。
     """
     _require_shared_transaction(conn)
-    # embed の組立は書込の前に済ませる(未知 kind・空 notice で outbox 行を作らない)。
+    # embed の組立と SHA 様式の検証は書込の前に済ませる(未知 kind・空 notice・様式不備の
+    # reviewed_sha で outbox 行を作らない)。
     embed = build_deemed_notice_embed(proposal_ref, kind, notice, title=title, role=role)
+    reviewed_sha = decisions_mod.normalize_reviewed_sha(reviewed_sha)
     with conn.transaction():
         outbox_id = enqueue(conn, channel, embed, run_id)
         notice_ref = f"{NOTICE_REF_PREFIX}{outbox_id}"
         decision = decisions_mod.record_deemed_approval(
-            conn, proposal_ref, kind, notice_ref, source=source, note=note
+            conn, proposal_ref, kind, notice_ref, source=source, note=note,
+            reviewed_sha=reviewed_sha, review_ref=review_ref,
         )
     return DeemedNotice(decision=decision, outbox_id=outbox_id, notice_ref=notice_ref)
 
