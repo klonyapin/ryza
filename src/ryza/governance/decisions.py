@@ -37,6 +37,15 @@ governance.decisions に deemed として記録し、監査対象とする」)�
 ``#承認`` への通知投入と ``deemed`` 行の記録を1トランザクションで行う
 (実装は :mod:`ryza.governance.notices`)。手で ``#承認`` に投稿してから記録を忘れる、
 という「通知なき発効/記録なき通知」を経路として消すのが目的である。
+
+PR 番号だけで発効させる簡易形(参照・種別・文面を ``gh api`` の結果で埋める)::
+
+    python -m ryza.governance.decisions --deemed-for-pr 99 \\
+        --review docs/reviews/xxxx-independent-review.md
+
+**この CLI を叩き忘れると通知なき発効になる**。自動起票(PR イベント駆動)は未実装で
+(ops/reminders.yaml ``deemed-auto-announce``)、叩き忘れは監査 A-18-7(保護領域 PR の
+承認記録漏れ)が週次で事後検出する —— 簡易形はその頻度を下げるための入口側の手当てである。
 """
 
 from __future__ import annotations
@@ -46,6 +55,7 @@ import logging
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 import psycopg
 
@@ -471,6 +481,123 @@ def current_decision_by_id(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# CLI 補助: PR 番号から通知文面を組み立てる(--deemed-for-pr)
+#
+# 保護領域 PR の起票を検知して自動で通知する基盤(GitHub webhook)は無い
+# (ops/reminders.yaml ``deemed-auto-announce``)。次善として、設計リードが PR 番号1つで
+# 発効通知を出せる簡易形を用意する —— 参照(PR URL)と文面の入力を機械が埋めることで、
+# 「手で打ち直すのが面倒だから後で」による叩き忘れ(= 通知なき発効)を減らす。
+# 叩き忘れそのものは監査 A-18-7(保護領域 PR の承認記録漏れ)が事後に検出する。
+# ────────────────────────────────────────────────────────────────────────────
+#: ``gh`` 呼び出しのタイムアウト(秒)。ネットワーク待ちで CLI を固まらせない。
+GH_TIMEOUT = 30
+
+#: 通知本文に列挙する変更ファイルの上限(embed のフィールド長に収める)。
+NOTICE_FILE_LIMIT = 12
+
+
+class PullRequestLookupError(RuntimeError):
+    """``gh`` から PR 情報を取得できない(未認証・番号違い・クローズ済み等)。"""
+
+
+@dataclass(frozen=True)
+class PullRequestRef:
+    """みなし承認の対象となる PR の最小情報。"""
+
+    number: int
+    url: str
+    title: str
+    state: str
+    merged: bool
+    files: tuple[str, ...]
+
+
+def _gh_api(path: str, *, paginate: bool = False, jq: str | None = None) -> Any:
+    """``gh api`` を実行して JSON を返す(失敗は :class:`PullRequestLookupError`)。
+
+    ``gh`` を使うのは、認証(トークンの保管・更新)を自前で持たないためである。
+    監査 A-18 が GitHub API 照合を「実弾移行の前提条件」として未実装にしているのと同じ
+    理由で、ここでも API クライアントは足さない。
+    """
+    import json
+    import shutil
+    import subprocess
+
+    if shutil.which("gh") is None:
+        raise PullRequestLookupError(
+            "gh CLI が見つからない(--deemed-for-pr は gh api を使う)。"
+            "--proposal-ref / --kind / --notice を手で指定すれば gh 無しでも発効できる"
+        )
+    cmd = ["gh", "api", path]
+    if paginate:
+        cmd.append("--paginate")
+    if jq:
+        cmd += ["--jq", jq]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=GH_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        raise PullRequestLookupError(f"gh api がタイムアウトした: {path}") from exc
+    if out.returncode != 0:
+        raise PullRequestLookupError(f"gh api に失敗した({path}): {out.stderr.strip()}")
+    if jq:
+        return [ln for ln in out.stdout.splitlines() if ln.strip()]
+    return json.loads(out.stdout)
+
+
+def fetch_pull_request(pr_number: int, *, repo: str | None = None) -> PullRequestRef:
+    """PR のタイトル・URL・状態・変更ファイルを ``gh api`` で取得する。
+
+    ``repo`` 省略時は ``:owner/:repo``(gh がカレントのリポジトリへ解決する)。
+    **クローズ済み(未マージ)の PR は拒否する** —— 取り下げられた提案の発効を通知しても
+    取消義務(定款第3条2号)だけが残る。オープンな PR を対象にできるのは意図どおりで、
+    みなし承認は「PR 起票時に通知して発効する」運用だからである。
+    """
+    slug = repo or ":owner/:repo"
+    data = _gh_api(f"repos/{slug}/pulls/{pr_number}")
+    if not isinstance(data, dict):
+        raise PullRequestLookupError(f"PR #{pr_number} の応答が想定外の形式")
+    state = str(data.get("state") or "")
+    merged = bool(data.get("merged"))
+    if state == "closed" and not merged:
+        raise PullRequestLookupError(
+            f"PR #{pr_number} はクローズ済み(未マージ)。取り下げられた提案を発効させない"
+        )
+    try:
+        files = _gh_api(f"repos/{slug}/pulls/{pr_number}/files", paginate=True, jq=".[].filename")
+    except PullRequestLookupError:
+        files = []  # 一覧は文面の補助でしかない。取れなくても発効そのものは妨げない
+    return PullRequestRef(
+        number=pr_number,
+        url=str(data.get("html_url") or ""),
+        title=str(data.get("title") or ""),
+        state=state,
+        merged=merged,
+        files=tuple(str(f) for f in files),
+    )
+
+
+def build_pr_notice(pr: PullRequestRef, review_ref: str) -> str:
+    """PR 情報と独立役員審査の参照から、``#承認`` へ出す通知本文を組み立てる。
+
+    審査参照を**引数として要求する**のは、この簡易形が「審査前の発効」を作らないためである
+    (reminders ``deemed-auto-announce`` ②)。文面に審査の所在を書かせることで、審査を
+    経ていない変更をワンコマンドで発効させる経路を塞ぐ。文面が気に入らなければ
+    ``--notice`` で全文を差し替えられる。
+
+    変更ファイルは保護領域か否かを判定せずそのまま列挙する。glob の解釈は監査
+    (``audit/a18.protected_patterns``)の責務であり、ここで二重に定義するとずれる。
+    """
+    lines = [f"PR #{pr.number}「{pr.title}」を保護領域の変更として発効します。", f"対象: {pr.url}"]
+    if pr.files:
+        shown = ", ".join(pr.files[:NOTICE_FILE_LIMIT])
+        if len(pr.files) > NOTICE_FILE_LIMIT:
+            shown += f" ほか {len(pr.files) - NOTICE_FILE_LIMIT} 件"
+        lines.append(f"変更ファイル({len(pr.files)} 件): {shown}")
+    lines.append(f"独立役員審査: {review_ref}")
+    return "\n".join(lines)
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # CLI: みなし承認の発効通知(記録と通知を同一トランザクションで)
 # ────────────────────────────────────────────────────────────────────────────
 def _build_parser() -> argparse.ArgumentParser:
@@ -482,12 +609,33 @@ def _build_parser() -> argparse.ArgumentParser:
         "--deemed", action="store_true",
         help="みなし承認を発効させる(現状これが唯一のアクション。明示承認は Bot のボタン経路)",
     )
-    parser.add_argument("--proposal-ref", required=True, help="提案の一意参照(PR URL 等)")
     parser.add_argument(
-        "--kind", required=True, choices=sorted(set(KINDS) - RESERVED_KINDS),
-        help="提案種別(3専決事項の kind は選べない — 定款第3条)",
+        "--deemed-for-pr", type=int, default=None, metavar="PR番号",
+        help=(
+            "PR 番号から参照・種別・文面を埋めてみなし承認を発効させる簡易形"
+            "(gh api で PR タイトル・URL・変更ファイルを取得。--review が必須)"
+        ),
     )
-    parser.add_argument("--notice", required=True, help="通知の要旨(何がなぜ発効したか)")
+    parser.add_argument(
+        "--review", default=None,
+        help="独立役員審査の参照(docs/reviews/... 等)。--deemed-for-pr では必須",
+    )
+    parser.add_argument(
+        "--gh-repo", default=None, metavar="OWNER/NAME",
+        help="gh api の対象リポジトリ(既定はカレントのリポジトリ)",
+    )
+    parser.add_argument(
+        "--proposal-ref", default=None,
+        help="提案の一意参照(PR URL 等)。--deemed-for-pr 指定時は省略可",
+    )
+    parser.add_argument(
+        "--kind", default=None, choices=sorted(set(KINDS) - RESERVED_KINDS),
+        help="提案種別(3専決事項の kind は選べない — 定款第3条)。--deemed-for-pr の既定は pr",
+    )
+    parser.add_argument(
+        "--notice", default=None,
+        help="通知の要旨(何がなぜ発効したか)。--deemed-for-pr 指定時は自動生成される",
+    )
     parser.add_argument("--title", default=None, help="通知の見出し(省略時は既定文)")
     parser.add_argument(
         "--source", default=DEFAULT_DEEMED_SOURCE,
@@ -503,6 +651,41 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_deemed_args(args: argparse.Namespace) -> tuple[str, str, str]:
+    """CLI 引数から ``(proposal_ref, kind, notice)`` を決める。
+
+    ``--deemed-for-pr`` があれば ``gh`` の取得結果で欠けている引数を埋める。明示指定は
+    常に優先する(自動生成の文面が状況に合わないときに手で上書きできる余地を残す)。
+    ``--review`` を必須にするのは「審査前の発効」を作らないため(:func:`build_pr_notice`)。
+    """
+    if args.deemed_for_pr is None:
+        missing = [
+            name
+            for name, value in (
+                ("--proposal-ref", args.proposal_ref),
+                ("--kind", args.kind),
+                ("--notice", args.notice),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                f"{', '.join(missing)} は必須(--deemed-for-pr <PR番号> なら自動で埋まる)"
+            )
+        return args.proposal_ref, args.kind, args.notice
+
+    if not (args.review or args.notice):
+        raise ValueError(
+            "--deemed-for-pr には --review(独立役員審査の参照)が必須。"
+            "審査を経ていない変更をワンコマンドで発効させないための入口検査"
+        )
+    pr = fetch_pull_request(args.deemed_for_pr, repo=args.gh_repo)
+    if not pr.url:
+        raise ValueError(f"PR #{args.deemed_for_pr} の URL を取得できなかった")
+    notice = args.notice or build_pr_notice(pr, args.review)
+    return args.proposal_ref or pr.url, args.kind or "pr", notice
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI エントリポイント(``python -m ryza.governance.decisions --deemed ...``)。
 
@@ -511,9 +694,18 @@ def main(argv: list[str] | None = None) -> int:
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     args = _build_parser().parse_args(argv)
-    if not args.deemed:
-        print("--deemed を指定してください(現状これが唯一のアクション)", file=sys.stderr)
+    if not (args.deemed or args.deemed_for_pr):
+        print(
+            "--deemed または --deemed-for-pr <PR番号> を指定してください"
+            "(現状みなし承認の発効が唯一のアクション)",
+            file=sys.stderr,
+        )
         return 2
+    try:
+        proposal_ref, kind, notice = _resolve_deemed_args(args)
+    except (PullRequestLookupError, ValueError) as exc:
+        print(f"みなし承認の対象を解決できませんでした: {exc}", file=sys.stderr)
+        return 1
 
     import json
 
@@ -523,7 +715,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         embed = notices.build_deemed_notice_embed(
-            args.proposal_ref, args.kind, args.notice, title=args.title, role=args.role
+            proposal_ref, kind, notice, title=args.title, role=args.role
         )
         print(json.dumps(embed, ensure_ascii=False, indent=2))
         return 0
@@ -532,12 +724,12 @@ def main(argv: list[str] | None = None) -> int:
     # meta.runs に残る(a18.run_and_report と同じ流儀)。
     run = start_run(
         "governance.deemed_notice",
-        {"proposal_ref": args.proposal_ref, "kind": args.kind, "source": args.source},
+        {"proposal_ref": proposal_ref, "kind": kind, "source": args.source},
     )
     conn = connect()
     try:
         result = notices.announce_deemed_approval(
-            conn, args.proposal_ref, args.kind, args.notice, run.run_id,
+            conn, proposal_ref, kind, notice, run.run_id,
             source=args.source, note=args.note, title=args.title, role=args.role,
         )
         conn.commit()
@@ -573,10 +765,14 @@ __all__ = [
     "DuplicateDecisionError",
     "NotVetoableError",
     "ProposalRefMismatchError",
+    "PullRequestLookupError",
+    "PullRequestRef",
     "ReservedMatterError",
     "Veto",
+    "build_pr_notice",
     "current_decision",
     "current_decision_by_id",
+    "fetch_pull_request",
     "main",
     "record_deemed_approval",
     "record_revert_completion",

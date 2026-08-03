@@ -13,6 +13,7 @@ import pytest
 
 from ryza.bot.approvals import NotOwnerError, record_decision
 from ryza.db.conn import connect
+from ryza.governance import decisions as decisions_mod
 from ryza.governance.decisions import (
     RESERVED_KINDS,
     DuplicateDecisionError,
@@ -374,6 +375,185 @@ def test_cli_rejects_reserved_kinds(kind):
     """3専決事項は CLI の選択肢に存在しない(定款第3条 — 明示承認のみ)。"""
     with pytest.raises(SystemExit):
         main(["--deemed", "--proposal-ref", "x", "--kind", kind, "--notice", "y", "--dry-run"])
+
+
+def test_cli_reports_missing_arguments(capsys):
+    """--deemed 単体では参照・種別・文面が必須(何が足りないかを名指しする)。"""
+    rc = main(["--deemed", "--kind", "pr", "--dry-run"])
+    assert rc == 1
+    assert "--proposal-ref" in capsys.readouterr().err
+
+
+# ── CLI 簡易形(--deemed-for-pr: gh api で PR から文面を組み立てる)───────────
+PR_JSON = {
+    "number": 99,
+    "html_url": "https://github.com/klonyapin/ryza/pull/99",
+    "title": "feat(gate): コンプラゲートの閾値を追加",
+    "state": "open",
+    "merged": False,
+}
+
+
+@pytest.fixture
+def fake_gh(monkeypatch):
+    """``gh api`` を差し替え、呼ばれたパスを記録する(実ネットワークは使わない)。"""
+    calls: list[str] = []
+
+    def _install(pr_json: dict, files: list[str] | None = None, *, files_fail: bool = False):
+        def fake_gh_api(path: str, *, paginate: bool = False, jq: str | None = None):
+            calls.append(path)
+            if path.endswith("/files"):
+                if files_fail:
+                    raise decisions_mod.PullRequestLookupError("files 取得に失敗")
+                return list(files or [])
+            return pr_json
+
+        monkeypatch.setattr(decisions_mod, "_gh_api", fake_gh_api)
+        return calls
+
+    return _install
+
+
+def test_cli_deemed_for_pr_builds_the_notice(fake_gh, capsys):
+    """PR 番号1つで参照・種別・文面が埋まる(叩き忘れを減らすための簡易形)。"""
+    from ryza.governance.notices import parse_deemed_notice
+
+    calls = fake_gh(PR_JSON, ["src/ryza/gate/limits.py", "migrations/0025_x.sql"])
+    rc = main([
+        "--deemed-for-pr", "99", "--review", "docs/reviews/gate-review.md", "--dry-run",
+    ])
+    assert rc == 0
+    embed = json.loads(capsys.readouterr().out)
+    assert parse_deemed_notice(embed) == PR_JSON["html_url"]
+    assert any(f["value"] == "pr" for f in embed["fields"])  # kind の既定は pr
+    body = embed["description"]
+    assert "PR #99" in body and PR_JSON["title"] in body
+    assert "src/ryza/gate/limits.py" in body
+    assert "docs/reviews/gate-review.md" in body  # 審査参照が文面に残る
+    assert calls == [
+        "repos/:owner/:repo/pulls/99",
+        "repos/:owner/:repo/pulls/99/files",
+    ]
+
+
+def test_cli_deemed_for_pr_requires_a_review_reference(fake_gh, capsys):
+    """審査を経ていない変更をワンコマンドで発効させない(reminders deemed-auto-announce ②)。"""
+    fake_gh(PR_JSON)
+    rc = main(["--deemed-for-pr", "99", "--dry-run"])
+    assert rc == 1
+    assert "--review" in capsys.readouterr().err
+
+
+def test_cli_deemed_for_pr_refuses_a_closed_pr(fake_gh, capsys):
+    """取り下げられた PR を発効させない(通知だけ出て取消義務が残る)。"""
+    fake_gh({**PR_JSON, "state": "closed", "merged": False})
+    rc = main(["--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--dry-run"])
+    assert rc == 1
+    assert "クローズ済み" in capsys.readouterr().err
+
+
+def test_cli_deemed_for_pr_accepts_a_merged_pr(fake_gh, capsys):
+    """マージ済み PR は対象になる(事後の記録漏れを CLI で埋められる — A-18-7 の是正手段)。"""
+    fake_gh({**PR_JSON, "state": "closed", "merged": True})
+    rc = main(["--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--dry-run"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["fields"]
+
+
+def test_cli_explicit_arguments_win_over_the_generated_ones(fake_gh, capsys):
+    """自動生成の文面が状況に合わないときは手で上書きできる。"""
+    fake_gh(PR_JSON)
+    rc = main([
+        "--deemed-for-pr", "99", "--review", "docs/reviews/x.md",
+        "--notice", "手書きの要旨", "--kind", "other", "--dry-run",
+    ])
+    assert rc == 0
+    embed = json.loads(capsys.readouterr().out)
+    assert "手書きの要旨" in embed["description"] and "PR #99" not in embed["description"]
+    assert any(f["value"] == "other" for f in embed["fields"])
+
+
+def test_cli_deemed_for_pr_survives_a_file_list_failure(fake_gh, capsys):
+    """変更ファイル一覧は文面の補助でしかない — 取れなくても発効そのものは止めない。"""
+    fake_gh(PR_JSON, files_fail=True)
+    rc = main(["--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--dry-run"])
+    assert rc == 0
+    assert "変更ファイル" not in json.loads(capsys.readouterr().out)["description"]
+
+
+def test_cli_deemed_for_pr_reports_gh_failure(monkeypatch, capsys):
+    """gh が失敗したら黙って別の参照で発効させず、失敗として返す。"""
+
+    def failing(path, *, paginate=False, jq=None):
+        raise decisions_mod.PullRequestLookupError("gh api に失敗した(未認証)")
+
+    monkeypatch.setattr(decisions_mod, "_gh_api", failing)
+    rc = main(["--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--dry-run"])
+    assert rc == 1
+    assert "未認証" in capsys.readouterr().err
+
+
+def test_build_pr_notice_truncates_long_file_lists():
+    """embed のフィールド長に収める(全件は PR を見れば分かる)。"""
+    files = tuple(f"src/f{i}.py" for i in range(30))
+    pr = decisions_mod.PullRequestRef(
+        number=7, url="https://x/pull/7", title="t", state="open", merged=False, files=files
+    )
+    body = decisions_mod.build_pr_notice(pr, "docs/reviews/r.md")
+    assert "変更ファイル(30 件)" in body
+    assert f"ほか {30 - decisions_mod.NOTICE_FILE_LIMIT} 件" in body
+
+
+def test_cli_records_and_notifies_on_a_fresh_connection(migrated_db, monkeypatch):
+    """CLI 本経路(IDLE の新規接続)で記録と通知が同一トランザクションに入る(軽微-12)。
+
+    ``governance.decisions`` は追記オンリー(0021)で DELETE できないため、CLI の
+    ``commit`` を無効化した接続を渡して確定させずに検証する。IDLE 接続で
+    ``announce_deemed_approval`` が呼ばれる分岐そのものは本物を通る。
+    """
+    import ryza.db.conn as db_conn
+
+    inner = connect()
+
+    class _NoCommitConn:
+        """commit / close だけ握り潰す薄い委譲(テスト DB に残留を作らないため)。"""
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+        def __getattr__(self, name):
+            return getattr(inner, name)
+
+    monkeypatch.setattr(db_conn, "connect", lambda autocommit=False: _NoCommitConn())
+    ref = "https://github.com/klonyapin/ryza/pull/9911"
+    run_id = None
+    try:
+        rc = main(["--deemed", "--proposal-ref", ref, "--kind", "pr", "--notice", "保護領域の変更"])
+        with inner.cursor() as cur:
+            cur.execute(
+                "SELECT channel_msg_id FROM governance.decisions WHERE proposal_ref = %s", (ref,)
+            )
+            notice_ref = cur.fetchone()[0]
+            cur.execute(
+                "SELECT channel, run_id FROM press.outbox WHERE id = %s",
+                (int(notice_ref.removeprefix("outbox:")),),
+            )
+            channel, run_id = cur.fetchone()
+        assert rc == 0
+        assert current_decision(inner, ref)["effective_decision"] == "deemed"
+        assert channel == "approval"  # 記録と通知が同じトランザクションに入っている
+        inner.rollback()
+        assert current_decision(inner, ref) is None  # commit させていない
+    finally:
+        if run_id is not None:  # Run は自前接続で確定するので消しておく
+            inner.rollback()
+            with inner.cursor() as cur:
+                cur.execute("DELETE FROM meta.runs WHERE run_id = %s", (run_id,))
+            inner.commit()
+        inner.close()
 
 
 def test_veto_is_append_only(conn):

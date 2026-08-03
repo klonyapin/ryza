@@ -40,6 +40,33 @@
 | 軽微-11・12 | `deemed-wiring-followup`(期限 2026-08-17)に登録 |
 | 重要-5 前段 | `veto-origin-column` の body に判断材料の確定を追記(origin 列を「足す」方向で再評価) |
 
+## 後続の是正(2026-08-04・reminders `deemed-auto-announce` / `deemed-wiring-followup`)
+
+期限付きで登録した3件を前倒しで実装した。**中-7(呼び出し元 0 件)は完全解消ではない** —
+GitHub イベント受信基盤が無いため PR 起票の自動検知は依然できず、下記は「叩き忘れを事後に
+検出する」+「叩く手間を減らす」の2方向からの次善策である。
+
+| 指摘 | 対応 |
+| --- | --- |
+| 中-7(自動起票) | 監査に **A-18-7**(`check_unrecorded_protected_prs`)を新設。`DEEMED_RECORD_BASELINE_COMMIT` 以降の保護領域 PR マージのうち、トレーラの参照でも PR 番号(`proposal_ref` の `.../pull/<N>`)でも承認記録が引けないものを列挙する。叩き忘れは週次で #運営 に出る |
+| 中-7(手間) | `--deemed-for-pr <PR番号>` を追加。`gh api` で PR タイトル・URL・変更ファイルを取得し文面を自動生成する。`--review`(独立役員審査の参照)を必須にして「審査前の発効」をワンコマンドで作れないようにした |
+| 軽微-11 | `run_a18_readonly` を新設し、照合は autocommit・`default_transaction_read_only` の別接続で完結させて閉じてから報告用の書込接続を開く。git 走査中の idle-in-transaction が消える |
+| 軽微-12 | 逆方向のフォールト注入(`enqueue` が行を書いた直後に落ちる/`run_id` NOT NULL 違反)で記録・通知の双方が消えることを検証。CLI の IDLE 分岐は「IDLE 接続で `announce` しても commit に化けない」+ CLI 本経路の end-to-end で被覆 |
+
+**トレーラ v2 ライン(`trailer-v2`)との統合について**: A-18-7 は独立した関数
+(`deemed_pr_number` / `_decision_exists` / `decision_for_pr_number` /
+`check_unrecorded_protected_prs`)に閉じてあり、判定ロジックの競合は無い。統合時に手を入れる
+のは (1) `run_a18` の引数(`deemed_since_commit`)と戻り値キー、(2) `run_and_report` の
+`run_a18` 呼び出し —— 本ラインは `run_a18_readonly(**run_kwargs)` に委譲しており、
+v2 が追加する引数はそのまま透過する、(3) `build_alert_embed` / `has_findings` / CLI の出力、
+の3点のみ。なお v2 が入れる `pr_number_from_subject` と本ラインの `deemed_pr_number` は
+同じ件名解析であり、統合後は片方に寄せてよい(どちらも件名の自己申告という限界を共有する)。
+
+**A-18-7 が拾えないもの**: PR 件名は自己申告であり(A-18-1/4 と同じ限界)、承認記録が DB の外に
+ある PR は「記録なし」と判定される。後者を例外扱いする必要が出たら `acknowledged_findings` と
+同型の受容記録を足すこと(黙って除外しない)。Bot 配送側の分岐(`VetoView` 付与)は discord
+オブジェクトに依存するため未被覆のままで、判定ロジック部分(`resolve_deemed_view`)のみ被覆済み。
+
 **PR 承継ライン(`a18-ack-l1`)との統合について**: 承認の有効性判定を
 `a18.trailer_approves(conn, message, trailer)` に集約した。承継規則が「マージ M のトレーラで
 配下を承認する」と判定する箇所は、素の `has_approval_trailer` ではなく本関数を通すこと —
