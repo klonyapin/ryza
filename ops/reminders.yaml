@@ -78,8 +78,8 @@ reminders:
       type: issue_create
       title: "みなし承認期限: A-13 監査+役職資産の統合(48h 異議なし)"
       labels: [impl]
-      body: "定款第3条のみなし承認手続。2026-08-03 の #承認 通知(A-13 監査ジョブ・役職資産/governance スキーマ 0013)に対し代表の異議が無ければ、PR #36(a13-audit)・PR #37(governance-assets)をマージし、コミットに Approved: deemed(2026-08-05) トレーラを付す。異議があった場合はこの Issue に記録して差し戻す。統合済みならクローズのみ。"
-    status: pending
+      body: "(完了済み)2026-08-03 に代表がチャットで明示承認(「OK」)し、PR #36・#37 をマージ統合済み。"
+    status: done # 2026-08-03 代表明示承認により PR #36/#37 マージ済み
 
   - id: a13-implementation-checkpoint
     what: "監査 A-13(規則⇔実装トレーサビリティ)の実装チェックポイント。批准後の最優先統制"
