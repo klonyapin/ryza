@@ -331,7 +331,7 @@ def test_fetch_latest_daily_run_reports_duration(conn, run):
 def test_fetch_cost_summary_returns_ratio_inputs(conn, run):
     """比率(1 実行あたり)の分母になる実行数を返し、累計トークンは返さない。"""
     run.add_cost("mid", tokens=1000, cost_estimate=0.6)
-    summary = queries.fetch_cost_summary(conn, days=30)
+    summary = queries.fetch_cost_summary(conn)
     assert int(summary["cost_runs"]) >= 1
     assert int(summary["all_runs"]) >= int(summary["cost_runs"])
     assert float(summary["total_cost"]) >= 0.6

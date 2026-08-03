@@ -70,6 +70,32 @@ def _conn():
     return queries.connect_readonly()
 
 
+# ── 重いクエリの短期キャッシュ(独立役員審査 2026-08-03 中-10)────────────────────
+# ウィジェット操作のたびに Streamlit はスクリプト全体を再実行する。無索引の
+# ``ledger.journal_lines`` 全集計(NAV 系列のフロー結合)や ``meta.runs`` の全走査が
+# その都度走るため、60 秒 TTL でキャッシュする。TTL を短くしてあるのは日次サイクルの
+# 進行中に古い値を見せないため(監視面としての鮮度 > キャッシュ効率)。
+# ``conn`` はハッシュ不能なので引数に取らず ``_conn()`` を内部で引く。
+@st.cache_data(ttl=60)
+def _nav_series() -> list[dict[str, Any]]:
+    return queries.fetch_nav_series(_conn())
+
+
+@st.cache_data(ttl=60)
+def _cost_summary() -> dict[str, Any]:
+    return queries.fetch_cost_summary(_conn())
+
+
+@st.cache_data(ttl=60)
+def _cost_daily(days: int = 30) -> list[dict[str, Any]]:
+    return queries.fetch_cost_daily(_conn(), days=days)
+
+
+@st.cache_data(ttl=60)
+def _ingest_daily_counts(days: int = 30) -> list[dict[str, Any]]:
+    return queries.fetch_ingest_daily_counts(_conn(), days=days)
+
+
 def _df(rows: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
@@ -118,7 +144,7 @@ def _overview_trading_state(conn) -> None:
 def _overview_nav(conn) -> None:
     """②NAV。単独数値にせず「前日比」「設定来」の 2 つの比較文脈を必ず併記する。"""
     st.markdown("**② NAV(ファンド帳簿)**")
-    series = queries.fetch_nav_series(conn)
+    series = _nav_series()
     if not series:
         st.markdown(f"NAV: {viz.MISSING}")
         st.caption("ledger.nav_snapshots が空(締め処理が未実行)")
@@ -157,17 +183,45 @@ def _reached(value: Any, threshold: Any) -> bool:
         return False
 
 
+def _overview_latches(conn) -> None:
+    """ラッチ 4 種の要約(独立役員審査 2026-08-03 重要-4)。
+
+    DD 使用率だけでは「DD が回復しても dd_hard ラッチが残って発注停止中」という状態が
+    画面に出ない(ラッチは自動解除されないため使用率は下がるがブロックは続く)。実際に
+    発注を止めているものを概況で名指しする。
+    """
+    states = queries.fetch_limits_state(conn)
+    if not states:
+        viz.render_state(
+            "リスクフラグ", "risk.limits_state に行なし(ゲート G-10 は fail-closed)", alert=True
+        )
+        return
+    active = [key for key in _LATCH_LABELS if any(s[key] for s in states)]
+    blocking = [key for key in active if key != "dd_soft"]
+    if not active:
+        viz.render_state("リスクフラグ", "4 種すべて未作動", alert=False)
+    elif blocking:
+        viz.render_state("リスクフラグ", "発注ブロック中: " + ", ".join(blocking), alert=True)
+    else:
+        viz.render_state(
+            "リスクフラグ", "作動中: " + ", ".join(active) + "(新規建て枠半減)", alert=True
+        )
+
+
 def _overview_drawdown(conn) -> None:
-    """③DD 使用率。測定値はリスクエンジンの出力をそのまま使い、自前で再計算しない。"""
+    """③DD 使用率+ラッチ要約。測定値はリスクエンジンの出力をそのまま使い再計算しない。"""
     st.markdown("**③ DD 使用率(対 dd_hard)**")
     event = queries.fetch_latest_risk_metrics(conn)
     limits = queries.load_ips_limits()
     if event is None:
         viz.render_bullet(viz.make_bullet("DD", None, limits.get("dd_hard_limit")))
         st.caption("リスクエンジン未実行(risk.limits_state_events が空)")
-        return
-    viz.render_bullet(_dd_bullet(event["metrics"] or {}, limits))
-    st.caption(f"測定 {event['as_of']:%m-%d %H:%M} / {event['actor']} / run {event['run_id']}")
+    else:
+        viz.render_bullet(_dd_bullet(event["metrics"] or {}, limits))
+        st.caption(
+            f"測定 {event['as_of']:%m-%d %H:%M} / {event['actor']} / run {event['run_id']}"
+        )
+    _overview_latches(conn)
 
 
 def _overview_daily(conn) -> None:
@@ -221,17 +275,26 @@ def _overview_pending(conn) -> None:
 
 
 def _overview_cost(conn) -> None:
-    """⑥30日 LLM コストの予算消化率(累計額の単独表示はしない)。"""
-    st.markdown("**⑥ LLM コスト予算消化(30日)**")
-    summary = queries.fetch_cost_summary(conn, days=30)
+    """⑥当月(暦月)LLM コストの予算消化率。累計額の単独表示はしない。"""
+    st.markdown("**⑥ LLM コスト予算消化(当月)**")
+    summary = _cost_summary()
     budget = queries.load_llm_budget().get("monthly_jpy")
     viz.render_bullet(
         viz.make_bullet("消化", summary["total_cost"], budget, fmt=viz.fmt_jpy)
     )
+    # コスト記録のある実行の割合を添える: 分子が全実行を覆っていなければ消化率は
+    # 過小評価であり、その事実を隠さない(独立役員審査 中-9)。
+    st.markdown(
+        f"コスト記録のある実行 {int(summary['cost_runs'] or 0)} / "
+        f"{int(summary['all_runs'] or 0)}"
+    )
     if budget is None:
         st.caption("config/llm.yaml に budget.monthly_jpy が無い(比率は出せない)")
     else:
-        st.caption(f"月次予算 {viz.fmt_jpy(budget)} — 内訳は「コスト」へ")
+        st.caption(
+            f"月次予算 {viz.fmt_jpy(budget)} / 起点 {summary['since']:%Y-%m-%d}"
+            " — 内訳は「コスト」へ"
+        )
 
 
 def page_overview(conn) -> None:
@@ -258,12 +321,33 @@ def page_overview(conn) -> None:
 
 
 # ── 成績 ──────────────────────────────────────────────────────────────────────
+def _render_flow_notice(series: list[dict[str, Any]]) -> None:
+    """外部フロー発生日の注記(独立役員審査 2026-08-03 重要-6)。
+
+    underwater 図は NAV そのものを見る図なので、出資で NAV が跳ねた日・払戻で NAV が
+    落ちた日は「回復/下落」に見える。払戻を −30% の損失と読み違えないよう、フローの
+    あった日を図の直下で名指しする(期間リターンの方は TWR で調整済み)。
+    """
+    flows = [r for r in series if float(r.get("net_flow") or 0) != 0]
+    if not flows:
+        return
+    items = " / ".join(
+        f"{r['day']} {'出資' if float(r['net_flow']) > 0 else '払戻'}"
+        f" {viz.fmt_jpy(abs(float(r['net_flow'])))}"
+        for r in flows[-8:]
+    )
+    st.caption(
+        f":orange[外部フロー発生日({len(flows)} 日・図は未調整)]: {items}"
+        " — 上の図の段差はこの出資・払戻によるもので、損益ではない。"
+    )
+
+
 def page_performance(conn) -> None:
     st.header("成績")
     viz.page_question(
         "デモ運用の資産はどう推移し、いまどれだけ水没しているか(NAV と DD)"
     )
-    series = queries.fetch_nav_series(conn)
+    series = _nav_series()
     if not series:
         st.info("ledger.nav_snapshots が空(締め処理が未実行)。NAV 系列が無いため成績は出せない。")
         return
@@ -277,23 +361,36 @@ def page_performance(conn) -> None:
         "(IPS §3.1)で、外部フロー調整は入れない NAV そのものの水没度合い。"
         "リミット判定に使う測定値はリスクエンジンの出力(「リスク」ページ)。"
     )
+    _render_flow_notice(series)
 
     st.subheader("期間別リターン(外部フロー調整済み TWR)")
     rows = [
-        {"期間": r["期間"], "リターン": r["表示"], "対照(等配分 buy-and-hold)": "未実装"}
+        {
+            "期間": r.label,
+            "リターン": r.value_text,
+            "起点日": r.base_text,
+            "対照(等配分 buy-and-hold)": "未実装",
+            "注記": r.note or "",
+        }
         for r in viz.period_returns(series)
     ]
     rows.append(
         {
             "期間": "—",
             "リターン": "—",
+            "起点日": "—",
             "対照(等配分 buy-and-hold)": "対照系列は未実装(T-019 候補)",
+            "注記": "",
         }
     )
     st.dataframe(_df(rows), use_container_width=True, hide_index=True)
     st.caption(
-        "E4(等配分 buy-and-hold 対照)は評価の必須条件だが、対照ポートフォリオの"
-        "系列がまだ無い。無い比較を推定値で埋めず「未実装」と明示する。"
+        "窓は暦日(1M = 30 暦日)。**起点は cutoff 以前の直近スナップショット**で、"
+        "その日付を併記する — 系列に穴があると「1W」が実際には 3 週間分になり得るため"
+        "(起点が窓から大きく外れたら注記に出る)。cutoff 以前のスナップショットが"
+        "1 本も無い期間は「期間未充足」として値を出さない。"
+        "E4(等配分 buy-and-hold 対照)は評価の必須条件だが対照系列がまだ無く、"
+        "無い比較を推定値で埋めず「未実装」と明示する。"
     )
 
     st.subheader("NAV スナップショット(明細)")
@@ -305,8 +402,35 @@ def page_performance(conn) -> None:
 
 
 # ── リスク ────────────────────────────────────────────────────────────────────
+def _insufficiency_note(metrics: dict[str, Any], limits: dict[str, Any]) -> str | None:
+    """観測不足のときの注記。十分なら None(独立役員審査 2026-08-03 重大-3)。
+
+    リスクエンジンは帳簿リターンが ``realized_vol_ewma_days`` 営業日そろうまで
+    vol/ES フラグを立てない(``engine.evaluate`` の ``sufficient``)。測定値だけを
+    そのまま bullet にすると、フラグが「未作動」なのに使用率が赤 breach を出す
+    — 同一画面で矛盾する。判定が無効な間は値を出さず、その理由を出す。
+
+    ``sufficient`` キーが無い古い metrics も「十分と確認できていない」側に倒す
+    (fail-closed)。恒久対応は state_metrics への deferred/excluded 追加
+    (ops/reminders.yaml: risk-state-metrics-sufficiency)。
+    """
+    if metrics.get("sufficient"):
+        return None
+    n = metrics.get("n_returns")
+    need = limits.get("realized_vol_ewma_days")
+    return (
+        f"観測不足で判定無効(n={n if n is not None else '?'}/"
+        f"{need if need is not None else '?'})"
+    )
+
+
 def _risk_bullets(metrics: dict[str, Any], limits: dict[str, Any]) -> list[viz.Bullet]:
-    """スキーマに実在する測定値だけを bullet にする(無いものは作らない)。"""
+    """スキーマに実在する測定値だけを bullet にする(無いものは作らない)。
+
+    DD は 1 日目から有効(engine の drawdown はデータ 1 点から測れる)なので観測数に
+    関わらず出す。vol/ES はエンジンが判定を保留している間 unknown に落とす。
+    """
+    note = _insufficiency_note(metrics, limits)
     return [
         viz.make_bullet(
             "DD(対 dd_soft)", metrics.get("drawdown"), limits.get("dd_soft_limit")
@@ -314,13 +438,15 @@ def _risk_bullets(metrics: dict[str, Any], limits: dict[str, Any]) -> list[viz.B
         _dd_bullet(metrics, limits, label="DD(対 dd_hard)"),
         viz.make_bullet(
             "実現ボラ(EWMA 年率)",
-            metrics.get("ewma_vol_annual"),
+            None if note else metrics.get("ewma_vol_annual"),
             limits.get("realized_vol_limit"),
+            note=note,
         ),
         viz.make_bullet(
             "日次 ES95(対 NAV)",
-            metrics.get("es95_adopted"),
+            None if note else metrics.get("es95_adopted"),
             limits.get("daily_es95_nav_max"),
+            note=note,
         ),
     ]
 
@@ -415,8 +541,9 @@ def page_ingest(conn) -> None:
     st.caption(f"SLA 充足 {ok_count}/{len(freshness)} ソース(違反 {len(breaches)} 件)")
     st.dataframe(
         freshness.style.map(
+            # ok は着色しない: 緑は差異・リミット超過に予約してある(A12・中-7)。
+            # 異常だけが色で立ち上がる方が、SLA 違反の発見も速い。
             lambda v: {
-                "ok": "color: green",
                 "stale": "color: orange",
                 "no_data": "color: red",
             }.get(v, ""),
@@ -427,7 +554,7 @@ def page_ingest(conn) -> None:
     )
 
     st.subheader("日別取込件数(直近30日・as_of 基準)")
-    counts = queries.fetch_ingest_daily_counts(conn, days=30)
+    counts = _ingest_daily_counts(30)
     if not counts:
         st.info("直近30日の取込なし")
     else:
@@ -469,9 +596,9 @@ def page_cost(conn) -> None:
 
     # 予算消化率(比率)を先に出す。単独の「30日合計」カードは比較文脈が無く、
     # 累計トークン数は行動を変えない vanity metric のため置かない(A9・A10)。
-    summary = queries.fetch_cost_summary(conn, days=30)
+    summary = _cost_summary()
     budget = queries.load_llm_budget().get("monthly_jpy")
-    st.subheader("月次予算の消化(直近30日)")
+    st.subheader(f"月次予算の消化(当月・{summary['since']:%Y-%m} 起点)")
     viz.render_bullet(viz.make_bullet("消化", summary["total_cost"], budget, fmt=viz.fmt_jpy))
     cost_runs = int(summary["cost_runs"] or 0)
     per_run = float(summary["total_cost"]) / cost_runs if cost_runs else None
@@ -480,11 +607,13 @@ def page_cost(conn) -> None:
         f"(コスト記録のある実行 {cost_runs} / 全実行 {int(summary['all_runs'] or 0)})"
     )
     st.caption(
-        "予算の既定値は config/llm.yaml の budget.monthly_jpy(根拠は同ファイルの"
-        "コメント)。承認済み予算行(ledger.budgets)が入ればそちらが正になる。"
+        "窓は**暦月**で、比較対象の月次予算と期間を揃えてある(30日ローリングだと"
+        "分子と分母の期間が食い違い消化率が意味を失う)。予算の既定値は config/llm.yaml の"
+        "budget.monthly_jpy(根拠は同ファイルのコメント)。承認済み予算行"
+        "(ledger.budgets)が入ればそちらが正になる。下の内訳は直近 30 日の集計。"
     )
 
-    rows = queries.fetch_cost_daily(conn, days=30)
+    rows = _cost_daily(30)
     if not rows:
         st.info("直近30日にコスト記録のある実行なし(内訳は出せない)")
         return
@@ -538,8 +667,7 @@ def _render_key_risk(risk: dict) -> None:
         st.markdown(f"**{risk.get('risk_id', '')}**")
         st.write(statement)
         if confidence is not None:
-            pct = min(max(float(confidence), 0.0), 1.0)
-            st.progress(pct, text=f"確信度 {pct:.0%}")
+            viz.render_ratio("確信度", confidence, suffix="(自己申告・発注に使わない)")
         if risk.get("observable"):
             st.caption(f"確認ポイント: {risk['observable']}")
         if risk.get("refs"):
@@ -895,9 +1023,9 @@ def page_rules() -> None:
     if not df.empty:
         st.dataframe(
             df.style.map(
+                # schema/gate(最も強い執行点)は無着色。緑をカテゴリ識別に使わない
+                # (A12・中-7)。色で立ち上がるのは弱い執行点と欠落だけにする。
                 lambda v: {
-                    "schema(DB 制約)": "color: green",
-                    "gate(実行時ゲート)": "color: green",
                     "ci(テスト・CI)": "color: #2c7be5",
                     "audit(監査ジョブ)": "color: orange",
                     "宣言のみ(執行点なし)": "color: red; font-weight: bold",
@@ -986,10 +1114,7 @@ def _render_roadmap() -> None:
     all_ms = [m for p in phases for m in p.get("milestones", [])]
     done_ms = sum(1 for m in all_ms if m.get("status") == "done")
     if all_ms:
-        st.progress(
-            done_ms / len(all_ms),
-            text=f"全体進捗: {done_ms} / {len(all_ms)} マイルストーン完了",
-        )
+        viz.render_count_ratio("全体進捗(マイルストーン完了)", done_ms, len(all_ms))
     for p in phases:
         ms = p.get("milestones", [])
         p_done = sum(1 for m in ms if m.get("status") == "done")
@@ -999,7 +1124,7 @@ def _render_roadmap() -> None:
             st.markdown(f"**{p.get('name')}**({status}{note})")
             st.caption(p.get("summary", ""))
             if ms:
-                st.progress(p_done / len(ms), text=f"{p_done} / {len(ms)}")
+                viz.render_count_ratio("完了", p_done, len(ms))
                 st.markdown(
                     "\n".join(
                         f"- {_MS_ICONS.get(m.get('status'), '⬜')} {m.get('name')}"

@@ -344,3 +344,39 @@ reminders:
       channel: 運営
       body: "代表が OAuth 同意画面(https://console.cloud.google.com/auth/overview?project=ryza-main、アプリ名 Ryza Dashboard・External・テストユーザーに mileage_embassy_9x@icloud.com)を設定したか確認する。設定済みなら: gcloud iap oauth-clients create で OAuth クライアントを作成し IAP へ紐付け → 未認証 curl が 302 を返すこと・代表アカウントでダッシュボード(https://ryza-dashboard-weuuqovieq-uw.a.run.app)にログインできることを確認 → URL を #承認 へ報告し本リマインダーを done に。未設定なら代表へ再依頼。現状: IAP は有効で未認証は 502(IAP 生成・遮断確認済み)だが、OAuth クライアント不在のため代表もログイン不可(2026-08-03 デプロイ時のエラー『Empty Google Account OAuth client ID(s)/secret(s)』)。"
     status: pending
+
+  - id: risk-flow-rollforward-fix
+    what: "【優先度高・リスク数値の実バグ】NAV スナップショットが無い日の外部フローがリターン計算から落ちる問題の修正(独立役員審査 T-018 重要-5)"
+    conditions:
+      - type: date_after
+        date: "2026-08-08"
+    action:
+      type: issue_create
+      title: "risk エンジン: スナップショット欠落日の外部フローを次のスナップショットへロールフォワードする"
+      labels: [impl, risk]
+      body: "ryza.risk.engine.book_returns は `r_t = (nav_t − flow_t − nav_{t−1}) / nav_{t−1}` を隣接**スナップショット**間で計算するが、フローは「そのスナップショット日に計上された仕訳」だけを見る(src/ryza/risk/daily.py load_nav_series の flows 辞書は entry_date で引く)。締めが走らなかった日・非営業日に出資や払戻の仕訳が立つと、その日の flow はどのスナップショットにも紐付かず**リターンから脱落**する。結果、¥100万の帳簿に休日出資 ¥50万が入ると次の測定で『前日比 +50%』という実在しない利益が計上され、実現ボラ・ES の入力(帳簿リターン列)まで汚染される。是正: 前スナップショット日(排他)から当スナップショット日(包含)までの区間の flow を合算して flow_t とする(ロールフォワード)。同じ定義の重複実装になっている dashboard/queries.py fetch_nav_series も同時に合わせること(現状は engine と同一式であることが唯一の担保)。テストは『スナップショットの無い日に出資 → 次営業日のリターンが 0%』を最小ケースとする。**src/ryza/risk/ は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 重要-5。"
+    status: pending
+
+  - id: risk-state-metrics-sufficiency
+    what: "state_metrics に判定保留の理由(deferred / excluded)を持たせる(T-018 重大-3 の恒久対応)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "risk.state_metrics に deferred / excluded を追加し、保留理由を機械可読にする"
+      labels: [impl, risk]
+      body: "ryza.risk.state.state_metrics が残す測定値は `sufficient`(bool)と `n_returns` しか持たず、『どの指標がなぜ判定保留なのか』が読み手側で復元できない。ダッシュボードは暫定として『sufficient が偽なら vol/ES bullet を unknown にする』という粗い分岐で回避しているが(dashboard/app.py _insufficiency_note・独立役員審査 T-018 重大-3)、ES は観測不足以外の理由(価格欠測による銘柄除外など)でも採用値が変わるため、この分岐では保留理由を正しく説明できない。是正: state_metrics に `deferred`(判定を保留した指標名のリスト+各理由)と `excluded`(評価から外した銘柄+理由)を追加し、risk.limits_state_events.metrics 経由でダッシュボードと監査が同じ理由を読めるようにする。ダッシュボード側の暫定分岐は追加後に置き換える。**src/ryza/risk/ は保護領域のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 重大-3。"
+    status: pending
+
+  - id: db-indexes-dashboard
+    what: "ダッシュボードの重いクエリ向け索引を追加する(ledger.journal_lines / meta.runs。独立役員審査 T-018 中-10)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "migrations: journal_lines / meta.runs の索引を追加する"
+      labels: [impl]
+      body: "ダッシュボードの NAV 系列(dashboard/queries.py fetch_nav_series)は ledger.journal_lines × journal_entries × accounts を全走査して出資フローを日次集計し、コスト集計(fetch_cost_daily / fetch_cost_summary)は meta.runs を started_at で全走査する。どちらも支える索引が無い(journal_lines の PK は (entry_id, line_no)、meta.runs の PK は run_id のみ)。現在は行数が小さく問題にならないが、仕訳と実行記録は単調増加するため放置すると再実行のたびに全表走査が効く。暫定対応として app.py 側に @st.cache_data(ttl=60) を入れてある(独立役員審査 中-10 の部分対応)。是正: (1) ledger.journal_lines (book_id, account_id) の索引、(2) ledger.journal_entries (book_id, entry_date) の索引、(3) meta.runs (started_at DESC) の索引、(4) meta.runs (job_name, run_id DESC) の索引を migrations で追加し、EXPLAIN で効いていることを確認する。**migrations は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 中-10。"
+    status: pending

@@ -63,6 +63,19 @@ jobs:
       - name: Ruff
         run: uv run ruff check .
 
+      # ── 可視化の禁止記法(T-018・独立役員審査 中-8) ──
+      # ページ実装は表示形を dashboard/viz.py のヘルパ経由でのみ作る。生の
+      # st.progress / st.json を app.py に直書きすると、比較文脈のないバーや
+      # 生 JSON(A6)がレビューを素通りするため CI で機械的に落とす。
+      # viz.py は当然除外(ヘルパの実装そのもの)。
+      - name: Forbid raw viz constructs in dashboard/app.py
+        run: |
+          if grep -nE '(^|[^.A-Za-z0-9_])st\.(progress|json)\(' dashboard/app.py; then
+            echo "::error::dashboard/app.py に st.progress / st.json の直書きがある。dashboard/viz.py のヘルパ(render_bullet / render_ratio / render_count_ratio 等)を使うこと。根拠: docs/research/dashboard-visualization-guidelines.md" >&2
+            exit 1
+          fi
+          echo "OK: dashboard/app.py に禁止記法の直書きなし"
+
       - name: Validate YAML (config/, ops/reminders.yaml)
         run: |
           uv run python - <<'EOF'

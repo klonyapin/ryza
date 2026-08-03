@@ -39,6 +39,7 @@ def test_fmt_sig_digits(value, digits, expected):
     [
         (0, "¥0"),
         (1234, "¥1,234"),
+        (1234.5, "¥1,234"),  # ¥1 以上は小数を出さない(円の最小単位は 1 円)
         (9999, "¥9,999"),
         (10_000, "¥1.00万"),  # 万の境界
         (1_000_000, "¥100万"),
@@ -46,6 +47,8 @@ def test_fmt_sig_digits(value, digits, expected):
         (100_000_000, "¥1.00億"),  # 億の境界
         (-1_000_000, "-¥100万"),
         (Decimal("12345.6"), "¥1.23万"),
+        (0.9, "¥0.90"),  # ¥1 未満だけ小数(LLM 微小コストを 0 に潰さない)
+        (-0.05, "-¥0.05"),
         (None, viz.MISSING),
     ],
 )
@@ -69,6 +72,13 @@ def test_fmt_delta_md_colors_are_variance_only():
     assert viz.fmt_delta_md(0.0) == "+0.00%"
     assert viz.fmt_delta_md(None) == viz.MISSING
     assert viz.fmt_delta_md(-1, text="-¥100万") == ":red[-¥100万]"
+
+
+def test_fmt_delta_md_good_when_negative_inverts_colors():
+    """コスト超過のように「小さいほど良い」差異は色を反転する。"""
+    assert viz.fmt_delta_md(0.01, good_when="negative") == ":red[+1.00%]"
+    assert viz.fmt_delta_md(-0.01, good_when="negative") == ":green[-1.00%]"
+    assert viz.fmt_delta_md(0.0, good_when="negative") == "+0.00%"
 
 
 def test_fmt_hours_switches_to_days():
@@ -134,6 +144,20 @@ def test_bullet_unknown_when_ratio_undefined(actual, limit):
     assert viz.MISSING in b.text
 
 
+@pytest.mark.parametrize("limit", [0, -1])
+def test_bullet_non_positive_limit_hides_fake_limit_text(limit):
+    """リミット 0/負は設定ミス。上限として -100.0% のような値を画面に出さない。"""
+    b = viz.make_bullet("x", 0.1, limit)
+    assert b.limit_text == viz.MISSING
+    assert "上限 —" in b.text
+
+
+def test_bullet_unknown_text_carries_note():
+    b = viz.make_bullet("実現ボラ", None, 0.15, note="観測不足で判定無効(n=3/20)")
+    assert b.level == "unknown"
+    assert "観測不足で判定無効(n=3/20)" in b.text
+
+
 def test_bullet_text_always_carries_comparison_context():
     b = viz.make_bullet("ES95", 0.012, 0.03, fmt=viz.fmt_pct)
     assert "1.2%" in b.text and "3.0%" in b.text and "使用率 40%" in b.text
@@ -177,10 +201,40 @@ def test_period_return_compounds():
     assert viz.period_return(rows, days=None) == pytest.approx(0.21)
 
 
-def test_period_return_window_cutoff():
+def test_period_return_requires_a_base_snapshot_on_or_before_cutoff():
+    """重大-1: 系列の最古日が cutoff より新しければ「期間未充足」で値を出さない。
+
+    設定 2 日目の帳簿で 1W/1M/設定来 が全部同じ数字になる誤りを防ぐ。
+    """
+    rows = [_nav(1, 100), _nav(2, 110)]  # 8/1 開始・8/2 時点(2 日目)
+    assert viz.period_return(rows, days=7) is None
+    assert viz.period_return(rows, days=30) is None
+    assert viz.period_return(rows, days=None) == pytest.approx(0.10)  # 設定来だけ有効
+
+
+def test_period_return_base_is_latest_snapshot_on_or_before_cutoff():
+    """重大-2: 窓の起点は cutoff **以前の直近**スナップショット(終端日だけで切らない)。
+
+    1/1・1/10・1/25 の系列で 7 日窓の cutoff は 1/18。起点は 1/10 であり、実測期間は
+    15 日 = 窓外。値は出すが起点日と「窓外」注記で誤読を防ぐ。
+    """
     rows = [_nav(1, 100), _nav(10, 200), _nav(25, 220)]
-    # 直近 7 日窓(1/18 より後)には 1/25 の +10% だけが入る。
+    assert viz.window_base_index(rows, 7) == 1
     assert viz.period_return(rows, days=7) == pytest.approx(0.10)
+    detail = viz.period_detail(rows, label="1W", days=7)
+    assert detail.base_day == date(2026, 1, 10)
+    assert detail.end_day == date(2026, 1, 25)
+    assert detail.lag_days == 8  # cutoff 1/18 より 8 日古い起点
+    assert detail.note is not None and "起点が窓外" in detail.note
+
+
+def test_period_detail_no_note_when_base_is_within_tolerance():
+    rows = [_nav(1, 100), _nav(2, 105), _nav(8, 110)]
+    detail = viz.period_detail(rows, label="1W", days=7)
+    assert detail.base_day == date(2026, 1, 1)  # cutoff 1/1 ちょうど(境界は含む)
+    assert detail.lag_days == 0
+    assert detail.note is None
+    assert detail.value == pytest.approx(0.10)
 
 
 def test_period_return_none_when_insufficient():
@@ -189,8 +243,11 @@ def test_period_return_none_when_insufficient():
     assert viz.period_return([_nav(1, 100), _nav(2, 110)], days=0) is None
 
 
-def test_period_returns_table_shape():
+def test_period_returns_table_shape_and_unmet_periods():
     rows = [_nav(1, 100), _nav(2, 110)]
     table = viz.period_returns(rows)
-    assert [r["期間"] for r in table] == ["1W", "1M", "設定来"]
-    assert table[-1]["表示"] == "+10.00%"
+    assert [r.label for r in table] == ["1W(7日)", "1M(30日)", "設定来"]
+    assert [r.value_text for r in table] == [viz.MISSING, viz.MISSING, "+10.00%"]
+    assert [r.base_text for r in table] == [viz.MISSING, viz.MISSING, "2026-01-01"]
+    assert all("期間未充足" in r.note for r in table[:2])
+    assert table[-1].note is None

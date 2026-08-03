@@ -377,8 +377,12 @@ def fetch_cost_daily(conn: psycopg.Connection, *, days: int = 30) -> list[dict[s
         return _rows(cur)
 
 
-def fetch_cost_summary(conn: psycopg.Connection, *, days: int = 30) -> dict[str, Any]:
-    """直近 ``days`` 日のコスト合計と**分母**(実行回数)。
+def fetch_cost_summary(conn: psycopg.Connection) -> dict[str, Any]:
+    """**当月(暦月・JST)**のコスト合計と分母(実行回数)。
+
+    窓を 30 日ローリングではなく暦月にしたのは、比較対象が**月次**予算
+    (config/llm.yaml の budget.monthly_jpy → いずれ ledger.budgets の月次予算行)
+    だからである。分子と分母の期間が食い違うと消化率が意味を持たない(中-9)。
 
     「1 ジョブ実行あたりコスト」を出すために、コスト記録のある実行数(``cost_runs``)と
     全実行数(``all_runs``)の両方を返す。累計トークン数は返さない — 単調増加する絶対値は
@@ -390,11 +394,13 @@ def fetch_cost_summary(conn: psycopg.Connection, *, days: int = 30) -> dict[str,
             SELECT count(*) FILTER (WHERE cost IS NOT NULL)              AS cost_runs,
                    count(*)                                             AS all_runs,
                    coalesce(sum((cost ->> 'total_cost_estimate')::numeric), 0)
-                                                                        AS total_cost
+                                                                        AS total_cost,
+                   (date_trunc('month', now() AT TIME ZONE 'Asia/Tokyo')
+                        AT TIME ZONE 'Asia/Tokyo')                      AS since
             FROM meta.runs
-            WHERE started_at >= now() - make_interval(days => %s)
-            """,
-            (days,),
+            WHERE started_at >= date_trunc('month', now() AT TIME ZONE 'Asia/Tokyo')
+                                   AT TIME ZONE 'Asia/Tokyo'
+            """
         )
         return _rows(cur)[0]
 
