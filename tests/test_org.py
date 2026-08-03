@@ -1,10 +1,43 @@
-"""org — 組織メンバー台帳ローダ(config/org.yaml v2)のテスト。DB 不要の純ロジック。"""
+"""org — 組織メンバー台帳ローダ(config/org.yaml v2)のテスト。
+
+台帳の読取・役職解決・author 組立は DB 不要の純ロジック。アイコン上書き(0020)の
+マージ・URL 検証も、DB とネットワークをフェイクで差し替えて DB 無しで検証する
+(実 DB を使う保存/履歴の検証は tests/ops/test_org_icon_overrides.py)。
+"""
 
 from __future__ import annotations
 
 import pytest
 
 from ryza import org
+
+
+class _FakeCursor:
+    """``ops.org_icon_overrides`` の SELECT だけに答える最小のカーソル。"""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self.queries: list[str] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.queries.append(sql)
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeConn:
+    def __init__(self, overrides: dict[str, str]):
+        self.cursor_obj = _FakeCursor(list(overrides.items()))
+
+    def cursor(self):
+        return self.cursor_obj
 
 
 def test_members_loaded_from_ledger():
@@ -77,3 +110,123 @@ def test_embed_author_shape():
 def test_author_for_role_follows_ledger_rename():
     author = org.author_for_role("audit")
     assert author["name"] == "ターニャ(監査部門)"
+
+
+def test_embed_author_carries_member_id_for_delivery_time_resolution():
+    """配送時に上書きを引けるよう、author は内部キー member_id を運ぶ(0020)。"""
+    assert org.embed_author("aya")[org.AUTHOR_MEMBER_KEY] == "aya"
+    assert org.author_for_role("audit")[org.AUTHOR_MEMBER_KEY] == "tanya"
+
+
+# ── アイコン上書きのマージ(0020)─────────────────────────────────────────────
+def test_effective_members_without_conn_is_yaml_only():
+    """conn を渡さない呼び出しは従来どおり台帳そのまま(後方互換)。"""
+    assert org.effective_members() == org.members()
+    assert org.effective_members(None)["aya"].icon_url == org.members()["aya"].icon_url
+
+
+def test_effective_members_applies_db_override():
+    conn = _FakeConn({"aya": "https://example.test/new-aya.png"})
+    merged = org.effective_members(conn)
+    assert merged["aya"].icon_url == "https://example.test/new-aya.png"
+    # 上書きされるのは icon_url だけ(名前・色・役職は台帳のまま)。
+    assert merged["aya"].name == org.members()["aya"].name
+    assert merged["aya"].color == org.members()["aya"].color
+    # 上書きの無いメンバーは台帳のまま。
+    assert merged["tanya"].icon_url == org.members()["tanya"].icon_url
+
+
+def test_effective_members_ignores_unknown_member_id():
+    """台帳に無い id の上書き行は無視する(消えたキャラの残骸を表示に混ぜない)。"""
+    conn = _FakeConn({"ghost": "https://example.test/ghost.png", "aya": "https://e.test/a.png"})
+    merged = org.effective_members(conn)
+    assert "ghost" not in merged
+    assert merged["aya"].icon_url == "https://e.test/a.png"
+
+
+def test_get_member_and_authors_follow_override():
+    conn = _FakeConn({"tanya": "https://example.test/tanya.png"})
+    assert org.get_member("tanya", conn=conn).icon_url == "https://example.test/tanya.png"
+    assert org.member_for_role("audit", conn=conn).icon_url == "https://example.test/tanya.png"
+    assert org.author_for_role("audit", conn=conn)["icon_url"] == "https://example.test/tanya.png"
+
+
+# ── 配送時の解決(純関数)──────────────────────────────────────────────────────
+def test_resolve_author_replaces_icon_and_strips_internal_key():
+    author = {"name": "射命丸 文(報道部アナリスト)", "icon_url": "https://old/x.png",
+              org.AUTHOR_MEMBER_KEY: "aya"}
+    resolved = org.resolve_author(author, {"aya": "https://new/y.png"})
+    assert resolved == {"name": "射命丸 文(報道部アナリスト)", "icon_url": "https://new/y.png"}
+
+
+def test_resolve_author_strips_internal_key_even_without_override():
+    """member_id は Discord API のフィールドではないため常に落とす。"""
+    author = {"name": "n", "icon_url": "https://old/x.png", org.AUTHOR_MEMBER_KEY: "aya"}
+    assert org.resolve_author(author, {}) == {"name": "n", "icon_url": "https://old/x.png"}
+
+
+def test_apply_icon_overrides_on_embed():
+    embed = {"title": "朝刊", "author": org.embed_author("aya"), "color": 1}
+    out = org.apply_icon_overrides(embed, {"aya": "https://new/y.png"})
+    assert out["author"]["icon_url"] == "https://new/y.png"
+    assert org.AUTHOR_MEMBER_KEY not in out["author"]
+    assert out["title"] == "朝刊" and out["color"] == 1
+    assert embed["author"][org.AUTHOR_MEMBER_KEY] == "aya"  # 元の dict は壊さない
+
+
+def test_apply_icon_overrides_passthrough_without_author():
+    embed = {"title": "起動通知", "color": 1}
+    assert org.apply_icon_overrides(embed, {"aya": "https://new/y.png"}) == embed
+
+
+# ── URL 検証 ─────────────────────────────────────────────────────────────────
+def _opener(content_type: str, *, fail_head: bool = False):
+    calls: list[tuple[str, str]] = []
+
+    def _fake(url: str, method: str, timeout: float) -> str:
+        calls.append((url, method))
+        if fail_head and method == "HEAD":
+            raise OSError("405 Method Not Allowed")
+        return content_type
+
+    _fake.calls = calls  # type: ignore[attr-defined]
+    return _fake
+
+
+def test_check_icon_url_accepts_https_image():
+    opener = _opener("image/png")
+    assert org.check_icon_url(" https://x.test/a.png ", opener=opener) == "https://x.test/a.png"
+    assert opener.calls == [("https://x.test/a.png", "HEAD")]
+
+
+def test_check_icon_url_accepts_content_type_with_charset():
+    assert org.check_icon_url("https://x.test/a.jpg", opener=_opener("image/jpeg; charset=binary"))
+
+
+@pytest.mark.parametrize(
+    "url", ["http://x.test/a.png", "ftp://x.test/a.png", "data:image/png;base64,AA", "/a.png"]
+)
+def test_check_icon_url_rejects_non_https(url):
+    opener = _opener("image/png")
+    with pytest.raises(org.IconUrlError):
+        org.check_icon_url(url, opener=opener)
+    assert opener.calls == []  # 実アクセスの前に弾く
+
+
+def test_check_icon_url_rejects_non_image():
+    with pytest.raises(org.IconUrlError, match="画像ではない"):
+        org.check_icon_url("https://x.test/page", opener=_opener("text/html"))
+
+
+def test_check_icon_url_falls_back_to_get_when_head_rejected():
+    opener = _opener("image/webp", fail_head=True)
+    assert org.check_icon_url("https://x.test/a.webp", opener=opener)
+    assert [m for _, m in opener.calls] == ["HEAD", "GET"]
+
+
+def test_check_icon_url_rejects_unreachable():
+    def _boom(url: str, method: str, timeout: float) -> str:
+        raise TimeoutError("timed out")
+
+    with pytest.raises(org.IconUrlError, match="到達できない"):
+        org.check_icon_url("https://x.test/a.png", opener=_boom)

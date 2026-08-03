@@ -12,13 +12,23 @@ Discord 向けの ``Member.icon_url`` は拡張子を ``.png`` へ読み替え�
 未生成の間この URL は 404 になるが、Discord はアイコン取得に失敗しても名前だけで author を
 表示するため embed 自体は成立する。Streamlit(役員室チャット)は SVG を表示できるため、
 ローカルの SVG パス(``Member.icon_repo_path``)をそのまま使う。
+
+**アイコンの実行時上書き(0020・代表指示 2026-08-03)**: 代表はダッシュボードの組織ページから
+アイコンを差し替えられる。上書きは ``ops.org_icon_overrides`` に入り、``conn`` を渡した
+呼び出し(``effective_members`` / ``get_member(..., conn=...)`` 等)でのみ台帳の上に重なる。
+``conn`` を渡さない呼び出しは従来どおり YAML そのままで、DB を持たない経路
+(``bridge_send`` 等)は影響を受けない。**上書きはキャッシュしない** — 保存直後の投稿・
+描画に必ず反映させるため、読取のたびに PK 1 行の SELECT を行う(0020 の履歴方式の注記参照)。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import urllib.request
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
@@ -28,6 +38,10 @@ _CONFIG_PATH = _REPO_ROOT / "config" / "org.yaml"
 
 # GitHub raw のベース URL。embed アイコンは Discord 側が取得するため公開 URL が必要。
 _RAW_BASE = "https://raw.githubusercontent.com/klonyapin/ryza/main/"
+
+# embed の author に載せる内部キー(0020)。Discord API のフィールドではないため、
+# 配送直前に ``resolve_author`` が取り除く。
+AUTHOR_MEMBER_KEY = "member_id"
 
 
 @dataclass(frozen=True)
@@ -87,52 +101,267 @@ def _load(path: str) -> tuple[Member, ...]:
 
 
 def members(path: str | Path = _CONFIG_PATH) -> dict[str, Member]:
-    """全メンバー(id → Member)。"""
+    """全メンバー(id → Member)。台帳(YAML)そのまま — DB 上書きは適用しない。"""
     return {m.id: m for m in _load(str(path))}
 
 
-def get_member(member_id: str, path: str | Path = _CONFIG_PATH) -> Member:
+def effective_members(
+    conn: Any | None = None, path: str | Path = _CONFIG_PATH
+) -> dict[str, Member]:
+    """台帳に DB のアイコン上書き(0020)を重ねた実効メンバー(id → Member)。
+
+    ``conn`` が None なら ``members()`` と同じ(後方互換 — DB を持たない経路のため)。
+    台帳に無い ``member_id`` の上書き行は**無視**する(YAML が正。消えたキャラの
+    残骸を表示に混ぜない)。
+    """
+    base = members(path)
+    if conn is None:
+        return base
+    merged = dict(base)
+    for member_id, icon_url in icon_overrides(conn).items():
+        current = merged.get(member_id)
+        if current is None:
+            continue  # 台帳に無い id(改名・削除の残骸)は無視する
+        merged[member_id] = replace(current, icon_url=icon_url)
+    return merged
+
+
+def get_member(
+    member_id: str, path: str | Path = _CONFIG_PATH, *, conn: Any | None = None
+) -> Member:
     """id でメンバーを引く。台帳に無い id は即例外(黙って既定人格を出さない)。"""
     try:
-        return members(path)[member_id]
+        return effective_members(conn, path)[member_id]
     except KeyError as exc:
         raise KeyError(f"config/org.yaml に id='{member_id}' のメンバーがいない") from exc
 
 
-def member_for_role(role: str, path: str | Path = _CONFIG_PATH) -> Member:
+def member_for_role(
+    role: str, path: str | Path = _CONFIG_PATH, *, conn: Any | None = None
+) -> Member:
     """役職キー(cio / independent_officer / audit 等)から担当メンバーを引く。
 
     対応表を二重管理せず、台帳の ``persona`` フィールド
     (``personas/<役職キーをハイフン化>`` — personas.py の命名規約)で解決する。
     """
     persona = "personas/" + role.replace("_", "-")
-    for m in _load(str(path)):
+    for m in effective_members(conn, path).values():
         if m.persona == persona:
             return m
     raise KeyError(f"config/org.yaml に persona='{persona}' のメンバーがいない")
 
 
-def embed_author(member_id: str, path: str | Path = _CONFIG_PATH) -> dict[str, str]:
+def embed_author(
+    member_id: str, path: str | Path = _CONFIG_PATH, *, conn: Any | None = None
+) -> dict[str, str]:
     """Discord embed の author dict(「名前(役職)」+アイコン URL)。
 
     報道部(aya)・監査(tanya)の embed 構築が使う共通ヘルパ。T-015 の
     リスクレポート等、今後の embed もここを通す(名前・役職のハードコード禁止)。
+
+    ``member_id`` を内部キーとして同梱する(``AUTHOR_MEMBER_KEY``)。配送時に Bot が
+    最新のアイコン上書きへ解決し直すために必要で、Discord へ送る直前に
+    ``resolve_author`` が取り除く(Discord API へは渡らない)。
     """
-    m = get_member(member_id, path)
-    return {"name": m.display_name, "icon_url": m.icon_url}
+    m = get_member(member_id, path, conn=conn)
+    return {"name": m.display_name, "icon_url": m.icon_url, AUTHOR_MEMBER_KEY: m.id}
 
 
-def author_for_role(role: str, path: str | Path = _CONFIG_PATH) -> dict[str, str]:
+def author_for_role(
+    role: str, path: str | Path = _CONFIG_PATH, *, conn: Any | None = None
+) -> dict[str, str]:
     """役職キーから embed author dict を引く(台帳のキャラ改名・id 変更に自動追従)。"""
-    m = member_for_role(role, path)
-    return {"name": m.display_name, "icon_url": m.icon_url}
+    m = member_for_role(role, path, conn=conn)
+    return {"name": m.display_name, "icon_url": m.icon_url, AUTHOR_MEMBER_KEY: m.id}
+
+
+# ── アイコン上書き(0020)─────────────────────────────────────────────────────
+def icon_overrides(conn: Any) -> dict[str, str]:
+    """``ops.org_icon_overrides`` の現在値(member_id → icon_url)。
+
+    即反映のためキャッシュしない(0020 の履歴方式の注記)。読取専用ロール
+    (``ryza_dashboard``)でも実行できる SELECT のみ。
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT member_id, icon_url FROM ops.org_icon_overrides")
+        return {row[0]: row[1] for row in cur.fetchall()}
+
+
+def resolve_author(
+    author: dict[str, Any], overrides: dict[str, str]
+) -> dict[str, Any]:
+    """配送直前に author の ``icon_url`` を最新の上書きへ差し替える(純関数)。
+
+    ``member_id`` は内部キーなので常に取り除く(Discord へ未知フィールドを送らない)。
+    上書きが無い/古い embed(member_id 無し)はそのまま通す。
+    """
+    resolved = {k: v for k, v in author.items() if k != AUTHOR_MEMBER_KEY}
+    member_id = author.get(AUTHOR_MEMBER_KEY)
+    if member_id and member_id in overrides:
+        resolved["icon_url"] = overrides[member_id]
+    return resolved
+
+
+def apply_icon_overrides(
+    embed: dict[str, Any], overrides: dict[str, str]
+) -> dict[str, Any]:
+    """embed(dict)の author に上書きを適用した新しい dict を返す(純関数)。
+
+    author を持たない embed(起動通知など)はそのまま返す。
+    """
+    author = embed.get("author")
+    if not isinstance(author, dict):
+        return embed
+    return {**embed, "author": resolve_author(author, overrides)}
+
+
+# ── アイコン URL の検証(https のみ・実体が画像であること)───────────────────
+class IconUrlError(ValueError):
+    """アイコン URL が使えない(スキーム違反・到達不能・画像でない)。"""
+
+
+# 検証の実アクセスは短時間で打ち切る(UI の保存操作を待たせない)。
+ICON_URL_TIMEOUT = 5.0
+
+
+def _default_opener(url: str, method: str, timeout: float) -> str:
+    """URL へ ``method`` でアクセスし Content-Type を返す(差し替え可能な I/O)。"""
+    req = urllib.request.Request(url, method=method, headers={"User-Agent": "RyzaOrg/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - https 限定済み
+        return str(resp.headers.get("Content-Type", ""))
+
+
+def check_icon_url(
+    url: str,
+    *,
+    opener: Any | None = None,
+    timeout: float = ICON_URL_TIMEOUT,
+) -> str:
+    """アイコン URL を検証して正規化した URL を返す。不可なら ``IconUrlError``。
+
+    - **https のみ**(http・data:・相対 URL は拒否。Discord も Streamlit も外部から
+      取得するため、平文経路とスキームの取り違えをここで塞ぐ)
+    - 実アクセスして ``Content-Type`` が ``image/*`` であること。HEAD を拒む配信元
+      (405/501)があるため HEAD → GET の順に試す
+    - 到達不能・タイムアウトは失敗として扱い、**保存しない**
+
+    ``opener`` は ``(url, method, timeout) -> content_type`` の差し替え口
+    (テストは実ネットワークを叩かない)。
+    """
+    candidate = url.strip()
+    parsed = urlparse(candidate)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise IconUrlError(f"https:// の URL のみ受け付ける(受領: {candidate!r})")
+    fetch = opener if opener is not None else _default_opener
+    content_type = ""
+    errors: list[str] = []
+    for method in ("HEAD", "GET"):
+        try:
+            content_type = fetch(candidate, method, timeout)
+            break
+        except Exception as exc:  # noqa: BLE001 - 失敗理由は利用者に見せる
+            errors.append(f"{method}: {type(exc).__name__}: {exc}")
+    else:
+        raise IconUrlError(f"URL に到達できない({' / '.join(errors)})")
+    if not content_type.split(";")[0].strip().lower().startswith("image/"):
+        raise IconUrlError(
+            f"画像ではない(Content-Type: {content_type or '(なし)'})。画像の直リンク URL を指定する"
+        )
+    return candidate
+
+
+# ── 上書きの書込(ダッシュボード組織ページ — ryza_boardroom ロール)──────────
+def set_icon_override(
+    conn: Any, member_id: str, icon_url: str, actor: str, *, path: str | Path = _CONFIG_PATH
+) -> None:
+    """アイコン上書きを保存し、変更履歴を 1 行残す(呼び出し側が commit / autocommit)。
+
+    台帳に無い ``member_id`` は ``KeyError``(存在しないキャラの上書きを作らない)。
+    URL の検証は呼び出し側の責務(``check_icon_url``)— ここは DB 書込のみを行う。
+    現在値とログは**同じトランザクションで**書く(0020 の方式 B の担保)。
+    """
+    if member_id not in members(path):
+        raise KeyError(f"config/org.yaml に id='{member_id}' のメンバーがいない")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ops.org_icon_overrides (member_id, icon_url, updated_by, updated_at)
+            VALUES (%s, %s, %s, now())
+            ON CONFLICT (member_id) DO UPDATE
+            SET icon_url = EXCLUDED.icon_url,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = now()
+            """,
+            (member_id, icon_url, actor),
+        )
+        cur.execute(
+            """
+            INSERT INTO ops.org_icon_override_log (member_id, action, icon_url, actor)
+            VALUES (%s, 'set', %s, %s)
+            """,
+            (member_id, icon_url, actor),
+        )
+
+
+def update_icon(
+    conn: Any,
+    member_id: str,
+    url: str,
+    actor: str,
+    *,
+    opener: Any | None = None,
+    timeout: float = ICON_URL_TIMEOUT,
+    path: str | Path = _CONFIG_PATH,
+) -> str:
+    """URL を検証してから上書きを保存する。**検証に失敗したら書き込まない**。
+
+    ダッシュボードの保存ボタンが呼ぶ入口。検証(``check_icon_url``)と書込
+    (``set_icon_override``)を必ずこの順で結び、「検証を飛ばして保存する」経路を
+    UI 側に作らせない。
+    """
+    checked = check_icon_url(url, opener=opener, timeout=timeout)
+    set_icon_override(conn, member_id, checked, actor, path=path)
+    return checked
+
+
+def clear_icon_override(conn: Any, member_id: str, actor: str) -> bool:
+    """上書きを削除して台帳の初期値へ戻す。削除した行があれば True。
+
+    上書きが無い場合も履歴は残さない(状態が変わっていないため)。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM ops.org_icon_overrides WHERE member_id = %s RETURNING member_id",
+            (member_id,),
+        )
+        if cur.fetchone() is None:
+            return False
+        cur.execute(
+            """
+            INSERT INTO ops.org_icon_override_log (member_id, action, icon_url, actor)
+            VALUES (%s, 'reset', NULL, %s)
+            """,
+            (member_id, actor),
+        )
+    return True
 
 
 __all__ = [
+    "AUTHOR_MEMBER_KEY",
+    "ICON_URL_TIMEOUT",
+    "IconUrlError",
     "Member",
+    "apply_icon_overrides",
     "author_for_role",
+    "check_icon_url",
+    "clear_icon_override",
+    "effective_members",
     "embed_author",
     "get_member",
+    "icon_overrides",
     "member_for_role",
     "members",
+    "resolve_author",
+    "set_icon_override",
+    "update_icon",
 ]
