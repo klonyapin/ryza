@@ -380,17 +380,19 @@ def render_underwater(rows: Sequence[Mapping[str, Any]], *, target=None) -> None
 def flow_adjusted_returns(rows: Sequence[Mapping[str, Any]]) -> list[tuple[date, float]]:
     """外部フロー調整済みの日次リターン列 ``[(day, r)]``。
 
-    ``r_t = (nav_t − flow_t − nav_{t−1}) / nav_{t−1}``。定義は
+    ``r_t = (nav_t − flow_eop_t) / (nav_{t−1} + flow_bop_t) − 1``。定義は
     ``ryza.risk.engine.book_returns`` と同一(出資・払戻をリターンに数えない TWR)。
-    直前 NAV が 0 以下の区間は除外する。
+    ``flow_eop`` は測定日当日の仕訳、``flow_bop`` は前の測定日より後・当日より前の仕訳
+    (``queries.fetch_nav_data`` が ``ryza.risk.navflow`` の規約で寄せた値 — 休日の
+    仕訳はここに入り、その区間の**運用元本**なので分母に足す)。
+    分母(運用元本)が 0 以下の区間は測定できないので除外する。
     """
     out: list[tuple[date, float]] = []
     for prev, cur in zip(rows, rows[1:], strict=False):
-        prev_nav = float(prev["nav"])
-        if prev_nav <= 0:
+        base = float(prev["nav"]) + float(cur.get("flow_bop") or 0)
+        if base <= 0:
             continue
-        flow = float(cur.get("net_flow") or 0)
-        out.append((cur["day"], (float(cur["nav"]) - flow - prev_nav) / prev_nav))
+        out.append((cur["day"], (float(cur["nav"]) - float(cur.get("flow_eop") or 0)) / base - 1.0))
     return out
 
 
@@ -452,17 +454,14 @@ def period_return(rows: Sequence[Mapping[str, Any]], *, days: int | None) -> flo
     """起点スナップショットから最終日までの複利リターン(外部フロー調整済み)。
 
     期間未充足は None。0 を返さないのは「変化なし」と「測れない」を混同しないため。
+    日次リターンの定義は :func:`flow_adjusted_returns`(BOP/EOP 分離)と同一。
     """
     base = window_base_index(rows, days)
     if base is None:
         return None
     acc = 1.0
-    for prev, cur in zip(rows[base:], rows[base + 1 :], strict=False):
-        prev_nav = float(prev["nav"])
-        if prev_nav <= 0:
-            continue
-        flow = float(cur.get("net_flow") or 0)
-        acc *= 1.0 + (float(cur["nav"]) - flow - prev_nav) / prev_nav
+    for _, r in flow_adjusted_returns(rows[base:]):
+        acc *= 1.0 + r
     return acc - 1.0
 
 

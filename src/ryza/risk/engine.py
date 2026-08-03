@@ -17,9 +17,17 @@
   日次リターンに適用した系列の下位 5% 平均)+パラメトリック併算(平均ゼロ正規仮定:
   ``ES = σ·φ(z95)/0.05``)。**大きい方を採用**し、NAV 比上限「超」で es_exceeded。
   ポジションが無い間は 0
-- **フロー調整**: リターンは ``r_t = (nav_t − flow_t − nav_{t−1}) / nav_{t−1}``。
-  出資・払戻(外部フロー)を損益と混同しない。DD は素の NAV 系列で測る(§3.1 の
-  文言どおり「帳簿 NAV 系列」。出資でピークが上がるのは保守側)
+- **フロー調整**(BOP/EOP 分離 — 独立審査 2026-08-03 重要-1):
+  ``r_t = (nav_t − flow_eop_t) / (nav_{t−1} + flow_bop_t) − 1``。
+  ``flow_eop_t`` は測定日当日(``snap_date`` と同日)の外部フロー、``flow_bop_t`` は
+  前の測定日より後・当日より前に入った外部フロー(``ryza.risk.navflow`` が
+  ロールフォワードした分)。期中に入った資金は**その区間の運用元本になっている**ため
+  分母に入れる。期末フロー一律仮定(分子から引くだけ)だと区間リターンが
+  ``(1 + flow/nav_{t−1})`` 倍に増幅され、資本形成期に誤 ``vol_exceeded`` を招く
+  (審査の手計算: V₀=100万・期中+50万・市場+5% → 期末仮定 +7.5% / 真値 +5.0%)。
+  フローが無い日は従来式に退化する。出資・払戻(外部フロー)を損益と混同しない。
+  DD は素の NAV 系列で測る(§3.1 の文言どおり「帳簿 NAV 系列」。出資でピークが
+  上がるのは保守側)
 - **データ不足時は fail-safe**(指示書): 帳簿リターン系列が N(=20)営業日に満たない
   間は vol/es フラグを立てず、``notes`` に「データ不足 n/N営業日」を明記する。
   DD はデータ1日目から有効
@@ -46,11 +54,25 @@ _ALPHA = 0.05  # ES95 のテイル確率(「ES(95%)」の定義そのもの)
 
 @dataclass(frozen=True)
 class NavPoint:
-    """NAV 系列の1点。``net_flow`` はその日の外部フロー(出資+・払戻−、JPY)。"""
+    """NAV 系列の1点(外部フローは出資+・払戻−、JPY)。
+
+    フローを2つに分けて持つのは、区間リターンの分母(運用元本)と分子(期末残高)で
+    扱いが違うため(モジュール docstring「フロー調整」):
+
+    - ``flow_eop``: 測定日**当日**の仕訳。当日の運用には乗っていないので分子から引く
+    - ``flow_bop``: 前の測定日より後・当日より前の仕訳(締めが走らない休日などの分。
+      ``ryza.risk.navflow`` がロールフォワードして付ける)。区間の運用元本なので分母に足す
+    """
 
     day: date
     nav: Decimal
-    net_flow: Decimal = Decimal(0)
+    flow_eop: Decimal = Decimal(0)
+    flow_bop: Decimal = Decimal(0)
+
+    @property
+    def net_flow(self) -> Decimal:
+        """その点に帰属する外部フロー純額(表示用。測定は BOP/EOP を分けて使う)。"""
+        return self.flow_eop + self.flow_bop
 
 
 @dataclass(frozen=True)
@@ -100,11 +122,17 @@ class RiskState:
 
 
 def book_returns(series: Sequence[NavPoint]) -> list[float]:
-    """帳簿日次リターン(外部フロー調整済み)。``r_t = (nav_t − flow_t − nav_{t−1}) / nav_{t−1}``。"""
+    """帳簿日次リターン(外部フロー調整済み TWR)。
+
+    ``r_t = (nav_t − flow_eop_t) / (nav_{t−1} + flow_bop_t) − 1``(BOP/EOP 分離)。
+    分母(運用元本)が 0 以下になる区間は測定できないので除外する — 全額払戻後に
+    再出資した区間は ``nav_{t−1} = 0`` でも ``flow_bop > 0`` なら測れる。
+    """
     returns: list[float] = []
     for prev, cur in zip(series, series[1:], strict=False):
-        if prev.nav > 0:
-            returns.append(float((cur.nav - cur.net_flow - prev.nav) / prev.nav))
+        base = prev.nav + cur.flow_bop
+        if base > 0:
+            returns.append(float((cur.nav - cur.flow_eop) / base) - 1.0)
     return returns
 
 
