@@ -3,7 +3,9 @@
 責務(T-006 基盤):
 - ``outbox``     … ``press.outbox`` をポーリング配送(sent_at で冪等・二重送信防止)
 - ``approvals``  … 承認 embed+ボタン → ``governance.decisions`` 記録(オーナー ID 検証)
-- ``killswitch`` … ``/kill`` ``/resume`` → ``ops.flags`` 更新(遷移は ``ops.flag_events`` に追記)
+- ``killswitch`` … 多段 Kill Switch 状態機械(IPS v1.3 §5)。``/kill``(凍結)``/winddown``
+  (計画的現金化)``/flatten``(緊急清算・2段階)``/resume``(復帰・2段階)→
+  ``ops.trading_state`` 更新+``governance.killswitch_events`` 監査(``ops.flags`` はミラー)
 - ``daily``      … 18:00 JST 日報骨格(当面は稼働状況のみ)
 - ``main``       … discord.py 2.6 常駐エントリポイント(トークンは Secret Manager から)
 

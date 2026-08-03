@@ -4,7 +4,8 @@ systemd(Restart=always)で常駐し:
 - 5秒間隔で ``press.outbox`` を配送(``outbox.deliver_pending``)
 - 18:00 JST に日報を投入(``daily.enqueue_daily``)
 - ``#承認`` のボタン押下を ``governance.decisions`` に記録(オーナー検証)
-- ``/kill`` ``/resume``(2段階)で Kill Switch を操作
+- ``/kill``(凍結)``/winddown``(計画的現金化)``/flatten``(緊急清算・2段階)
+  ``/resume``(復帰・2段階)で Kill Switch 状態機械を操作(killswitch.py・保護領域)
 - 起動時に4チャンネル(報道/承認/運営/dev)を指定カテゴリ配下へ ensure し、``#運営`` へ再起動通知
 
 **このモジュールは discord.py に依存する唯一の層**
@@ -38,7 +39,7 @@ from discord.ext import commands, tasks
 
 from ryza.bot import COLOR_FLASH, COLOR_NORMAL, channels, killswitch, outbox
 from ryza.bot import daily as daily_mod
-from ryza.bot.approvals import KINDS, NotOwnerError, record_decision
+from ryza.bot.approvals import KINDS, NotOwnerError, parse_proposal, record_decision
 from ryza.bot.daily import JST
 from ryza.db.conn import connect
 from ryza.provenance import start_run
@@ -174,14 +175,60 @@ class ResumeConfirmView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         try:
             with connect() as conn:
-                killswitch.release(
+                result = killswitch.release(
                     conn, str(interaction.user.id), self.bot.owner_ids, confirmed=True
                 )
                 conn.commit()
         except NotOwnerError:
             await interaction.response.send_message("権限がありません。", ephemeral=True)
             return
-        await interaction.response.send_message("Kill Switch を解除しました(通常運転)。")
+        except killswitch.InvalidTransitionError as exc:
+            await interaction.response.send_message(f"復帰できません: {exc}", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"Kill Switch を解除しました({result.previous} → 通常運転)。"
+        )
+
+
+class FlattenConfirmView(discord.ui.View):
+    """/flatten の2段階目。確認ボタンで成行即時全清算(決定論コード)を開始する。"""
+
+    def __init__(self, bot: RyzaBot, reason: str | None) -> None:
+        super().__init__(timeout=60)
+        self.bot = bot
+        self.reason = reason
+
+    @discord.ui.button(label="全清算を確定", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        try:
+            with connect() as conn:
+                r = start_run("bot.killswitch.flatten", conn=conn)
+                result = killswitch.flatten(
+                    conn,
+                    str(interaction.user.id),
+                    self.bot.owner_ids,
+                    r.run_id,
+                    confirmed=True,
+                    reason=self.reason,
+                    hook=self.bot.execution_hook,
+                )
+                r.finish("success")
+                conn.commit()
+        except NotOwnerError:
+            await interaction.response.send_message("権限がありません。", ephemeral=True)
+            return
+        except killswitch.InvalidTransitionError as exc:
+            await interaction.response.send_message(f"清算できません: {exc}", ephemeral=True)
+            return
+        note = (
+            ""
+            if result.hook_engaged
+            else "\n⚠ 執行層未接続のため状態遷移のみ(#運営 に通知済み)。"
+        )
+        await interaction.response.send_message(
+            f"🚨 緊急清算を確定しました({result.previous} → flattening)。"
+            f"成行で全ポジションを清算します。{note}"
+        )
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -195,6 +242,9 @@ class RyzaBot(commands.Bot):
         # プロパティで上書きせず属性として設定する(is_owner 側は文字列比較で吸収)
         self.owner_ids = {int(o) for o in owner_ids() if str(o).isdigit()}
         self.category_id = category_id()
+        # 執行層(ブローカーアダプタ)は未実装。実装後にここへ ExecutionHook を注入する。
+        # None の間、/winddown /flatten は状態遷移のみ記録し #運営 へ「執行層未接続」を通知する。
+        self.execution_hook: killswitch.ExecutionHook | None = None
 
     async def setup_hook(self) -> None:
         self._register_commands()
@@ -248,8 +298,15 @@ class RyzaBot(commands.Bot):
             channel = self.get_channel(int(channel_id))
             if channel is None:
                 raise RuntimeError(f"チャンネル取得失敗: {channel_id}")
+            # #承認 向けで proposal footer を持つ embed には承認ボタンを付ける
+            # (凍結中の例外的取引などを1件ずつオーナー承認する経路)。
+            send_kwargs: dict = {"embed": embed}
+            if msg.channel == "approval":
+                parsed = parse_proposal(msg.embed)
+                if parsed is not None:
+                    send_kwargs["view"] = ApprovalView(self, parsed[0], kind=parsed[1])
             # discord の I/O はコルーチン。ワーカースレッドからイベントループに投げて待つ。
-            fut = asyncio.run_coroutine_threadsafe(channel.send(embed=embed), loop)
+            fut = asyncio.run_coroutine_threadsafe(channel.send(**send_kwargs), loop)
             sent = fut.result(timeout=15)
             return str(sent.id)
 
@@ -285,29 +342,100 @@ class RyzaBot(commands.Bot):
 
     # ── コマンド登録 ───────────────────────────────────────────────────────
     def _register_commands(self) -> None:
-        @self.tree.command(name="kill", description="Kill Switch を有効化(発注停止)")
+        @self.tree.command(name="kill", description="凍結: 全新規発注停止・ポジション維持")
         @app_commands.describe(reason="停止理由(任意)")
         async def kill(interaction: discord.Interaction, reason: str | None = None) -> None:
             try:
                 with connect() as conn:
-                    killswitch.engage(
+                    r = start_run("bot.killswitch.kill", conn=conn)
+                    result = killswitch.engage(
+                        conn,
+                        str(interaction.user.id),
+                        self.owner_ids,
+                        reason=reason,
+                        run_id=r.run_id,
+                        hook=self.execution_hook,
+                    )
+                    r.finish("success")
+                    conn.commit()
+            except NotOwnerError:
+                await interaction.response.send_message("権限がありません。", ephemeral=True)
+                return
+            await interaction.response.send_message(
+                f"⛔ 凍結({result.previous} → frozen)。全新規発注を停止します"
+                f"(ポジションは維持)。理由: {reason or '(なし)'}"
+            )
+
+        @self.tree.command(
+            name="winddown", description="計画的現金化: 決定論アルゴで段階的に全ポジションを清算"
+        )
+        @app_commands.describe(reason="理由(任意)")
+        async def winddown(interaction: discord.Interaction, reason: str | None = None) -> None:
+            try:
+                with connect() as conn:
+                    r = start_run("bot.killswitch.winddown", conn=conn)
+                    result = killswitch.winddown(
+                        conn,
+                        str(interaction.user.id),
+                        self.owner_ids,
+                        r.run_id,
+                        reason=reason,
+                        hook=self.execution_hook,
+                    )
+                    r.finish("success")
+                    conn.commit()
+            except NotOwnerError:
+                await interaction.response.send_message("権限がありません。", ephemeral=True)
+                return
+            except killswitch.InvalidTransitionError as exc:
+                await interaction.response.send_message(f"実行できません: {exc}", ephemeral=True)
+                return
+            note = (
+                ""
+                if result.hook_engaged
+                else "\n⚠ 執行層未接続のため状態遷移のみ(#運営 に通知済み)。"
+            )
+            await interaction.response.send_message(
+                f"🪙 計画的現金化を開始({result.previous} → winding_down)。"
+                f"理由: {reason or '(なし)'}{note}"
+            )
+
+        @self.tree.command(
+            name="flatten", description="緊急清算: 成行で即時全清算(2段階確認)"
+        )
+        @app_commands.describe(reason="理由(任意)")
+        async def flatten(interaction: discord.Interaction, reason: str | None = None) -> None:
+            try:
+                with connect() as conn:
+                    current = killswitch.request_flatten(
                         conn, str(interaction.user.id), self.owner_ids, reason=reason
                     )
                     conn.commit()
             except NotOwnerError:
                 await interaction.response.send_message("権限がありません。", ephemeral=True)
                 return
+            except killswitch.InvalidTransitionError as exc:
+                await interaction.response.send_message(f"実行できません: {exc}", ephemeral=True)
+                return
             await interaction.response.send_message(
-                f"⛔ Kill Switch 有効化。全発注を停止します。理由: {reason or '(なし)'}"
+                f"🚨 成行で **全ポジションを即時清算** します(現在: {current})。"
+                "コスト・スリッページを受け入れる緊急用です。下のボタンで確定してください。",
+                view=FlattenConfirmView(self, reason),
+                ephemeral=True,
             )
 
-        @self.tree.command(name="resume", description="Kill Switch を解除(2段階確認)")
+        @self.tree.command(name="resume", description="復帰: Kill Switch を解除(2段階確認)")
         async def resume(interaction: discord.Interaction) -> None:
             if str(interaction.user.id) not in {str(o) for o in self.owner_ids}:
                 await interaction.response.send_message("権限がありません。", ephemeral=True)
                 return
+            with connect() as conn:
+                current = killswitch.get_state(conn)
+            if current == killswitch.NORMAL:
+                await interaction.response.send_message("既に通常運転です。", ephemeral=True)
+                return
             await interaction.response.send_message(
-                "本当に復帰しますか?下のボタンで確定してください。",
+                f"本当に復帰しますか(現在: {current})?下のボタンで確定してください。",
                 view=ResumeConfirmView(self),
                 ephemeral=True,
             )

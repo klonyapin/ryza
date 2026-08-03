@@ -18,8 +18,9 @@ import psycopg
 from ryza.bot import COLOR_APPROVAL, DISCLAIMER
 
 # 決定の種別(governance.decisions.decision)と提案種別(kind）
+# frozen_exception_trade は Kill Switch 凍結中の例外的取引(1件=1決定・IPS v1.3 §5)
 DECISIONS = ("approve", "reject", "question")
-KINDS = ("pr", "strategy_promotion", "breaker_resume", "budget", "other")
+KINDS = ("pr", "strategy_promotion", "breaker_resume", "budget", "frozen_exception_trade", "other")
 
 
 class NotOwnerError(PermissionError):
@@ -64,6 +65,28 @@ def build_approval_embed(
         ],
         "footer": {"text": f"{DISCLAIMER} / proposal:{proposal_ref}"},
     }
+
+
+def parse_proposal(embed: dict) -> tuple[str, str] | None:
+    """embed から ``(proposal_ref, kind)`` を復元する。承認 embed でなければ None。
+
+    配送側(main)が ``#承認`` 向けメッセージにボタン View を付けるかの判定に使う。
+    ``build_approval_embed`` が埋めたフッターの ``proposal:<ref>`` と「種別」フィールドを読む。
+    """
+    footer_text = (embed.get("footer") or {}).get("text", "")
+    marker = "proposal:"
+    idx = footer_text.rfind(marker)
+    if idx < 0:
+        return None
+    ref = footer_text[idx + len(marker):].strip()
+    if not ref:
+        return None
+    kind = "other"
+    for f in embed.get("fields", []):
+        if f.get("name") == "種別" and f.get("value") in KINDS:
+            kind = f["value"]
+            break
+    return ref, kind
 
 
 def record_decision(
