@@ -179,25 +179,36 @@ class ApprovalView(discord.ui.View):
         await self._record(interaction, "question")
 
 
-def _veto_sync(bot: RyzaBot, proposal_ref: str, reason: str, user_id: str) -> None:
-    """否認の記録+``#運営`` 通知(同期・DB I/O)。イベントループから ``to_thread`` で呼ぶ。"""
+def _veto_sync(
+    bot: RyzaBot, proposal_ref: str, reason: str, user_id: str, origin: str
+) -> None:
+    """否認の記録+``#運営`` 通知(同期・DB I/O)。イベントループから ``to_thread`` で呼ぶ。
+
+    ``origin``(0030)は呼び出し元が渡す。ボタン経路(``VetoModal``)と ``/veto`` は
+    **同じ ``job_name`` で Run を開く**ため、``meta.runs`` を辿っても両者は区別できない。
+    この関数を共有する以上、経路の申告はここより上でしかできない。
+    """
     with connect() as conn:
         r = start_run("bot.governance.veto", conn=conn)
         notices.apply_veto(
             conn, proposal_ref, reason,
             vetoed_by=user_id, owner_ids=bot.owner_ids, run_id=r.run_id,
+            origin=origin,
         )
         r.finish("success")
         conn.commit()
 
 
-def _withdraw_veto_sync(bot: RyzaBot, proposal_ref: str, reason: str, user_id: str) -> None:
+def _withdraw_veto_sync(
+    bot: RyzaBot, proposal_ref: str, reason: str, user_id: str, origin: str
+) -> None:
     """否認の撤回(同期・DB I/O)。"""
     with connect() as conn:
         r = start_run("bot.governance.veto_withdrawal", conn=conn)
         notices.withdraw_veto(
             conn, proposal_ref, reason,
             vetoed_by=user_id, owner_ids=bot.owner_ids, run_id=r.run_id,
+            origin=origin,
         )
         r.finish("success")
         conn.commit()
@@ -257,7 +268,10 @@ class VetoModal(discord.ui.Modal, title="否認(定款第3条)"):
         reason = str(self.reason)
         await _run_governance_action(
             interaction,
-            lambda: _veto_sync(self.bot, self.proposal_ref, reason, user_id),
+            # 出所: #承認 の否認ボタン → 理由モーダル(0030 の discord_button)。
+            lambda: _veto_sync(
+                self.bot, self.proposal_ref, reason, user_id, "discord_button"
+            ),
             ok_message=(
                 f"⛔ 否認を記録しました({self.proposal_ref})。"
                 "#運営 に取消義務のリマインドを投稿します。誤操作なら `/unveto` で撤回できます。"
@@ -726,7 +740,9 @@ class RyzaBot(commands.Bot):
             user_id = str(interaction.user.id)
             await _run_governance_action(
                 interaction,
-                lambda: _veto_sync(self, proposal_ref, reason, user_id),
+                # 出所: スラッシュコマンド(0030 の discord_command)。ボタン経路と同じ
+                # job_name で Run を開くので、run_id では両者を区別できない。
+                lambda: _veto_sync(self, proposal_ref, reason, user_id, "discord_command"),
                 ok_message=(
                     f"⛔ 否認を記録しました({proposal_ref})。"
                     "#運営 に取消義務のリマインドを投稿します。"
@@ -750,7 +766,11 @@ class RyzaBot(commands.Bot):
             user_id = str(interaction.user.id)
             await _run_governance_action(
                 interaction,
-                lambda: _withdraw_veto_sync(self, proposal_ref, reason, user_id),
+                # 出所: スラッシュコマンド(0030 の discord_command)。撤回はボタン経路が
+                # 無く /unveto だけだが、値は経路の申告であって唯一性の申告ではない。
+                lambda: _withdraw_veto_sync(
+                    self, proposal_ref, reason, user_id, "discord_command"
+                ),
                 ok_message=f"否認を撤回しました({proposal_ref})。#運営 に通知します。",
                 fail_prefix="撤回できません",
             )

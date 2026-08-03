@@ -100,6 +100,17 @@ DEFAULT_DEEMED_SOURCE = "deemed"
 # governance.decision_vetoes.kind の語彙(0021 の CHECK と一致させる)。
 VETO_KINDS: tuple[str, ...] = ("veto", "revert_complete", "withdrawal")
 
+# governance.decision_vetoes.origin の語彙(0030 の CHECK と一致させる)。
+#   discord_button  … #承認 の否認ボタン(+理由モーダル)
+#   discord_command … /veto ・ /unveto
+#   cli             … 人手のスクリプト・保守作業からの直接呼び出し
+#   job             … 自動ジョブ内からの記録
+# **既定値を持たせない**(writer は origin を必須の引数で受ける)。既定を置くと、出所を
+# 渡し忘れた新しい経路が黙って既定値として記録され、経路の一次識別という列の目的が
+# エラーも警告も無いまま失われる。run_id では代替できない —— ボタン経路と /veto は同じ
+# job_name で Run を開くため、meta.runs を辿っても両者は区別できない(0030 / 審査 重要-5)。
+VETO_ORIGINS: tuple[str, ...] = ("discord_button", "discord_command", "cli", "job")
+
 # 審査対象 SHA の様式(0029 の decisions_reviewed_sha_check と一致させる)。短縮 SHA を
 # 許すと A-18-8 の突合が「一致とも不一致とも言えない」状態を作るため完全 SHA のみ。
 # 監査側(audit/a18._FULL_SHA_RE)と同じ様式だが、audit は被監査モジュールを import しない
@@ -171,6 +182,8 @@ class Veto:
     reason: str
     revert_commit: str | None
     derived_effects_ref: str | None
+    #: 記録経路(:data:`VETO_ORIGINS` の1つ。0030)
+    origin: str
 
 
 def _require_text(value: str, field: str) -> str:
@@ -377,6 +390,7 @@ def _append_veto_row(
     vetoed_by: str,
     owner_ids: Iterable[str],
     expected_proposal_ref: str,
+    origin: str,
     revert_commit: str | None = None,
     derived_effects_ref: str | None = None,
     run_id: int | None = None,
@@ -384,10 +398,15 @@ def _append_veto_row(
     """``governance.decision_vetoes`` へ1行追記する(否認系 writer の共通実装)。
 
     検証の順序は「安いものから、かつ破壊的でない順」:
-    文字列必須 → オーナー検証 → 対象決定の実在 → ``proposal_ref`` 照合 → INSERT。
+    語彙 → 文字列必須 → オーナー検証 → 対象決定の実在 → ``proposal_ref`` 照合 → INSERT。
     """
     if kind not in VETO_KINDS:
         raise ValueError(f"未知の否認行種別: {kind}(既知: {', '.join(VETO_KINDS)})")
+    # 語彙検査を writer 側にも置くのは、0030 の CHECK 違反がトランザクションを中断させ、
+    # 呼び出し側の同一トランザクション内の書込(#運営 への通知投入)を巻き添えにするため
+    # (kind / reserved kind の事前検査と同じ理由)。一次統制はあくまで DB 側の CHECK。
+    if origin not in VETO_ORIGINS:
+        raise ValueError(f"未知の否認の出所: {origin}(既知: {', '.join(VETO_ORIGINS)})")
     _require_text(reason, "reason")
     _require_text(vetoed_by, "vetoed_by")
     _require_text(expected_proposal_ref, "expected_proposal_ref")
@@ -430,13 +449,13 @@ def _append_veto_row(
             """
             INSERT INTO governance.decision_vetoes
                 (decision_id, kind, vetoed_by, reason,
-                 revert_commit, derived_effects_ref, run_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                 revert_commit, derived_effects_ref, run_id, origin)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING veto_id
             """,
             (
                 decision_id, kind, vetoed_by, reason,
-                revert_commit, derived_effects_ref, run_id,
+                revert_commit, derived_effects_ref, run_id, origin,
             ),
         )
         veto_id = cur.fetchone()[0]
@@ -448,6 +467,7 @@ def _append_veto_row(
         reason=reason,
         revert_commit=revert_commit,
         derived_effects_ref=derived_effects_ref,
+        origin=origin,
     )
 
 
@@ -459,6 +479,7 @@ def record_veto(
     vetoed_by: str,
     owner_ids: Iterable[str],
     expected_proposal_ref: str,
+    origin: str,
     revert_commit: str | None = None,
     derived_effects_ref: str | None = None,
     run_id: int | None = None,
@@ -473,13 +494,16 @@ def record_veto(
             (否認は代表の専権 — ``approvals.record_decision`` と同型の検証)
         expected_proposal_ref: 否認するつもりの提案参照。``decision_id`` の行と
             一致しなければ INSERT せずに失敗する(対象取り違えの防止)
+        origin: 記録経路(:data:`VETO_ORIGINS`)。**必須**(既定値を置くと出所の
+            渡し忘れが黙って既定値として記録され、列の目的が失われる — 0030)
         revert_commit: 取消コミット SHA。否認時点で未確定なら省略し、確定後に
             :func:`record_revert_completion` で追記する
         derived_effects_ref: 取消不能な派生効果一覧の参照(``#運営`` への報告)
-        run_id: 記録したジョブ実行。否認は代表の作為でありジョブ生成物ではないため任意
+        run_id: 記録したジョブ実行。否認は代表の作為でありジョブ生成物ではないため任意。
+            **経路の識別には使えない** — ボタンと ``/veto`` は同じ job_name で Run を開く
 
     Raises:
-        ValueError: 必須文字列が空、または decision_id が存在しない
+        ValueError: 必須文字列が空、origin が語彙外、または decision_id が存在しない
         NotOwnerError: 非オーナーの否認操作
         ProposalRefMismatchError: expected_proposal_ref の不一致
         NotVetoableError: 対象が approve / deemed 以外(却下・質問は否認できない)
@@ -487,7 +511,7 @@ def record_veto(
     return _append_veto_row(
         conn, decision_id, "veto", reason,
         vetoed_by=vetoed_by, owner_ids=owner_ids,
-        expected_proposal_ref=expected_proposal_ref,
+        expected_proposal_ref=expected_proposal_ref, origin=origin,
         revert_commit=revert_commit, derived_effects_ref=derived_effects_ref,
         run_id=run_id,
     )
@@ -501,6 +525,7 @@ def record_revert_completion(
     vetoed_by: str,
     owner_ids: Iterable[str],
     expected_proposal_ref: str,
+    origin: str,
     revert_commit: str | None = None,
     derived_effects_ref: str | None = None,
     run_id: int | None = None,
@@ -511,11 +536,14 @@ def record_revert_completion(
     ``#運営`` への報告を義務付ける。追記オンリーのため否認行を UPDATE できず、
     確定した ``revert_commit`` / 派生効果一覧は本関数で追記する。現決定 view は
     これらを**列単位**で解決するので、片方だけの追記がもう片方を消さない。
+
+    ``origin`` は**この追記を書いた経路**であり、元の否認行の出所とは独立に記録する
+    (ボタンで否認したものを CLI から取消報告する、という組み合わせが普通に起きる)。
     """
     return _append_veto_row(
         conn, decision_id, "revert_complete", reason,
         vetoed_by=vetoed_by, owner_ids=owner_ids,
-        expected_proposal_ref=expected_proposal_ref,
+        expected_proposal_ref=expected_proposal_ref, origin=origin,
         revert_commit=revert_commit, derived_effects_ref=derived_effects_ref,
         run_id=run_id,
     )
@@ -529,6 +557,7 @@ def record_veto_withdrawal(
     vetoed_by: str,
     owner_ids: Iterable[str],
     expected_proposal_ref: str,
+    origin: str,
     run_id: int | None = None,
 ) -> Veto:
     """否認そのものの撤回(``kind='withdrawal'``)を追記する(審査 C-3)。
@@ -544,7 +573,7 @@ def record_veto_withdrawal(
     return _append_veto_row(
         conn, decision_id, "withdrawal", reason,
         vetoed_by=vetoed_by, owner_ids=owner_ids,
-        expected_proposal_ref=expected_proposal_ref,
+        expected_proposal_ref=expected_proposal_ref, origin=origin,
         run_id=run_id,
     )
 
@@ -554,7 +583,7 @@ _CURRENT_DECISION_COLUMNS = """
     decision_id, proposal_ref, kind, recorded_decision,
     effective_decision, is_vetoed, decided_by, decided_at,
     veto_id, veto_kind, vetoed_by, veto_reason, revert_commit,
-    derived_effects_ref, vetoed_at, reviewed_sha, review_ref
+    derived_effects_ref, vetoed_at, reviewed_sha, review_ref, veto_origin
 """
 
 
@@ -1037,6 +1066,7 @@ __all__ = [
     "SYSTEM_ACTOR_PREFIX",
     "VETOABLE_DECISIONS",
     "VETO_KINDS",
+    "VETO_ORIGINS",
     "DeemedApproval",
     "DeemedTarget",
     "DuplicateDecisionError",

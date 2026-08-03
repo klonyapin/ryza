@@ -578,8 +578,8 @@ reminders:
       type: issue_create
       title: "decision_vetoes に origin 列(否認の出所)を追加するか判断する"
       labels: [impl]
-      body: "0021 は decision_vetoes.run_id を NULL 可とした。理由は『否認は代表の作為(意思表示)でありジョブの生成物ではないため、生成元 Run という概念が本来的に無い』であり、独立役員審査 0021 C-8 はこの結論を妥当と認めた(当初コメントの『Discord 経路は Run を持たない』は事実誤認 — press.outbox.run_id は NOT NULL で、Discord 経路でも start_run で Run は取得できる)。ただし run_id が NULL であることは『Run が無い』のか『埋め忘れ』なのかを区別しない。是正候補: origin 列(discord_button|cli|job|migration 等)を足し、どの経路から否認が記録されたかを明示する。判断材料: ①実際に否認が記録される経路が何種類できたか(#承認 のボタン配線後に確定する — governance-deemed-notice-wiring)、②監査(deemed_ratio・A-18)が出所別の集計を必要とするか。必要が無ければ『足さない』を明示的に決めて本リマインダーを done にすること(未決のまま放置しない)。migrations は保護領域のため独立役員審査+みなし承認の手続を経ること。【2026-08-04 判断材料が確定 — 優先度を上げる】否認の記録経路は Discord のみ3つ(#承認 の否認ボタン+モーダル / /veto / /unveto)で、いずれも run_id を記録するようになった(governance-deemed-notice-wiring・独立役員審査 重要-5 後段)。したがって『run_id が NULL = Run が無い』と『埋め忘れ』の区別は当面つくが、**オーナー検証が呼び出し側供給の2引数比較でしかない**ため(同審査 重要-5 前段)、事後に『どの経路から否認が記録されたか』を独立に確認できることが実質的な統制になる。origin 列(discord_button|slash_command|cli|job)の追加を『足す』方向で再評価すること。"
-    status: pending
+      body: "0021 は decision_vetoes.run_id を NULL 可とした。理由は『否認は代表の作為(意思表示)でありジョブの生成物ではないため、生成元 Run という概念が本来的に無い』であり、独立役員審査 0021 C-8 はこの結論を妥当と認めた(当初コメントの『Discord 経路は Run を持たない』は事実誤認 — press.outbox.run_id は NOT NULL で、Discord 経路でも start_run で Run は取得できる)。ただし run_id が NULL であることは『Run が無い』のか『埋め忘れ』なのかを区別しない。是正候補: origin 列(discord_button|cli|job|migration 等)を足し、どの経路から否認が記録されたかを明示する。判断材料: ①実際に否認が記録される経路が何種類できたか(#承認 のボタン配線後に確定する — governance-deemed-notice-wiring)、②監査(deemed_ratio・A-18)が出所別の集計を必要とするか。必要が無ければ『足さない』を明示的に決めて本リマインダーを done にすること(未決のまま放置しない)。migrations は保護領域のため独立役員審査+みなし承認の手続を経ること。【2026-08-04 判断材料が確定 — 優先度を上げる】否認の記録経路は Discord のみ3つ(#承認 の否認ボタン+モーダル / /veto / /unveto)で、いずれも run_id を記録するようになった(governance-deemed-notice-wiring・独立役員審査 重要-5 後段)。したがって『run_id が NULL = Run が無い』と『埋め忘れ』の区別は当面つくが、**オーナー検証が呼び出し側供給の2引数比較でしかない**ため(同審査 重要-5 前段)、事後に『どの経路から否認が記録されたか』を独立に確認できることが実質的な統制になる。origin 列(discord_button|slash_command|cli|job)の追加を『足す』方向で再評価すること。**(完了 2026-08-04)** migrations/0030 が `governance.decision_vetoes.origin`(text NOT NULL・CHECK IN (discord_button, discord_command, cli, job))を追加した。判断: **足す**。決め手は「run_id では経路を識別できない」ことである —— 否認ボタン経路と `/veto` は同じ job_name(bot.governance.veto)で Run を開くため、meta.runs を辿っても両者を区別できない。オーナー検証が呼び出し側供給の2引数比較でしかない以上(重要-5 前段)、「どの経路から書かれたか」が行に残っていることが、想定外の経路からの否認を事後に検出する唯一の手がかりになる。実装: ①既存行は ADD COLUMN ... NOT NULL DEFAULT 'discord_button' でバックフィルし**直後に DROP DEFAULT**(既定を残すと渡し忘れが黙って通り、列の目的が失われる。UPDATE でのバックフィルは 0021 の追記オンリートリガが拒否するため、行トリガを発火しない DDL の DEFAULT を使った)。バックフィル値は**推定**であり、当時の記録経路がDiscord のみだった事実に基づく(ボタンと /veto の事後判別は不可能 — 同じ job_name)。②`decisions.record_veto` / `record_revert_completion` / `record_veto_withdrawal` と `notices.apply_veto` / `withdraw_veto` は origin を**必須キーワード**で受ける(既定値を置かない)。③Discord の3経路が正しい値を渡すこと(ボタン=discord_button、/veto ・ /unveto=discord_command)を AST テストで固定。④`governance.current_decisions` view に `veto_origin` を通し、#運営 の否認・撤回通知にも「出所」を表示する。**残る限界**: origin も呼び出し側の申告であり、DB は経路を独立に観測していない。捕まえられるのは「配線したつもりのない経路からの記録」であって、経路の詐称ではない。"
+    status: done # 2026-08-04 migrations/0030 で origin 列を追加(判断: 足す)
 
   - id: governance-role-separation
     what: "governance スキーマ(承認・否認・議事録)の DB ロール分離を実弾移行前提条件に加える(独立役員審査 0021 C-9)"
@@ -1004,8 +1004,8 @@ reminders:
       type: issue_create
       title: "migrations: meta.runs.status に CHECK 制約を置き、部分索引の述語を守る"
       labels: [impl, schema]
-      body: "`migrations/0027` が追加した部分索引 `meta.runs (run_id DESC) WHERE status = 'running'` は、**述語が守られていない自由文字列に依存している**。`meta.runs.status` に CHECK 制約は存在せず(0001)、`running|success|failed` という語彙の根拠は列コメントだけである。したがって `'starting'` / `'retrying'` のような値を後から足す、あるいは `dashboard.queries.fetch_running_runs` の述語を `status IN (...)` に広げると、**エラーも警告も出ないまま索引が使われなくなる**。テストは索引の存在と定義しか見ておらず(EXPLAIN のプラン検証はフレーク源なのでテスト化していない)、CI の DB は空に近いので EXPLAIN でも捕まらない — 典型的な沈黙劣化の経路である。比較対象として `press.outbox` の `outbox_pending_idx`(0007)は述語が `sent_at IS NULL` という**構造的条件**なのでドリフトしえない。是正の選択肢: (a) `ALTER TABLE meta.runs ADD CONSTRAINT runs_status_check CHECK (status IN ('running','success','failed'))` で語彙を凍結する(既存行に違反が無いことを先に確認すること。`ryza.provenance.runs` が書く値が唯一の生成元)、(b) 索引の述語を構造的条件 `finished_at IS NULL` に置き換える(meta.runs には同型の列がある。ただし `fetch_running_runs` の述語も揃える必要があり、『実行中』の定義が status と finished_at の 2 箇所に散る点は要検討)。**どちらも migrations = 保護領域(定款第5条 area: schema)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/0027-indexes-independent-review.md 中-4、migrations/0027_query_indexes.sql の索引4の節。"
-    status: pending
+      body: "`migrations/0027` が追加した部分索引 `meta.runs (run_id DESC) WHERE status = 'running'` は、**述語が守られていない自由文字列に依存している**。`meta.runs.status` に CHECK 制約は存在せず(0001)、`running|success|failed` という語彙の根拠は列コメントだけである。したがって `'starting'` / `'retrying'` のような値を後から足す、あるいは `dashboard.queries.fetch_running_runs` の述語を `status IN (...)` に広げると、**エラーも警告も出ないまま索引が使われなくなる**。テストは索引の存在と定義しか見ておらず(EXPLAIN のプラン検証はフレーク源なのでテスト化していない)、CI の DB は空に近いので EXPLAIN でも捕まらない — 典型的な沈黙劣化の経路である。比較対象として `press.outbox` の `outbox_pending_idx`(0007)は述語が `sent_at IS NULL` という**構造的条件**なのでドリフトしえない。是正の選択肢: (a) `ALTER TABLE meta.runs ADD CONSTRAINT runs_status_check CHECK (status IN ('running','success','failed'))` で語彙を凍結する(既存行に違反が無いことを先に確認すること。`ryza.provenance.runs` が書く値が唯一の生成元)、(b) 索引の述語を構造的条件 `finished_at IS NULL` に置き換える(meta.runs には同型の列がある。ただし `fetch_running_runs` の述語も揃える必要があり、『実行中』の定義が status と finished_at の 2 箇所に散る点は要検討)。**どちらも migrations = 保護領域(定款第5条 area: schema)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/0027-indexes-independent-review.md 中-4、migrations/0027_query_indexes.sql の索引4の節。**(完了 2026-08-04)** migrations/0031 が (a) を採り、ALTER TABLE meta.runs ADD CONSTRAINT runs_status_check CHECK (status IN ('running','success','failed')) で語彙を凍結した。(b)(述語を finished_at IS NULL に置き換える)を採らなかった理由: 「実行中」の定義が status と finished_at の2箇所に散り、両者の一致を保証する制約がどこにも無い —— 索引の沈黙劣化を二重定義の沈黙不整合に置き換えるだけになる。さらに `fetch_running_runs` の述語も同時に書き換えねばならず、怠れば直したい失敗モードがそのまま残る。語彙の確認: 書き手は `provenance/runs.py`(start_run が running、finish が success / failed)・`ledger/_util.create_run`(既定 success・明示指定の呼び出し無し)・seed migrations 0006/0011(success)のみ。実データは運用 DB が success/failed、テスト DB が success で、partial 等の第4の値はコードにもデータにも存在しない(NOT VALID は使わず、既存行を検証したうえで追加した)。付随: 0027 の索引4の「述語がドリフトしうる」注記を「0031 で解消済み」へ更新し、`meta.runs_running_idx` と `meta.runs.status` のカタログコメントを 0031 が上書きする。`provenance.runs.RUN_STATUSES` を新設して writer 側でも語彙外を早期に弾く(CheckViolation は共有接続の呼び出し側トランザクションを巻き添えにするため)。**語彙を増やすときは CHECK・0027 の索引述語・fetch_running_runs・RUN_STATUSES を必ず同時に動かす**(手順は 0031 の冒頭コメント)。"
+    status: done # 2026-08-04 migrations/0031 で CHECK を追加(案 (a) を採用)
 
   - id: streamlit-upgrade-dads-visual-check
     what: "【恒常運用ルール】Streamlit を更新したら DADS の CSS 層(44px・行間・フォーカスリング)を実ブラウザで目視・実測する"
@@ -1264,6 +1264,18 @@ reminders:
       title: "IPS 月次レビュー(9/2)で起票権記述を定款 v0.4 に整合させる"
       labels: [decision, ips]
       body: "L2 レビュー(2026-08-04・risk-observability-independent-review.md 末尾)の条件。80-ips.md L10 の「ユーザーのみ起票可」は旧承認モデルの残骸で、定款第4条(L2 起票=代表・CIO)と矛盾(定款が上位のため実務は定款優先)。9/2 の IPS 月次レビューで本文を整合させる。あわせて ops/reminders.yaml 内の同旨の古い記述(ips.yaml 変更はユーザー起票が必要)も是正する。"
+    status: pending
+
+  - id: migration-runner-duplicate-version-guard
+    what: "migration ランナーの同一 version 重複エラー化(無言スキップの防止)"
+    conditions:
+      - type: date_after
+        date: "2026-08-08"
+    action:
+      type: issue_create
+      title: "db/migrate: 同一4桁 version の異名ファイル検出とエラー化"
+      labels: [impl]
+      body: "0030/0031 独立審査(重大-1)の指摘: ランナーは4桁 version 文字列のみで適用判定するため、並行ブランチが同番号・異名の migration を持つと後から来た方が無言でスキップされる(共有テスト DB で実測)。是正: 適用時に同一 version の filename 不一致を検出してエラー化+適用済み記録に filename/内容ハッシュを持たせ突合(既存チップ『Detect edited-after-apply migration drift』と統合可)。採番調整の運用(マージ順確定時に設計リードが裁定)は継続。"
     status: pending
 
   - id: ops-weekly-bq-acl-verify
