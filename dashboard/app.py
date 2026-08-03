@@ -77,9 +77,20 @@ def _conn():
 # その都度走るため、60 秒 TTL でキャッシュする。TTL を短くしてあるのは日次サイクルの
 # 進行中に古い値を見せないため(監視面としての鮮度 > キャッシュ効率)。
 # ``conn`` はハッシュ不能なので引数に取らず ``_conn()`` を内部で引く。
+# NAV 系列と未反映フローは **1 クエリ・1 キャッシュ**で取る(独立審査 中-6): 別々に
+# キャッシュすると TTL の切れ方次第で「系列は新しいが pending は古い」画面が出うる。
 @st.cache_data(ttl=60)
+def _nav_data() -> dict[str, list[dict[str, Any]]]:
+    return queries.fetch_nav_data(_conn())
+
+
 def _nav_series() -> list[dict[str, Any]]:
-    return queries.fetch_nav_series(_conn())
+    return _nav_data()["series"]
+
+
+def _pending_flows() -> list[dict[str, Any]]:
+    """スナップショット未生成の外部フロー(NAV 系列に載らない — 重要-5)。"""
+    return _nav_data()["pending"]
 
 
 @st.cache_data(ttl=60)
@@ -322,25 +333,45 @@ def page_overview(conn) -> None:
 
 
 # ── 成績 ──────────────────────────────────────────────────────────────────────
-def _render_flow_notice(series: list[dict[str, Any]]) -> None:
-    """外部フロー発生日の注記(独立役員審査 2026-08-03 重要-6)。
+def _render_flow_notice(
+    series: list[dict[str, Any]], pending: list[dict[str, Any]] | None = None
+) -> None:
+    """外部フロー発生日の注記(独立役員審査 2026-08-03 重要-6・重要-5)。
 
     underwater 図は NAV そのものを見る図なので、出資で NAV が跳ねた日・払戻で NAV が
     落ちた日は「回復/下落」に見える。払戻を −30% の損失と読み違えないよう、フローの
     あった日を図の直下で名指しする(期間リターンの方は TWR で調整済み)。
+
+    フローの帰属日は仕訳日ではなく「その日以降の最初のスナップショット日」である
+    (``ryza.risk.navflow``)。スナップショットがまだ無いフロー(``pending``)は系列の
+    どの点にも載らないため、別行で明示する — 次の締めで NAV が跳ねる原因になる。
+
+    先頭点は除く: 系列の起点より前の出資(設定時の払込など)はすべて先頭点に寄るが、
+    前の点が無い以上そこに段差は生じない(起点 NAV が既にそれを含む)。段差の説明という
+    この注記の用途に対しては誤誘導になるため出さない。金額は明細表の net_flow に残る。
     """
-    flows = [r for r in series if float(r.get("net_flow") or 0) != 0]
-    if not flows:
-        return
-    items = " / ".join(
-        f"{r['day']} {'出資' if float(r['net_flow']) > 0 else '払戻'}"
-        f" {viz.fmt_jpy(abs(float(r['net_flow'])))}"
-        for r in flows[-8:]
-    )
-    st.caption(
-        f":orange[外部フロー発生日({len(flows)} 日・図は未調整)]: {items}"
-        " — 上の図の段差はこの出資・払戻によるもので、損益ではない。"
-    )
+    flows = [r for r in series[1:] if float(r.get("net_flow") or 0) != 0]
+    if flows:
+        items = " / ".join(
+            f"{r['day']} {'出資' if float(r['net_flow']) > 0 else '払戻'}"
+            f" {viz.fmt_jpy(abs(float(r['net_flow'])))}"
+            for r in flows[-8:]
+        )
+        st.caption(
+            f":orange[外部フロー発生日({len(flows)} 日・図は未調整)]: {items}"
+            " — 上の図の段差はこの出資・払戻によるもので、損益ではない"
+            "(仕訳日が休日の場合は直後のスナップショット日に寄せてある)。"
+        )
+    if pending:
+        items = " / ".join(
+            f"{r['day']} {'出資' if float(r['amount']) > 0 else '払戻'}"
+            f" {viz.fmt_jpy(abs(float(r['amount'])))}"
+            for r in pending[-8:]
+        )
+        st.caption(
+            f":red[スナップショット未生成の外部フロー({len(pending)} 件)]: {items}"
+            " — まだ NAV 系列にもリターン測定にも入っていない(次の会計締めで反映)。"
+        )
 
 
 def page_performance(conn) -> None:
@@ -362,7 +393,7 @@ def page_performance(conn) -> None:
         "(IPS §3.1)で、外部フロー調整は入れない NAV そのものの水没度合い。"
         "リミット判定に使う測定値はリスクエンジンの出力(「リスク」ページ)。"
     )
-    _render_flow_notice(series)
+    _render_flow_notice(series, _pending_flows())
 
     st.subheader("期間別リターン(外部フロー調整済み TWR)")
     rows = [
@@ -396,9 +427,22 @@ def page_performance(conn) -> None:
 
     st.subheader("NAV スナップショット(明細)")
     st.dataframe(
-        _df([{k: r[k] for k in ("day", "nav", "status", "net_flow")} for r in series[::-1]]),
+        _df(
+            [
+                {k: r[k] for k in ("day", "nav", "status", "net_flow", "flow_bop", "flow_eop")}
+                for r in series[::-1]
+            ]
+        ),
         use_container_width=True,
         hide_index=True,
+    )
+    st.caption(
+        "net_flow はその測定日に帰属した外部フローで、内訳は flow_bop(前の測定日より後・"
+        "当日より前 = 締めが走らなかった日の分)と flow_eop(当日仕訳)。リターンは "
+        "`(nav − flow_eop) / (前日 nav + flow_bop) − 1` で測る(期中に入った資金は"
+        "その区間の運用元本のため分母に入れる)。**最古の行の net_flow だけは「設定来の"
+        "累計」**である — 系列の起点より前の出資はすべて先頭点に寄る(起点 NAV が既に"
+        "それを含むため、この値はリターン計算には使われない)。"
     )
 
 
@@ -1037,17 +1081,22 @@ def page_approvals(conn) -> None:
         st.markdown(f":red[{line}]" if oldest >= 48 else line)
         st.caption("48h 超過はみなし承認の期限(定款第3条)に触れる可能性がある。")
 
-    st.subheader("承認・決定の履歴(governance.decisions)")
+    st.subheader("承認・決定の現状(governance.current_decisions)")
     decisions = queries.fetch_decisions(conn, limit=50)
     if not decisions:
         st.info("決定記録はまだない(Discord 承認 UI・みなし承認が書く)")
     else:
         df = _df(decisions)
-        df.insert(0, "区分", df["decision"].map(lambda d: "みなし" if d == "deemed" else "明示"))
+        # 「否認済み」を先頭列に出す: 代表が否認した承認を承認済みのまま見せないため
+        # (独立役員審査 0021 C-5)。区分はみなし/明示の別(deemed_ratio の前提)。
+        df.insert(0, "状態", df["is_vetoed"].map(lambda v: "否認済み" if v else "有効"))
+        df.insert(1, "区分", df["decision"].map(lambda d: "みなし" if d == "deemed" else "明示"))
+        vetoed = int(df["is_vetoed"].sum())
         st.caption(
             f"直近 {len(df)} 件(みなし {int((df['区分'] == 'みなし').sum())} / "
-            f"明示 {int((df['区分'] == '明示').sum())})— "
-            "みなし承認は通知と同時発効・代表はいつでも否認可(定款第3条 v0.4)"
+            f"明示 {int((df['区分'] == '明示').sum())}・うち否認済み {vetoed})— "
+            "みなし承認は通知と同時発効・代表はいつでも否認可(定款第3条 v0.4)。"
+            "否認は取消(revert_commit)と派生効果の #運営 報告を伴う"
         )
         st.dataframe(df, use_container_width=True, hide_index=True)
 

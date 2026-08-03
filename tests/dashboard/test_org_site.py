@@ -56,6 +56,41 @@ def test_fetch_decisions_returns_inserted_row(conn):
     assert mine["decision"] == "approve"
     assert mine["kind"] == "pr"
     assert mine["decided_by"] == "tester"
+    assert mine["is_vetoed"] is False
+    assert mine["effective_decision"] == "approve"
+
+
+def test_fetch_decisions_surfaces_veto(conn):
+    """否認された承認を「承認済み」のまま表示しない(独立役員審査 0021 C-5)。
+
+    ``governance.decisions`` を直読すると、代表が定款第3条の否認権を行使した
+    事実がダッシュボードから消える。現決定 view 経由で読むことをテストで固定する。
+    """
+    ref = f"test-veto-{uuid.uuid4()}"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO governance.decisions (proposal_ref, kind, decision, decided_by)
+            VALUES (%s, 'pr', 'approve', 'tester')
+            RETURNING id
+            """,
+            (ref,),
+        )
+        decision_id = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO governance.decision_vetoes (decision_id, vetoed_by, reason)
+            VALUES (%s, 'tester', '前提の誤りが判明したため否認')
+            """,
+            (decision_id,),
+        )
+    mine = next(
+        r for r in queries.fetch_decisions(conn, limit=10) if r["proposal_ref"] == ref
+    )
+    assert mine["is_vetoed"] is True
+    assert mine["effective_decision"] == "vetoed"
+    assert mine["decision"] == "approve"  # 何が承認されていたかは残る
+    assert mine["veto_reason"].startswith("前提の誤り")
 
 
 def test_fetch_running_runs_includes_started_run(conn, run):

@@ -15,6 +15,7 @@ import pytest
 
 from ryza.db.conn import connect
 from ryza.governance.boardroom import (
+    CHAT_STANCE_SOURCE,
     CRITIC_ROLE,
     FACILITATOR_SPEAKER,
     FACILITATOR_TEXT,
@@ -40,7 +41,7 @@ from ryza.governance.boardroom import (
     speaking_roles,
     transcript_markdown,
 )
-from ryza.governance.personas import recent_stances
+from ryza.governance.personas import assume_role, recent_stances
 from ryza.provenance import start_run
 from ryza.research.llm import FixtureProvider, StructuredLLM
 from ryza.research.schemas import SchemaError
@@ -710,6 +711,30 @@ def test_record_chat_stances_links_minute(conn, run_id):
             (ids,),
         )
         assert cur.fetchall() == [(saved.minute_id,)]
+    conn.rollback()
+
+
+def test_record_chat_stances_marks_office_chat_source(conn, run_id):
+    """役員室の書込は source='office_chat'(0022)— 盲検着任から外れることまで確認。
+
+    出所を書き分けないと、会議で聞いた代表の選好が「自分の過去の主張」の形で
+    盲検レビューへ透過する(独立役員審査 boardroom-meeting C-3)。
+    """
+    saved = save_office_chat_minute(
+        conn, turns=TURNS, run_id=run_id, held_at=HELD_AT
+    )
+    record_chat_stances(
+        conn,
+        role="independent_officer",
+        stances=[{"kind": "concern", "summary": "会議で述べた懸念"}],
+        minute_id=saved.minute_id,
+        run_id=run_id,
+    )
+    assert [s.source for s in recent_stances(conn, "independent_officer", limit=10)] == [
+        CHAT_STANCE_SOURCE
+    ]
+    blind = assume_role(conn, "independent_officer", limit=50, blind=True)
+    assert "会議で述べた懸念" not in blind
     conn.rollback()
 
 
