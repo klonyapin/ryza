@@ -61,6 +61,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
+from ryza import org
 from ryza.bot import COLOR_FLASH, COLOR_NORMAL, DISCLAIMER
 from ryza.bot.killswitch import is_engaged
 from ryza.bot.outbox import enqueue
@@ -353,6 +354,8 @@ def _build_ops_embed(
         "title": f"{title} {jst_str}",
         "description": "日次サイクルの実行サマリ(取込→前処理→分析→FM→執行/締め→朝刊)。",
         "color": COLOR_NORMAL,
+        # 運用報告の発信者 = 監査部門のキャラクター(台帳 org.yaml から役職キーで解決)。
+        "author": org.author_for_role("audit"),
         "fields": fields,
         "footer": {"text": DISCLAIMER},
     }

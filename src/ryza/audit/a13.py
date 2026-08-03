@@ -53,6 +53,7 @@ from typing import Any
 
 import yaml
 
+from ryza import org
 from ryza.bot import COLOR_FLASH, COLOR_NORMAL, DISCLAIMER
 from ryza.bot.outbox import enqueue
 
@@ -513,6 +514,8 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
             "規則⇔実装トレーサビリティ監査(定款第6条)。監査は read-only であり修正は行わない。"
         ),
         "color": COLOR_FLASH if alert else COLOR_NORMAL,
+        # 監査報告の発信者 = 監査部門のキャラクター(台帳 org.yaml から役職キーで解決)。
+        "author": org.author_for_role("audit"),
         "fields": fields,
         "footer": {"text": DISCLAIMER},
     }

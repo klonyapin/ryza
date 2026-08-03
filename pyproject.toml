@@ -13,6 +13,9 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    # dashboard/github_api.py(タスクページの GitHub REST 取得)のテストが import するため。
+    # streamlit 本体は dev に入れない(UI はテスト対象外の方針を維持)。
+    "requests>=2.31",
 ]
 # 経営管理部ジョブ ops-weekly(T-004)の実行時依存。BigQuery は bq_table_missing 条件でのみ
 # 使うため遅延インポート。デプロイイメージ(docker/ops)では .[ops] を入れる。
@@ -26,11 +29,13 @@ bot = [
     "discord.py>=2.6,<3.0",
     "google-cloud-secret-manager>=2.20",
 ]
-# 運用ダッシュボード(Issue #10)。ローカル専用・読み取り専用の Streamlit UI。
-# 本体依存に入れない(VM・ジョブには不要)。閲覧するローカル環境でのみ .[dashboard] を入れる。
-# テスト(tests/dashboard)は DB 層(dashboard/queries.py)のみ検証し streamlit を import しない。
+# 運用ダッシュボード(Issue #10 → VM 認証付き公開・2026-08-03 代表指示)。
+# 本体依存に入れない(ジョブには不要)。閲覧環境(ローカル/VM)で .[dashboard] を入れる。
+# テスト(tests/dashboard)は DB 層・純ロジックのみ検証し streamlit を import しない。
+# requests はタスクページの GitHub REST 取得(dashboard/github_api.py)用。
 dashboard = [
     "streamlit>=1.37",
+    "requests>=2.31",
 ]
 # 階層0前処理（T-010）の埋め込みモデル実行時依存。torch が重いため本体依存に入れず隔離する。
 # テスト（tests/preprocess）は実モデルをロードせずダミー埋め込みを注入するため dev には含めない。

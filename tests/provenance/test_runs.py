@@ -1,7 +1,7 @@
 """run ライフサイクルの受け入れ基準テスト。
 
 - コンテキストマネージャが正常系 success / 例外系 failed を記録
-- code_version が git describe で自動取得される
+- code_version が env ``RYZA_CODE_VERSION`` → git describe の順で取得される
 - add_cost がモデル階層別にコストを集計する
 
 すべて共有 ``conn``(rollback 隔離)を渡して実行する。
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from ryza.provenance.runs import run, start_run
+from ryza.provenance.runs import CODE_VERSION_ENV, _git_code_version, run, start_run
 
 
 def _fetch_run(conn, run_id):
@@ -33,6 +33,29 @@ def test_start_run_creates_running_row(conn):
     assert finished_at is None
     # code_version は git describe 由来(このリポジトリは git なので 'unknown' にはならない)。
     assert code_version and code_version != "unknown"
+
+
+# ── code_version の解決順(独立役員 再審査 条件2)──────────────────────────────
+# コンテナには .git が無いため git describe は必ず失敗する。デプロイが注入する
+# env を最優先で読まないと meta.runs.code_version が 'unknown' になり、
+# リネージ(不変原則3)が成立しない。
+
+
+def test_code_version_prefers_injected_env(monkeypatch):
+    monkeypatch.setenv(CODE_VERSION_ENV, "0123456789abcdef0123456789abcdef01234567")
+    assert _git_code_version() == "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_code_version_ignores_blank_env(monkeypatch):
+    monkeypatch.setenv(CODE_VERSION_ENV, "   ")
+    assert _git_code_version() != "   "  # git describe へフォールバックする
+
+
+def test_start_run_records_injected_code_version(conn, monkeypatch):
+    monkeypatch.setenv(CODE_VERSION_ENV, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+    r = start_run("dashboard.boardroom.chat", conn=conn)
+    _, code_version, *_ = _fetch_run(conn, r.run_id)
+    assert code_version == "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
 
 def test_context_manager_success(conn):

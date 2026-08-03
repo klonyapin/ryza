@@ -2265,10 +2265,12 @@ bot = [
     { name = "google-cloud-secret-manager" },
 ]
 dashboard = [
+    { name = "requests" },
     { name = "streamlit" },
 ]
 dev = [
     { name = "pytest" },
+    { name = "requests" },
     { name = "ruff" },
 ]
 ops = [
@@ -2287,6 +2289,8 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "requests", marker = "extra == 'dashboard'", specifier = ">=2.31" },
+    { name = "requests", marker = "extra == 'dev'", specifier = ">=2.31" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "sentence-transformers", marker = "extra == 'preprocess'", specifier = ">=3.0" },
     { name = "streamlit", marker = "extra == 'dashboard'", specifier = ">=1.37" },
