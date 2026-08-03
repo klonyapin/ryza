@@ -1068,7 +1068,7 @@ def _veto(conn, run_id, proposal_ref: str) -> None:
 
     notices.apply_veto(
         conn, proposal_ref, "リスク上限を緩める方向のため",
-        vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id,
+        vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin="discord_button",
     )
 
 

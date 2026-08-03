@@ -33,6 +33,8 @@ from ryza.provenance import start_run
 OWNER = "424242"
 OWNERS = (OWNER,)
 NOTICE = "discord://承認/1234567890"
+# 0030 の origin。writer を直接呼ぶテストは「人手の直接呼び出し」= cli にあたる。
+ORIGIN = "cli"
 
 
 @pytest.fixture
@@ -49,12 +51,15 @@ def _deemed(conn, ref: str, kind: str = "other"):
     return record_deemed_approval(conn, ref, kind, NOTICE)
 
 
-def _veto(conn, decision, reason: str = "リスク上限を緩める方向のため否認", **kw):
+def _veto(
+    conn, decision, reason: str = "リスク上限を緩める方向のため否認",
+    *, origin: str = ORIGIN, **kw,
+):
     """既定のオーナー・proposal_ref で否認を1件記録する。"""
     return record_veto(
         conn, decision.id, reason,
         vetoed_by=OWNER, owner_ids=OWNERS,
-        expected_proposal_ref=decision.proposal_ref, **kw,
+        expected_proposal_ref=decision.proposal_ref, origin=origin, **kw,
     )
 
 
@@ -189,7 +194,8 @@ def test_revert_completion_is_appended(conn):
     got = record_revert_completion(
         conn, deemed.id, "否認に伴う取消完了",
         vetoed_by=OWNER, owner_ids=OWNERS,
-        expected_proposal_ref=deemed.proposal_ref, revert_commit="feedface",
+        expected_proposal_ref=deemed.proposal_ref, origin=ORIGIN,
+        revert_commit="feedface",
     )
     assert got.kind == "revert_complete"
     row = current_decision(conn, "veto-two-step")
@@ -204,11 +210,12 @@ def test_uninformative_append_does_not_erase_revert_commit(conn):
     _veto(conn, deemed, "否認")
     record_revert_completion(
         conn, deemed.id, "取消完了", vetoed_by=OWNER, owner_ids=OWNERS,
-        expected_proposal_ref=deemed.proposal_ref, revert_commit="cafebabe",
+        expected_proposal_ref=deemed.proposal_ref, origin=ORIGIN,
+        revert_commit="cafebabe",
     )
     record_revert_completion(
         conn, deemed.id, "派生効果の追加報告", vetoed_by=OWNER, owner_ids=OWNERS,
-        expected_proposal_ref=deemed.proposal_ref,
+        expected_proposal_ref=deemed.proposal_ref, origin=ORIGIN,
         derived_effects_ref="discord://運営/777",
     )
     row = current_decision(conn, "veto-column-wise-writer")
@@ -224,7 +231,7 @@ def test_veto_withdrawal_restores_previous_state(conn):
     got = record_veto_withdrawal(
         conn, deemed.id, "対象取り違えのため撤回",
         vetoed_by=OWNER, owner_ids=OWNERS,
-        expected_proposal_ref=deemed.proposal_ref,
+        expected_proposal_ref=deemed.proposal_ref, origin=ORIGIN,
     )
     assert got.kind == "withdrawal"
     row = current_decision(conn, "veto-withdraw-writer")
@@ -242,6 +249,7 @@ def test_explicit_approval_can_be_vetoed(conn):
     record_veto(
         conn, got.id, "前提データの誤りが判明したため",
         vetoed_by=OWNER, owner_ids=OWNERS, expected_proposal_ref="explicit-veto",
+        origin=ORIGIN,
     )
     assert current_decision(conn, "explicit-veto")["effective_decision"] == "vetoed"
     conn.rollback()
@@ -258,7 +266,7 @@ def test_reject_and_question_are_not_vetoable(conn, decision):
         record_veto(
             conn, got.id, "却下を覆す",
             vetoed_by=OWNER, owner_ids=OWNERS,
-            expected_proposal_ref=f"nonvetoable-{decision}",
+            expected_proposal_ref=f"nonvetoable-{decision}", origin=ORIGIN,
         )
     # 事前検査で弾くためトランザクションは生きている。
     assert _deemed(conn, f"after-nonvetoable-{decision}").id > 0
@@ -287,7 +295,7 @@ def test_non_owner_veto_rejected(conn):
         record_veto(
             conn, deemed.id, "越権否認",
             vetoed_by="999999", owner_ids=OWNERS,
-            expected_proposal_ref=deemed.proposal_ref,
+            expected_proposal_ref=deemed.proposal_ref, origin=ORIGIN,
         )
     with conn.cursor() as cur:
         cur.execute(
@@ -306,6 +314,7 @@ def test_proposal_ref_mismatch_rejected(conn):
         record_veto(
             conn, a.id, "取り違え否認",
             vetoed_by=OWNER, owner_ids=OWNERS, expected_proposal_ref="veto-ref-b",
+            origin=ORIGIN,
         )
     assert current_decision(conn, "veto-ref-a")["is_vetoed"] is False
     conn.rollback()
@@ -317,6 +326,7 @@ def test_veto_of_unknown_decision_raises_clear_error(conn):
         record_veto(
             conn, -1, "対象なし否認",
             vetoed_by=OWNER, owner_ids=OWNERS, expected_proposal_ref="whatever",
+            origin=ORIGIN,
         )
     assert _deemed(conn, "after-bad-veto").id > 0
     conn.rollback()
@@ -335,8 +345,47 @@ def test_veto_requires_non_blank_fields(conn, field):
         record_veto(
             conn, deemed.id, kwargs["reason"],
             vetoed_by=kwargs["vetoed_by"], owner_ids=OWNERS,
-            expected_proposal_ref=kwargs["expected_proposal_ref"],
+            expected_proposal_ref=kwargs["expected_proposal_ref"], origin=ORIGIN,
         )
+    conn.rollback()
+
+
+# ── 否認の出所 origin(0030 / 独立役員審査 0021 C-8)──────────────────────────
+@pytest.mark.parametrize("origin", ["discord_button", "discord_command", "cli", "job"])
+def test_writer_records_origin(conn, origin):
+    """writer が渡した出所がそのまま行と現決定 view に載る(語彙4値すべて)。"""
+    deemed = _deemed(conn, f"writer-origin-{origin}")
+    veto = _veto(conn, deemed, origin=origin)
+    assert veto.origin == origin
+    assert current_decision(conn, f"writer-origin-{origin}")["veto_origin"] == origin
+    conn.rollback()
+
+
+def test_unknown_origin_rejected_before_insert(conn):
+    """語彙外の出所は INSERT 前に弾く。
+
+    一次統制は 0030 の CHECK だが、CheckViolation はトランザクションを中断させ、
+    同一トランザクションで書く通知まで巻き添えにする(kind・3専決の事前検査と同型)。
+    """
+    deemed = _deemed(conn, "writer-origin-unknown")
+    with pytest.raises(ValueError, match="未知の否認の出所"):
+        _veto(conn, deemed, origin="webhook")
+    # 事前検査で弾くためトランザクションは生きている。
+    assert _deemed(conn, "after-bad-origin").id > 0
+    conn.rollback()
+
+
+def test_withdrawal_records_origin(conn):
+    """撤回にも出所が要る(身に覚えのない撤回は否認より危険 — 取消義務が消える)。"""
+    deemed = _deemed(conn, "writer-origin-withdraw")
+    _veto(conn, deemed, "誤った否認", origin="discord_button")
+    got = record_veto_withdrawal(
+        conn, deemed.id, "撤回",
+        vetoed_by=OWNER, owner_ids=OWNERS,
+        expected_proposal_ref=deemed.proposal_ref, origin="cli",
+    )
+    assert got.origin == "cli"
+    assert current_decision(conn, "writer-origin-withdraw")["veto_origin"] == "cli"
     conn.rollback()
 
 

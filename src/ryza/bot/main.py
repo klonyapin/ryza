@@ -4,7 +4,8 @@ systemd(Restart=always)で常駐し:
 - 5秒間隔で ``press.outbox`` を配送し(``outbox.deliver_pending``)、続けて開発室
   (``ops.dev_chat``・0024)の未中継発言を #dev へ中継(``devchat.relay_pending``)。
   順序は固定で、非緊急の中継を Kill Switch 通報の配送より前に置かない
-- 18:00 JST に日報を投入(``daily.enqueue_daily``)
+- 18:00 JST に日報を投入(``daily.enqueue_daily``)し、続けてアイコン URL の指紋を
+  再検証(``ops.icon_revalidate`` — 0033。差し替え・到達不能を検知した日だけ #運営 へ)
 - ``#承認`` のボタン押下を ``governance.decisions`` に記録(オーナー検証)。みなし承認の
   発効通知には**否認ボタン**を付け、押下 → 理由入力(モーダル)→ ``governance.notices``
   経由で否認記録+``#運営`` への取消義務リマインドを1トランザクションで書く。同じ配線を
@@ -50,6 +51,7 @@ from ryza.bot.approvals import KINDS, NotOwnerError, parse_proposal, record_deci
 from ryza.bot.daily import JST
 from ryza.db.conn import connect
 from ryza.governance import devchat, notices
+from ryza.ops import icon_revalidate
 from ryza.provenance import start_run
 
 log = logging.getLogger("ryza.bot")
@@ -177,25 +179,36 @@ class ApprovalView(discord.ui.View):
         await self._record(interaction, "question")
 
 
-def _veto_sync(bot: RyzaBot, proposal_ref: str, reason: str, user_id: str) -> None:
-    """否認の記録+``#運営`` 通知(同期・DB I/O)。イベントループから ``to_thread`` で呼ぶ。"""
+def _veto_sync(
+    bot: RyzaBot, proposal_ref: str, reason: str, user_id: str, origin: str
+) -> None:
+    """否認の記録+``#運営`` 通知(同期・DB I/O)。イベントループから ``to_thread`` で呼ぶ。
+
+    ``origin``(0030)は呼び出し元が渡す。ボタン経路(``VetoModal``)と ``/veto`` は
+    **同じ ``job_name`` で Run を開く**ため、``meta.runs`` を辿っても両者は区別できない。
+    この関数を共有する以上、経路の申告はここより上でしかできない。
+    """
     with connect() as conn:
         r = start_run("bot.governance.veto", conn=conn)
         notices.apply_veto(
             conn, proposal_ref, reason,
             vetoed_by=user_id, owner_ids=bot.owner_ids, run_id=r.run_id,
+            origin=origin,
         )
         r.finish("success")
         conn.commit()
 
 
-def _withdraw_veto_sync(bot: RyzaBot, proposal_ref: str, reason: str, user_id: str) -> None:
+def _withdraw_veto_sync(
+    bot: RyzaBot, proposal_ref: str, reason: str, user_id: str, origin: str
+) -> None:
     """否認の撤回(同期・DB I/O)。"""
     with connect() as conn:
         r = start_run("bot.governance.veto_withdrawal", conn=conn)
         notices.withdraw_veto(
             conn, proposal_ref, reason,
             vetoed_by=user_id, owner_ids=bot.owner_ids, run_id=r.run_id,
+            origin=origin,
         )
         r.finish("success")
         conn.commit()
@@ -255,7 +268,10 @@ class VetoModal(discord.ui.Modal, title="否認(定款第3条)"):
         reason = str(self.reason)
         await _run_governance_action(
             interaction,
-            lambda: _veto_sync(self.bot, self.proposal_ref, reason, user_id),
+            # 出所: #承認 の否認ボタン → 理由モーダル(0030 の discord_button)。
+            lambda: _veto_sync(
+                self.bot, self.proposal_ref, reason, user_id, "discord_button"
+            ),
             ok_message=(
                 f"⛔ 否認を記録しました({self.proposal_ref})。"
                 "#運営 に取消義務のリマインドを投稿します。誤操作なら `/unveto` で撤回できます。"
@@ -403,6 +419,51 @@ class RyzaBot(commands.Bot):
             daily_mod.enqueue_daily(conn, now, r.run_id)
             r.finish("success")
             conn.commit()
+        # 日報とは別の Run として分ける(片方の失敗でもう片方を巻き込まない)。
+        # 外向き HTTP を伴うため、DB だけの日報より先に置かない。
+        await asyncio.to_thread(self._revalidate_icons_sync)
+
+    def _revalidate_icons_sync(self) -> None:
+        """アイコン URL の指紋を再検証する(0033・独立役員審査 0020 C-7 の検知側是正)。
+
+        リマインダー ``icon-rehost-storage`` は週次を想定していたが日次で回す。検査は
+        メンバー数(9件)ぶんの HEAD だけで、通知は遷移があった日にしか出ない
+        (``icon_revalidate.run_revalidation``)ため、頻度を上げても増える騒音は無く、
+        すり替えの検知から通知までのラグだけが最大7日から1日に縮む。
+
+        **失敗は握る。ただし黙って消さない**(独立役員 追補審査 C-14)。外部サイトへの HTTP を
+        伴う検査であり、例外で Bot の常駐ループを落とすと配送・Kill Switch 操作まで巻き添えに
+        なる(0020 C-2 と同じ判断)。一方で、例外時は同じ接続の rollback で ``meta.runs`` の
+        開始行ごと消えるため、握るだけでは「静寂=変化なし」と「静寂=そもそも動いていない」が
+        区別できなくなる — 本ジョブが「遷移が無い日は投稿しない」設計を採る根拠が、失敗した
+        日にこそ崩れる。したがって失敗は**別接続(autocommit)**で failed の Run として残す。
+        """
+        try:
+            with connect() as conn:
+                r = start_run("bot.icon_revalidate", conn=conn)
+                result = icon_revalidate.run_revalidation(conn, r.run_id)
+                r.record_runtime(result.as_runtime())
+                r.finish("success")
+                conn.commit()
+            log.info("アイコン再検証: %s", result.as_runtime())
+        except Exception as exc:  # noqa: BLE001 - 再検証の失敗で常駐ループを死なせない
+            log.exception("アイコン再検証でエラー")
+            self._record_failed_run("bot.icon_revalidate", exc)
+
+    def _record_failed_run(self, job: str, exc: BaseException) -> None:
+        """握った例外を failed の Run として**別接続**に残す(追補審査 C-14)。
+
+        失敗した接続はトランザクションがアボートしており、そこへ書いても rollback で
+        消える。``conn`` を渡さない ``start_run`` は autocommit 接続を自前で開いて各文を
+        即時確定し、``finish`` で閉じる。この記録自体が失敗しても(DB 断など)ログだけ
+        残して常駐ループは続ける — 記録のために Bot を落とさない。
+        """
+        try:
+            r = start_run(job)
+            r.record_runtime({"error": f"{type(exc).__name__}: {exc}"[:500]})
+            r.finish("failed")
+        except Exception:  # noqa: BLE001 - 失敗の記録に失敗しても落とさない
+            log.exception("失敗 Run の記録にも失敗した: %s", job)
 
     @daily_report.before_loop
     async def _before_daily(self) -> None:
@@ -486,7 +547,12 @@ class RyzaBot(commands.Bot):
                 if msg.channel == "approval" and deemed_ref is None
                 else None
             )
-            embed_json = org.apply_icon_overrides(msg.embed, overrides)
+            # 発信者の内部キーは **embed ではなく列**(0032・独立役員審査 0020 C-10)から
+            # 渡す。0032 以前に投入された行は列が NULL で、その場合だけ resolve_author が
+            # embed 内の旧キーへフォールバックする(後方互換)。
+            embed_json = org.apply_icon_overrides(
+                msg.embed, overrides, member_id=msg.author_member_id
+            )
             # webhook 方式(代表指示 2026-08-03): author キャラクターを username /
             # avatar_url へ昇格して投稿(webhooks.py)。承認ボタン付きは webhook に
             # コンポーネントを付けられないため従来の Bot 投稿のまま(否認ボタンも同じ)。
@@ -674,7 +740,9 @@ class RyzaBot(commands.Bot):
             user_id = str(interaction.user.id)
             await _run_governance_action(
                 interaction,
-                lambda: _veto_sync(self, proposal_ref, reason, user_id),
+                # 出所: スラッシュコマンド(0030 の discord_command)。ボタン経路と同じ
+                # job_name で Run を開くので、run_id では両者を区別できない。
+                lambda: _veto_sync(self, proposal_ref, reason, user_id, "discord_command"),
                 ok_message=(
                     f"⛔ 否認を記録しました({proposal_ref})。"
                     "#運営 に取消義務のリマインドを投稿します。"
@@ -698,7 +766,11 @@ class RyzaBot(commands.Bot):
             user_id = str(interaction.user.id)
             await _run_governance_action(
                 interaction,
-                lambda: _withdraw_veto_sync(self, proposal_ref, reason, user_id),
+                # 出所: スラッシュコマンド(0030 の discord_command)。撤回はボタン経路が
+                # 無く /unveto だけだが、値は経路の申告であって唯一性の申告ではない。
+                lambda: _withdraw_veto_sync(
+                    self, proposal_ref, reason, user_id, "discord_command"
+                ),
                 ok_message=f"否認を撤回しました({proposal_ref})。#運営 に通知します。",
                 fail_prefix="撤回できません",
             )

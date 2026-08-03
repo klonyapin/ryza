@@ -12,6 +12,9 @@ rollback で隔離する。接続不可なら skip。
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 
 from ryza.bot.approvals import NotOwnerError, parse_proposal, record_decision
@@ -19,6 +22,7 @@ from ryza.bot.outbox import mark_sent
 from ryza.db.conn import connect
 from ryza.governance import notices
 from ryza.governance.decisions import (
+    VETO_ORIGINS,
     DuplicateDecisionError,
     NotVetoableError,
     ReservedMatterError,
@@ -28,6 +32,8 @@ from ryza.provenance import start_run
 
 OWNER = "424242"
 OWNERS = (OWNER,)
+# 0030 の origin。Bot のボタン経路を模す(notices は Discord 経路の配線)。
+ORIGIN = "discord_button"
 NOTICE = "保護領域 src/ryza/gate/** の変更。独立役員審査は docs/reviews/xxxx で完了"
 
 
@@ -139,7 +145,7 @@ def test_resolve_deemed_view_skips_already_vetoed(conn, run_id):
     """否認済みならボタンを出さない(押しても失敗するだけ。撤回は /unveto)。"""
     notices.announce_deemed_approval(conn, "view-vetoed", "pr", NOTICE, run_id)
     notices.apply_veto(
-        conn, "view-vetoed", "否認", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id
+        conn, "view-vetoed", "否認", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN
     )
     embed = notices.build_deemed_notice_embed("view-vetoed", "pr", NOTICE)
     target = notices.resolve_deemed_view(conn, embed)
@@ -317,7 +323,7 @@ def test_apply_veto_records_and_notifies(conn, run_id):
     notices.announce_deemed_approval(conn, "veto-ref", "pr", NOTICE, run_id)
     result = notices.apply_veto(
         conn, "veto-ref", "リスク上限を緩める方向のため",
-        vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id,
+        vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
     )
     assert current_decision(conn, "veto-ref")["effective_decision"] == "vetoed"
     ops = [r for r in _outbox_rows(conn, run_id) if r[1] == "ops"]
@@ -335,7 +341,7 @@ def test_apply_veto_works_on_explicit_approval(conn, run_id):
     record_decision(conn, "explicit-ref", "approve", OWNER, OWNERS, kind="pr")
     notices.apply_veto(
         conn, "explicit-ref", "前提データの誤り",
-        vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id,
+        vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
     )
     assert current_decision(conn, "explicit-ref")["effective_decision"] == "vetoed"
     conn.rollback()
@@ -347,7 +353,7 @@ def test_non_owner_veto_leaves_nothing(conn, run_id, no_denial_record):
     with pytest.raises(NotOwnerError):
         notices.apply_veto(
             conn, "veto-nonowner", "越権否認",
-            vetoed_by="999999", owner_ids=OWNERS, run_id=run_id,
+            vetoed_by="999999", owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
         )
     assert [r for r in _outbox_rows(conn, run_id) if r[1] == "ops"] == []
     assert current_decision(conn, "veto-nonowner")["is_vetoed"] is False
@@ -363,7 +369,7 @@ def test_owner_check_precedes_db_read(conn, run_id, no_denial_record):
     with pytest.raises(NotOwnerError):
         notices.apply_veto(
             conn, "no-such-proposal", "越権否認",
-            vetoed_by="999999", owner_ids=OWNERS, run_id=run_id,
+            vetoed_by="999999", owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
         )
     assert no_denial_record == [("veto", "no-such-proposal", "999999")]
     conn.rollback()
@@ -393,7 +399,7 @@ def test_veto_records_run_id(conn, run_id):
     """否認の出所を事後に辿れるよう run_id を記録する(独立役員審査 重要-5 後段)。"""
     notices.announce_deemed_approval(conn, "veto-runid", "pr", NOTICE, run_id)
     result = notices.apply_veto(
-        conn, "veto-runid", "否認", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id
+        conn, "veto-runid", "否認", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN
     )
     with conn.cursor() as cur:
         cur.execute(
@@ -402,7 +408,7 @@ def test_veto_records_run_id(conn, run_id):
         )
         assert cur.fetchone()[0] == run_id
     notices.withdraw_veto(
-        conn, "veto-runid", "撤回", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id
+        conn, "veto-runid", "撤回", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN
     )
     with conn.cursor() as cur:
         cur.execute(
@@ -418,11 +424,12 @@ def test_double_veto_is_refused(conn, run_id):
     """ボタンの二度押しでリマインドを二重投稿しない。"""
     notices.announce_deemed_approval(conn, "veto-twice", "pr", NOTICE, run_id)
     notices.apply_veto(
-        conn, "veto-twice", "否認", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id
+        conn, "veto-twice", "否認", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN
     )
     with pytest.raises(notices.AlreadyVetoedError):
         notices.apply_veto(
-            conn, "veto-twice", "もう一度否認", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id
+            conn, "veto-twice", "もう一度否認",
+            vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
         )
     assert len([r for r in _outbox_rows(conn, run_id) if r[1] == "ops"]) == 1
     conn.rollback()
@@ -431,7 +438,8 @@ def test_double_veto_is_refused(conn, run_id):
 def test_veto_of_unknown_proposal_raises(conn, run_id):
     with pytest.raises(notices.UnknownProposalError):
         notices.apply_veto(
-            conn, "no-such-ref", "対象なし", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id
+            conn, "no-such-ref", "対象なし",
+            vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
         )
     conn.rollback()
 
@@ -442,7 +450,7 @@ def test_reject_cannot_be_vetoed_through_the_button_path(conn, run_id):
     with pytest.raises(NotVetoableError):
         notices.apply_veto(
             conn, "rejected-ref", "却下を覆す",
-            vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id,
+            vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
         )
     assert [r for r in _outbox_rows(conn, run_id) if r[1] == "ops"] == []
     conn.rollback()
@@ -452,11 +460,12 @@ def test_reject_cannot_be_vetoed_through_the_button_path(conn, run_id):
 def test_withdraw_veto_restores_and_notifies(conn, run_id):
     notices.announce_deemed_approval(conn, "veto-undo", "pr", NOTICE, run_id)
     notices.apply_veto(
-        conn, "veto-undo", "誤った対象", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id
+        conn, "veto-undo", "誤った対象",
+        vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
     )
     notices.withdraw_veto(
         conn, "veto-undo", "対象取り違えのため撤回",
-        vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id,
+        vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
     )
     row = current_decision(conn, "veto-undo")
     assert row["is_vetoed"] is False
@@ -471,7 +480,8 @@ def test_withdraw_without_veto_raises(conn, run_id):
     notices.announce_deemed_approval(conn, "veto-none", "pr", NOTICE, run_id)
     with pytest.raises(notices.NotVetoedError):
         notices.withdraw_veto(
-            conn, "veto-none", "撤回", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id
+            conn, "veto-none", "撤回",
+            vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
         )
     assert [r for r in _outbox_rows(conn, run_id) if r[1] == "ops"] == []
     conn.rollback()
@@ -480,13 +490,100 @@ def test_withdraw_without_veto_raises(conn, run_id):
 def test_non_owner_withdrawal_leaves_nothing(conn, run_id, no_denial_record):
     notices.announce_deemed_approval(conn, "veto-undo-nonowner", "pr", NOTICE, run_id)
     notices.apply_veto(
-        conn, "veto-undo-nonowner", "否認", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id
+        conn, "veto-undo-nonowner", "否認",
+        vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
     )
     with pytest.raises(NotOwnerError):
         notices.withdraw_veto(
             conn, "veto-undo-nonowner", "越権撤回",
-            vetoed_by="999999", owner_ids=OWNERS, run_id=run_id,
+            vetoed_by="999999", owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
         )
     assert len([r for r in _outbox_rows(conn, run_id) if r[1] == "ops"]) == 1
     assert current_decision(conn, "veto-undo-nonowner")["is_vetoed"] is True
     conn.rollback()
+
+
+# ── 否認の出所 origin(0030 / 独立役員審査 0021 C-8・重要-5)────────────────────
+@pytest.mark.parametrize("origin", ["discord_button", "discord_command"])
+def test_apply_veto_records_origin(conn, run_id, origin):
+    """記録経路がそのまま行に残り、``#運営`` の通知にも出る。
+
+    run_id では代替できない: ボタン経路と ``/veto`` は同じ job_name で Run を開くため、
+    meta.runs を辿っても両者は区別できない(0030)。
+    """
+    ref = f"veto-origin-{origin}"
+    notices.announce_deemed_approval(conn, ref, "pr", NOTICE, run_id)
+    result = notices.apply_veto(
+        conn, ref, "否認", vetoed_by=OWNER, owner_ids=OWNERS,
+        run_id=run_id, origin=origin,
+    )
+    assert result.veto.origin == origin
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT origin FROM governance.decision_vetoes WHERE veto_id = %s",
+            (result.veto.veto_id,),
+        )
+        assert cur.fetchone()[0] == origin
+    assert current_decision(conn, ref)["veto_origin"] == origin
+    ops = [r for r in _outbox_rows(conn, run_id) if r[1] == "ops"]
+    assert any(f["value"] == origin for f in ops[-1][3]["fields"])
+    conn.rollback()
+
+
+def test_withdraw_veto_records_its_own_origin(conn, run_id):
+    """撤回の出所は否認の出所と独立に残る(経路をまたいだ撤回がありうる)。"""
+    notices.announce_deemed_approval(conn, "veto-origin-undo", "pr", NOTICE, run_id)
+    notices.apply_veto(
+        conn, "veto-origin-undo", "否認", vetoed_by=OWNER, owner_ids=OWNERS,
+        run_id=run_id, origin="discord_button",
+    )
+    result = notices.withdraw_veto(
+        conn, "veto-origin-undo", "撤回", vetoed_by=OWNER, owner_ids=OWNERS,
+        run_id=run_id, origin="discord_command",
+    )
+    assert result.veto.origin == "discord_command"
+    # 現決定 view は最新行(= 撤回)の出所を返す。
+    assert current_decision(conn, "veto-origin-undo")["veto_origin"] == "discord_command"
+    conn.rollback()
+
+
+def test_unknown_origin_is_rejected_before_any_write(conn, run_id):
+    """語彙外の出所は書き込む前に落とす(CheckViolation で通知まで巻き添えにしない)。"""
+    notices.announce_deemed_approval(conn, "veto-origin-bad", "pr", NOTICE, run_id)
+    with pytest.raises(ValueError, match="未知の否認の出所"):
+        notices.apply_veto(
+            conn, "veto-origin-bad", "否認", vetoed_by=OWNER, owner_ids=OWNERS,
+            run_id=run_id, origin="webhook",
+        )
+    assert current_decision(conn, "veto-origin-bad")["is_vetoed"] is False
+    assert [r for r in _outbox_rows(conn, run_id) if r[1] == "ops"] == []
+    conn.rollback()
+
+
+def test_bot_entry_points_declare_their_origin():
+    """Discord の3経路が正しい origin を渡していることを AST で固定する。
+
+    ``_veto_sync`` はボタン経路と ``/veto`` で共有されており、経路の申告はその上でしか
+    できない(同じ job_name で Run を開くため run_id では区別できない)。ここが黙って
+    1つの値へ退化すると、0030 の列は「常に同じ値が入るだけの列」になり統制として死ぬ。
+    discord.py の UI を実際に叩くのは現実的でないので、呼び出しの実引数を静的に見る。
+    """
+    src = Path(__file__).resolve().parents[2] / "src" / "ryza" / "bot" / "main.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    found: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id not in {"_veto_sync", "_withdraw_veto_sync"}:
+            continue
+        last = node.args[-1]
+        assert isinstance(last, ast.Constant) and isinstance(last.value, str), (
+            f"{node.func.id} の origin がリテラルでない(経路の申告が読み取れない)"
+        )
+        assert last.value in VETO_ORIGINS, f"未知の origin: {last.value}"
+        found.append((node.func.id, last.value))
+    assert sorted(found) == [
+        ("_veto_sync", "discord_button"),  # #承認 の否認ボタン → VetoModal
+        ("_veto_sync", "discord_command"),  # /veto
+        ("_withdraw_veto_sync", "discord_command"),  # /unveto
+    ]

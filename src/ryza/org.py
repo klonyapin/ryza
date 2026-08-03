@@ -41,8 +41,16 @@ _CONFIG_PATH = _REPO_ROOT / "config" / "org.yaml"
 # GitHub raw のベース URL。embed アイコンは Discord 側が取得するため公開 URL が必要。
 _RAW_BASE = "https://raw.githubusercontent.com/klonyapin/ryza/main/"
 
-# embed の author に載せる内部キー(0020)。Discord API のフィールドではないため、
-# 配送直前に ``resolve_author`` が取り除く。
+# embed の author に載せる内部キー(0020)。Discord API のフィールドではない。
+#
+# **0032 以降の位置づけ**: これは「生成側 → ``outbox.enqueue`` の**受け渡し**」だけに使う
+# 一時的な運搬キーであり、**永続化しない**。enqueue が ``split_author_member_id`` で embed
+# から外して ``press.outbox.author_member_id`` 列へ移し、embed_json には Discord の
+# フィールドしか入れない(独立役員審査 0020 C-10 の恒久是正)。再混入は 0032 の CHECK 制約
+# ``outbox_embed_has_no_internal_keys_check`` が書込時に落とす。
+#
+# ``resolve_author`` は 0032 以前に投入された行(列が NULL・embed 内にキーが残っている)の
+# ためだけに除去処理を残している。新規行では除去は空振りする。
 AUTHOR_MEMBER_KEY = "member_id"
 
 
@@ -190,22 +198,30 @@ def icon_overrides(conn: Any) -> dict[str, str]:
 
 
 def resolve_author(
-    author: dict[str, Any], overrides: dict[str, str]
+    author: dict[str, Any],
+    overrides: dict[str, str],
+    *,
+    member_id: str | None = None,
 ) -> dict[str, Any]:
     """配送直前に author の ``icon_url`` を最新の上書きへ差し替える(純関数)。
 
-    ``member_id`` は内部キーなので常に取り除く(Discord へ未知フィールドを送らない)。
-    上書きが無い/古い embed(member_id 無し)はそのまま通す。
+    ``member_id`` は **0032 以降 ``press.outbox.author_member_id`` 列から渡す**。列が
+    NULL の行(0032 以前に投入された行)のために、引数が無ければ従来どおり embed 内の
+    内部キーへフォールバックする。内部キーは常に取り除く(Discord へ未知フィールドを
+    送らない)— 新規行の embed には最初から入っていないので空振りする。
     """
     resolved = {k: v for k, v in author.items() if k != AUTHOR_MEMBER_KEY}
-    member_id = author.get(AUTHOR_MEMBER_KEY)
-    if member_id and member_id in overrides:
-        resolved["icon_url"] = overrides[member_id]
+    resolved_id = member_id or author.get(AUTHOR_MEMBER_KEY)
+    if resolved_id and resolved_id in overrides:
+        resolved["icon_url"] = overrides[resolved_id]
     return resolved
 
 
 def apply_icon_overrides(
-    embed: dict[str, Any], overrides: dict[str, str]
+    embed: dict[str, Any],
+    overrides: dict[str, str],
+    *,
+    member_id: str | None = None,
 ) -> dict[str, Any]:
     """embed(dict)の author に上書きを適用した新しい dict を返す(純関数)。
 
@@ -214,7 +230,24 @@ def apply_icon_overrides(
     author = embed.get("author")
     if not isinstance(author, dict):
         return embed
-    return {**embed, "author": resolve_author(author, overrides)}
+    return {**embed, "author": resolve_author(author, overrides, member_id=member_id)}
+
+
+def split_author_member_id(embed: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """embed から内部キーを外し、``(Discord 用 embed, member_id)`` に分ける(純関数)。
+
+    0032(独立役員審査 0020 C-10)の構造分離の実体。``outbox.enqueue`` が投入直前にこれを
+    通すことで、``press.outbox.embed_json`` には Discord のフィールドしか入らなくなる。
+
+    元の dict は変更しない(呼び出し元が同じ embed を再利用しても壊れない)。内部キーが
+    無ければ第2要素は ``None`` で、embed はそのまま返る。
+    """
+    author = embed.get("author")
+    if not isinstance(author, dict) or AUTHOR_MEMBER_KEY not in author:
+        return embed, None
+    member_id = author.get(AUTHOR_MEMBER_KEY)
+    stripped = {k: v for k, v in author.items() if k != AUTHOR_MEMBER_KEY}
+    return {**embed, "author": stripped}, (str(member_id) if member_id else None)
 
 
 # ── アイコン URL の検証(https のみ・実体が画像であること)───────────────────
@@ -279,6 +312,94 @@ def _reject_internal_host(host: str) -> None:
             )
 
 
+def _head_icon_url(
+    url: str,
+    *,
+    opener: Any | None = None,
+    timeout: float = ICON_URL_TIMEOUT,
+) -> tuple[str, dict[str, str]]:
+    """URL の応答ヘッダを取り、``(正規化 URL, 小文字キーのヘッダ)`` を返す。
+
+    ``check_icon_url``(保存時の検証)と ``probe_icon_url``(定期再検証)で共通の
+    アクセス経路。**本文は読まない**(HEAD を拒む配信元のために GET へ落ちるが、
+    ヘッダだけを見て応答は閉じる)。
+    """
+    candidate = url.strip()
+    parsed = urlparse(candidate)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise IconUrlError(f"https:// の URL のみ受け付ける(受領: {candidate!r})")
+    fetch = opener if opener is not None else _default_opener
+    if opener is None:
+        # 差し替え時(テスト)は名前解決しない。実 I/O を行う既定経路だけが対象。
+        _reject_internal_host(parsed.hostname)
+    errors: list[str] = []
+    for method in ("HEAD", "GET"):
+        try:
+            return candidate, fetch(candidate, method, timeout)
+        except Exception as exc:  # noqa: BLE001 - 失敗理由は利用者に見せる
+            errors.append(f"{method}: {type(exc).__name__}: {exc}")
+    raise IconUrlError(f"URL に到達できない({' / '.join(errors)})")
+
+
+@dataclass(frozen=True)
+class IconFingerprint:
+    """アイコン URL の指紋(HEAD 応答ヘッダ)。0033 の再検証が比較する単位。
+
+    **これは同一性の証明ではない**。全て配信元が名乗る値であり、UA や IP で応答を
+    出し分ける配信元(クローキング)には無力である。捕まえられるのは「誠実な配信元が
+    画像を差し替えた」場合に限る — 独立役員審査 0020 C-6/C-7 が「単発 HEAD で誠実な
+    誤りしか防げない」と述べたのと同じ限界が、周期的にしても残る。
+    """
+
+    content_type: str | None = None
+    content_length: int | None = None
+    etag: str | None = None
+    last_modified: str | None = None
+
+    @classmethod
+    def from_headers(cls, headers: dict[str, str]) -> IconFingerprint:
+        raw_length = str(headers.get("content-length", "")).strip()
+        return cls(
+            content_type=(
+                str(headers.get("content-type", "")).split(";")[0].strip().lower() or None
+            ),
+            content_length=int(raw_length) if raw_length.isdigit() else None,
+            etag=str(headers.get("etag", "")).strip() or None,
+            last_modified=str(headers.get("last-modified", "")).strip() or None,
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "content_type": self.content_type,
+            "content_length": self.content_length,
+            "etag": self.etag,
+            "last_modified": self.last_modified,
+        }
+
+
+def probe_icon_url(
+    url: str,
+    *,
+    opener: Any | None = None,
+    timeout: float = ICON_URL_TIMEOUT,
+) -> IconFingerprint:
+    """アイコン URL の現在の指紋を取る。到達不能・非画像は ``IconUrlError``。
+
+    ``check_icon_url`` との違いは**サイズ上限を課さない**こと。再検証は「保存を許すか」
+    ではなく「保存時と変わったか」を見る検査で、上限超過そのものが検知したい変化である
+    (5MB を超えたら例外で潰すのではなく、変化として報告して代表に判断させる)。
+    形式(Content-Type)は上限と違い「もはや画像ではない」= 表示不能の障害なので、
+    ここでは失敗として扱う。
+    """
+    _, headers = _head_icon_url(url, opener=opener, timeout=timeout)
+    fingerprint = IconFingerprint.from_headers(headers)
+    if fingerprint.content_type not in ICON_ALLOWED_TYPES:
+        raise IconUrlError(
+            f"対応していない画像形式(Content-Type: {fingerprint.content_type or '(なし)'})"
+        )
+    return fingerprint
+
+
 def check_icon_url(
     url: str,
     *,
@@ -302,25 +423,7 @@ def check_icon_url(
     ``opener`` は ``(url, method, timeout) -> 小文字キーのヘッダ dict`` の差し替え口
     (テストは実ネットワークを叩かない)。
     """
-    candidate = url.strip()
-    parsed = urlparse(candidate)
-    if parsed.scheme != "https" or not parsed.hostname:
-        raise IconUrlError(f"https:// の URL のみ受け付ける(受領: {candidate!r})")
-    fetch = opener if opener is not None else _default_opener
-    if opener is None:
-        # 差し替え時(テスト)は名前解決しない。実 I/O を行う既定経路だけが対象。
-        _reject_internal_host(parsed.hostname)
-    headers: dict[str, str] = {}
-    errors: list[str] = []
-    for method in ("HEAD", "GET"):
-        try:
-            headers = fetch(candidate, method, timeout)
-            break
-        except Exception as exc:  # noqa: BLE001 - 失敗理由は利用者に見せる
-            errors.append(f"{method}: {type(exc).__name__}: {exc}")
-    else:
-        raise IconUrlError(f"URL に到達できない({' / '.join(errors)})")
-
+    candidate, headers = _head_icon_url(url, opener=opener, timeout=timeout)
     content_type = str(headers.get("content-type", "")).split(";")[0].strip().lower()
     if content_type not in ICON_ALLOWED_TYPES:
         raise IconUrlError(
@@ -434,6 +537,7 @@ __all__ = [
     "ICON_ALLOWED_TYPES",
     "ICON_MAX_BYTES",
     "ICON_URL_TIMEOUT",
+    "IconFingerprint",
     "IconUrlError",
     "Member",
     "apply_icon_overrides",
@@ -446,7 +550,9 @@ __all__ = [
     "icon_overrides",
     "member_for_role",
     "members",
+    "probe_icon_url",
     "resolve_author",
     "set_icon_override",
+    "split_author_member_id",
     "update_icon",
 ]

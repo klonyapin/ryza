@@ -79,8 +79,9 @@ def test_fetch_decisions_surfaces_veto(conn):
         decision_id = cur.fetchone()[0]
         cur.execute(
             """
-            INSERT INTO governance.decision_vetoes (decision_id, vetoed_by, reason)
-            VALUES (%s, 'tester', '前提の誤りが判明したため否認')
+            INSERT INTO governance.decision_vetoes
+                (decision_id, vetoed_by, reason, origin)
+            VALUES (%s, 'tester', '前提の誤りが判明したため否認', 'discord_button')
             """,
             (decision_id,),
         )

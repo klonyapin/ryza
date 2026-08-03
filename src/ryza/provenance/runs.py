@@ -44,6 +44,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 #: git describe が使えないため、これが最優先の情報源になる(独立役員 再審査 条件2)。
 CODE_VERSION_ENV = "RYZA_CODE_VERSION"
 
+#: ``meta.runs.status`` の語彙(0031 の CHECK ``runs_status_check`` と一致させる)。
+#: ``running`` は :func:`start_run` が書き、:meth:`Run.finish` が ``success`` / ``failed``
+#: へ遷移させる。**この語彙は 0027 の部分索引 ``meta.runs_running_idx``
+#: (``WHERE status = 'running'``)と ``dashboard.queries.fetch_running_runs`` の述語にも
+#: 埋め込まれている**ため、増やすときは CHECK・索引・クエリ・本定数を同時に改める
+#: (手順は migrations/0031_runs_status_check.sql の冒頭)。
+RUN_STATUSES: tuple[str, ...] = ("running", "success", "failed")
+
 
 def _git_code_version() -> str:
     """code_version を取得する。env ``RYZA_CODE_VERSION`` → ``git describe`` → 'unknown'。
@@ -148,7 +156,18 @@ class Run:
 
         status: ``success`` | ``failed``(``running`` からの遷移)。二重呼び出しは無視。
         自前接続を所有する場合は最後に閉じる。
+
+        語彙外の値は :data:`RUN_STATUSES` で先に弾く。一次統制は 0031 の CHECK だが、
+        共有接続(``conn`` 指定)で呼ばれると CheckViolation が**呼び出し側の
+        トランザクション全体を中断させる** —— ジョブの成果物ごと巻き戻る。writer 側で
+        先に落として、壊すのを呼び出しだけに留める。
         """
+        if status not in RUN_STATUSES:
+            raise ValueError(
+                f"未知の run status: {status}(既知: {', '.join(RUN_STATUSES)})。"
+                "語彙を増やすには 0031 の CHECK・0027 の部分索引・fetch_running_runs を"
+                "同時に改める必要がある"
+            )
         if self._finished:
             return
         with self._conn.cursor() as cur:
