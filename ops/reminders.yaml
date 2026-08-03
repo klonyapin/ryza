@@ -1021,6 +1021,37 @@ reminders:
       title: "GCP IAM の棚卸し: プロジェクトレベル付与と旧デプロイ経路の残滓"
       labels: [ops]
       body: "ops-weekly VM 移設審査(2026-08-04・低)が旧経路の IAM 残滓を指摘した。移設自体は撤回したため当該残滓は発生しないが、**既存の**付与を棚卸しする必要は残る。ops/deploy-ops-weekly.sh は `roles/run.invoker` と `roles/bigquery.dataViewer` を **プロジェクトレベル**でデフォルト Compute SA に付けており(--condition=None)、他の deploy スクリプトにも同種の付与がある。実施内容: ①`gcloud projects get-iam-policy ryza-main` を取り、SA ごとの付与を一覧化する。②プロジェクトレベルで足りている付与のうちリソースレベル(Cloud Run サービス単位・データセット単位)へ絞れるものを特定する。③使われていない付与(廃止した経路のもの)と、Artifact Registry の未使用イメージを洗う。④デフォルト Compute SA を全ジョブで共用している構成そのもの(1つの SA が漏れると全経路に及ぶ)の是非を評価し、判断材料を出す。**結論は『分離する/しない』ではなく、現状の棚卸し結果と分離コストの見積りを出すこと。** 変更を伴う場合、deploy スクリプトは保護領域(deploy_path)であり独立役員審査+承認記録の手続を経ること。"
+    # 2026-08-04 実施(期限 8/17 より前倒し)。成果物 = docs/ops/gcp-iam-inventory.md。
+    # gcloud の読み取りコマンドのみを使い、IAM の変更は一切行っていない。主な実測結果:
+    #   ①**既定 Compute SA にプロジェクトレベル `roles/editor`(11,889 権限)**が付いている。
+    #     どの deploy スクリプトにも宣言が無く(GCP がプロジェクト作成時に自動付与)、
+    #     リポジトリを読んでも存在に気づけない。この SA は VM ryza-bot(Bot/日次/A-18)・
+    #     Cloud Run Job ops-weekly・Cloud Scheduler の3系統を兼務する
+    #   ②したがって `deploy-ops-weekly.sh` の run.invoker / bigquery.dataViewer は
+    #     **現状 editor に包含されており1権限も増やしていない**(効いていない宣言)。
+    #     是正の順序は「リソースレベル付与を先に足す → editor を剥がす」であり、逆順は
+    #     ops-weekly と Scheduler を壊す
+    #   ③`billing_export` データセット ACL の projectWriters=WRITER は editor 保持者に
+    #     解決されるため、compute SA が請求エクスポート(運営帳簿の一次証憑)を消せる
+    #   ④`discord-bot-token` に宣言の無い `secretVersionAdder`(2026-08-02 手動付与・
+    #     git 全 ref に痕跡なし)。Secret に新版を積むコードは src に存在しない
+    #   ⑤リマインダー④(SA 共用の是非)への回答: 分離すべきはまず editor。3 SA に割っても
+    #     3つとも editor を継ぐなら爆風半径は変わらない。分離コストの見積りは文書 §5
+    #   ⑥AR 残滓: ryza/dashboard が 12 世代(稼働は1)・削除済みサービス ryza-secret-drop
+    #     のイメージ2件。allUsers/allAuthenticatedUsers はどこにも無い(既存ゲートが機能)
+    # 是正の実施は本タスクから分離し `gcp-iam-remediation`(期限 2026-08-24・代表確認付き)へ。
+    status: done # 2026-08-04 docs/ops/gcp-iam-inventory.md として完了(是正は gcp-iam-remediation へ分離)
+
+  - id: gcp-iam-remediation
+    what: "GCP IAM 棚卸し(gcp-iam-inventory)で特定した過剰権限の是正 — **削除を伴うため代表確認が必須**"
+    conditions:
+      - type: date_after
+        date: "2026-08-24"
+    action:
+      type: issue_create
+      title: "GCP IAM 是正: 既定 Compute SA の roles/editor 剥離とリソースレベル化"
+      labels: [ops]
+      body: "棚卸し結果は `docs/ops/gcp-iam-inventory.md`(as_of 2026-08-04)。**実施順序に依存関係があり、順序を誤ると夜間ジョブが翌週まで沈黙する。** 必ず R-0 → R-1 の順で行うこと。\n\n**R-0(自動化可・追加のみ)**: ①Cloud Run Job `ops-weekly` に**リソースレベル**で `roles/run.invoker`(compute SA)、②BigQuery データセット `billing_export` の ACL に READER(compute SA)、③`jquants-api-key`/`jquants-refresh-token`/`fred-api-key`/`estat-app-id` の secretAccessor 付与を `ops/deploy-daily.sh` に宣言として書く(現在は手動付与のみで VM 再作成時に再現しない)。\n\n**R-1(手動・代表確認必須)**: プロジェクトレベルの `roles/editor` を `287074591154-compute@developer.gserviceaccount.com` から削除する。影響は Bot・日次サイクル・A-18 監査・ops-weekly・Scheduler の**5経路同時**。実施前にロールバック手順(再付与コマンド)を用意し、実施直後に4系統の陽性確認(Bot 死活 / `ryza-daily` 手動実行 / `ops-weekly` 手動実行 / `ryza-a18` 手動実行)を行うこと。09:00 JST 帯(日次サイクル)と月曜 01:00 UTC 帯(ops-weekly)は避ける。\n\n**R-2**: プロジェクトレベルの `roles/run.invoker` と `roles/bigquery.dataViewer` を削除し、`ops/deploy-ops-weekly.sh:90-93,111-114` をリソースレベル付与に書き換える。**保護領域 deploy_path のため独立役員審査+承認記録が必要。**\n\n**R-3**: `discord-bot-token` の `roles/secretmanager.secretVersionAdder`(compute SA)を削除する。用途が無いことはコード検索で確認済みだが、R-1 の前に消しても効果はゼロ(editor が包含する)。\n\n**R-6/R-7(自動化可)**: Artifact Registry `ryza` にクリーンアップポリシー(タグ付き最新 N≥5 世代を保持・無タグは7日で削除)、削除済みサービス `ryza-secret-drop` のイメージと `cloud-run-source-deploy` リポジトリの削除、`deploy-ops-weekly.sh` の `latest` タグ付与の廃止(SHA タグ固定に揃える)。\n\n**自動化してはいけないもの**: R-1・R-2・R-3。IAM の削除はスクリプト化すると『消したつもりで消えていない』『消しすぎて夜間ジョブが翌週まで止まる』が両方とも静かに起きる。`gcloud projects remove-iam-policy-binding` は etag 競合時に黙って失敗しうる。**代表の確認を挟んだ手動実施+実施後の陽性確認**とすること。\n\n**未検証の残件**: プロジェクトレベル `run.invoker` の継承により compute SA は IAM 上 `ryza-dashboard` の invoker である。IAP が直接呼び出しを終端するか否かは棚卸しでは未検証(能動的な試行が必要)。R-2 の実施時に陽性テスト(compute SA の ID トークンで叩き、拒否されること)を添えること。\n\n**別枠(IAM 外)**: `default-allow-rdp`(0.0.0.0/0→3389・本プロジェクトで未使用)の削除と `default-allow-ssh` の送信元を IAP TCP forwarding 範囲(35.235.240.0/20)へ限定する検討。"
     status: pending
 
   - id: critic-input-window-decision-visibility
