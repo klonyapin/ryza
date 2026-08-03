@@ -37,6 +37,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from ryza import org
 from ryza.bot import CHANNELS, COLOR_FLASH, COLOR_NORMAL, channels, killswitch, outbox, webhooks
 from ryza.bot import daily as daily_mod
 from ryza.bot.approvals import KINDS, NotOwnerError, parse_proposal, record_decision
@@ -293,20 +294,25 @@ class RyzaBot(commands.Bot):
 
         def send_fn(msg: outbox.OutboxMessage) -> str:
             # 論理チャンネル → 実 ID / webhook は起動時 ensure の記録(ops.*)から解決。
+            # アイコン上書き(0020)も同じ接続で読む。**投入時ではなく配送時**に解決する
+            # ことで、代表がダッシュボードで差し替えた直後の投稿から新アイコンになる
+            # (キャッシュしない — org.icon_overrides)。
             with connect() as resolve_conn:
                 channel_id = channels.resolve(resolve_conn, msg.channel)
                 webhook_url = webhooks.resolve_webhook(resolve_conn, msg.channel)
+                overrides = org.icon_overrides(resolve_conn)
             if channel_id is None:
                 raise RuntimeError(f"チャンネル未解決(ensure 前?): {msg.channel}")
             # #承認 向けで proposal footer を持つ embed には承認ボタンを付ける
             # (凍結中の例外的取引などを1件ずつオーナー承認する経路)。
             parsed = parse_proposal(msg.embed) if msg.channel == "approval" else None
+            embed_json = org.apply_icon_overrides(msg.embed, overrides)
             # webhook 方式(代表指示 2026-08-03): author キャラクターを username /
             # avatar_url へ昇格して投稿(webhooks.py)。承認ボタン付きは webhook に
             # コンポーネントを付けられないため従来の Bot 投稿のまま。
             if webhook_url is not None and parsed is None:
-                return webhooks.post(webhook_url, msg.embed, urgent=msg.urgent)
-            embed = dict_to_embed(msg.embed)
+                return webhooks.post(webhook_url, embed_json, urgent=msg.urgent)
+            embed = dict_to_embed(embed_json)
             if msg.urgent:
                 embed.color = discord.Color(COLOR_FLASH)
             channel = self.get_channel(int(channel_id))
