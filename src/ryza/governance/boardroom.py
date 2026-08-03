@@ -47,6 +47,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -81,7 +82,68 @@ FACILITATOR_ROLE = "cio"
 # 1ターン最大4回)。ルータ呼び出し自体は安価な階層のため上限に数えない。
 MAX_SPEECHES_PER_TURN = 4
 
+# 批判義務を負う役職(05 §3: 全ての重要決定に最低1つの懸念を出す)。決定論ガードの対象。
+CRITIC_ROLE = "independent_officer"
+
+# ── 重要決定の決定論ガード(2026-08-03 代表指示)────────────────────────────────
+# 独立役員の批判義務(05 §3)を**ルータ(LLM)の判断だけに依存させない**ための保険。
+# 不変原則1(LLM は判断材料を作る側)の精神: 安全側の義務は決定論コードで担保する。
+# キーワードは「代表の発言がこれを含むなら、少なくとも批判を1つ聞くべき」語彙に絞る:
+#
+# - 定款第3条の3専決に直結: 定款 / 実弾(実弾マネー)/ Kill Switch(復帰)
+# - 定款第5条の保護領域(config/governance.yaml protected_areas): IPS / マンデート /
+#   リスクリミット / コンプラゲート / 会計エンジン / スキーマ / 監査
+# - 資本配分・戦略の採否(05 §4 の投資委員会の付議事項): 資本配分 / 昇格 / 発注 / ポジション
+# - 金額・比率の表記(数値の主張は検証を要する — 議論規約4「意見は証拠で解決」)
+#
+# 過検出は「独立役員が1回多く発言する」だけで害が小さく、未検出は「重要決定が無批判で
+# 通る」ため害が大きい。したがって recall 優先で広めに取る(部分一致・大文字小文字無視)。
+IMPORTANT_DECISION_KEYWORDS: tuple[str, ...] = (
+    "定款",
+    "実弾",
+    "kill switch",
+    "killswitch",
+    "キルスイッチ",
+    "ips",
+    "マンデート",
+    "リスクリミット",
+    "リスク限度",
+    "コンプラ",
+    "ゲート",
+    "会計エンジン",
+    "スキーマ",
+    "監査",
+    "資本配分",
+    "サイジング",
+    "昇格",
+    "発注",
+    "ポジション",
+    "レバレッジ",
+    "承認",
+    "決議",
+    "改訂",
+)
+
+# 金額・比率の表記(¥100万 / 1,000円 / 10% / 10.5パーセント / 3倍 など)。
+# 数値そのものではなく**単位付きの数値**だけを拾う(日付や件数での誤検出を減らす)。
+_AMOUNT_PATTERN = re.compile(
+    r"[¥￥$]\s*[\d,.]+|[\d,.]+\s*(円|万円|億円|%|％|パーセント|ベーシスポイント|bp|倍)",
+    re.IGNORECASE,
+)
+
 _SPEAKER_LABELS = {"representative": "代表", **BOARDROOM_ROLES}
+
+
+def mentions_important_decision(text: str) -> bool:
+    """発言が重要決定の兆候(重要語 or 金額・比率表記)を含むか(決定論判定)。
+
+    ``conduct_meeting`` がこの判定で独立役員を強制的に発言者へ加える。LLM は呼ばない
+    ため、ルータの気まぐれ・プロンプト崩れ・モデル交代の影響を受けない。
+    """
+    lowered = text.lower()
+    if any(kw in lowered for kw in IMPORTANT_DECISION_KEYWORDS):
+        return True
+    return _AMOUNT_PATTERN.search(text) is not None
 
 
 # ── 出力スキーマ(schemas.py の流儀: 狭い語彙のみで自前 validate に適合)────────
@@ -361,9 +423,14 @@ def conduct_meeting(
 
     1. ルータ(安価な階層)が発言すべき役職を発言順で選ぶ。誰も選ばれなければ
        ``FACILITATOR_ROLE`` が簡潔に応答する(代表の発言を黙殺しない)
-    2. 選ばれた役職が順に発言する。各役職には**先行者の発言を追加したトランスクリプト**
+    2. **決定論ガード**: 代表の発言が重要決定の兆候を含むなら
+       (``mentions_important_decision``)、ルータの出力に関わらず ``CRITIC_ROLE``
+       (独立役員)を初回ラウンドの発言者に加える(05 §3 の批判義務を LLM 判断だけに
+       依存させない — 不変原則1)。枠が埋まっていれば末尾の1名と入れ替え、
+       ``max_speeches`` は決して超えない
+    3. 選ばれた役職が順に発言する。各役職には**先行者の発言を追加したトランスクリプト**
        を渡す(モジュール docstring の 05 §6-2 に関する注記を参照)
-    3. 予算が残っていればルータをもう1度だけ回し、反応すべき役職が発言する(最大1回)
+    4. 予算が残っていればルータをもう1度だけ回し、反応すべき役職が発言する(最大1回)
 
     発言(高階層呼び出し)は合計 ``max_speeches`` 件を超えない — ルータの出力が何であれ
     コード側で打ち切る。``on_reply`` は1発言ごとに呼ばれるコールバック(UI の逐次描画用)。
@@ -399,6 +466,13 @@ def conduct_meeting(
         router_llm, turns=transcript, model=router_model, model_tier=router_tier,
         limit=max_speeches,
     )
+    # 決定論ガード: 重要決定の兆候があれば独立役員を必ず初回ラウンドに入れる(05 §3)。
+    # 批判は提案の後に聞くべきなので末尾に置き、枠が埋まっていれば末尾の1名と入れ替える
+    # (上限 max_speeches は破らない — コストの硬い上限が優先)。
+    if mentions_important_decision(turns[-1].text) and CRITIC_ROLE not in selected:
+        if len(selected) >= max_speeches:
+            selected = selected[: max_speeches - 1]
+        selected.append(CRITIC_ROLE)
     if selected:
         rounds.append(selected)
         _speak_round(selected)
@@ -574,7 +648,9 @@ def record_chat_stances(
 
 __all__ = [
     "BOARDROOM_ROLES",
+    "CRITIC_ROLE",
     "FACILITATOR_ROLE",
+    "IMPORTANT_DECISION_KEYWORDS",
     "MAX_SPEECHES_PER_TURN",
     "MEETING_ORDER",
     "REPLY_SCHEMA",
@@ -590,6 +666,7 @@ __all__ = [
     "fetch_resolutions",
     "mark_resolution",
     "meeting_directive",
+    "mentions_important_decision",
     "record_chat_stances",
     "route_speakers",
     "save_office_chat_minute",

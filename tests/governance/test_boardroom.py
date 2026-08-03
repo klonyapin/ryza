@@ -15,7 +15,9 @@ import pytest
 
 from ryza.db.conn import connect
 from ryza.governance.boardroom import (
+    CRITIC_ROLE,
     FACILITATOR_ROLE,
+    IMPORTANT_DECISION_KEYWORDS,
     MAX_SPEECHES_PER_TURN,
     ChatTurn,
     attendees_of,
@@ -23,6 +25,7 @@ from ryza.governance.boardroom import (
     digest_stances,
     fetch_resolutions,
     mark_resolution,
+    mentions_important_decision,
     record_chat_stances,
     route_speakers,
     save_office_chat_minute,
@@ -175,10 +178,11 @@ def test_conduct_meeting_speaks_only_selected_roles_in_router_order():
 
 def test_conduct_meeting_runs_one_reaction_round():
     """反応ラウンドは最大1回。選ばれた役職が先行発言を見て応答する。"""
+    # 決定論ガードが効かない話題(重要決定の兆候なし)でルータの選定だけを見る。
     result, router_p, speaker_p = _meeting(
         routes=[{"roles": ["cio"]}, {"roles": ["audit"]}],
         replies=[{"reply": "段階移行を提案する。"}, {"reply": "証跡の要件を追加したい。"}],
-        turns=[ChatTurn("representative", "実弾移行の時期を早めたい。")],
+        turns=[ChatTurn("representative", "朝会の進め方を相談したい。")],
     )
     assert [t.speaker for t in result.turns] == ["cio", "audit"]
     assert result.rounds == [["cio"], ["audit"]]
@@ -199,6 +203,82 @@ def test_conduct_meeting_caps_total_speeches():
     assert len(result.turns) == MAX_SPEECHES_PER_TURN == 4
     assert len(speaker_p.calls) == 4  # 高階層呼び出しは4回まで
     assert result.rounds == [all_roles, ["cio"]]  # 反応ラウンドは残枠1件のみ
+
+
+# ── 重要決定の決定論ガード(独立役員の批判義務を LLM 判断に依存させない)───────
+@pytest.mark.parametrize(
+    "text",
+    [
+        "IPS の改訂を検討したい。",
+        "実弾移行の時期を早めたい。",
+        "Kill Switch の復帰条件を緩めたい。",
+        "ben に ¥300,000 を追加配分する。",
+        "目標ボラを 12% に上げよう。",
+        "この戦略を昇格させたい。",
+    ],
+)
+def test_mentions_important_decision_detects(text):
+    assert mentions_important_decision(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["今日は天気が良い。", "おはよう、調子はどう?", "昨日の朝刊は読みやすかった。"],
+)
+def test_mentions_important_decision_ignores_small_talk(text):
+    assert not mentions_important_decision(text)
+
+
+def test_keyword_list_covers_charter_reserved_matters():
+    """3専決(定款・実弾・Kill Switch)と主要な保護領域の語彙を必ず持つ。"""
+    for kw in ("定款", "実弾", "kill switch", "ips", "マンデート", "リスクリミット"):
+        assert kw in IMPORTANT_DECISION_KEYWORDS
+
+
+def test_guard_forces_critic_even_if_router_omits_it():
+    """ルータが独立役員を外しても、重要決定の兆候があれば強制的に加える(05 §3)。"""
+    result, _router_p, speaker_p = _meeting(
+        routes=[{"roles": ["cio"]}, {"roles": []}],
+        replies=[{"reply": "段階移行を提案する。"}, {"reply": "反対する。統制が未稼働。"}],
+        turns=[ChatTurn("representative", "IPS を改訂して実弾移行を早めたい。")],
+    )
+    # 批判は提案の後に聞く(ガードは末尾に追加する)。
+    assert [t.speaker for t in result.turns] == ["cio", CRITIC_ROLE]
+    assert result.rounds == [["cio", CRITIC_ROLE]]
+    assert "応答義務" in speaker_p.calls[1]["system"]
+
+
+def test_guard_forces_critic_even_if_router_selects_nobody():
+    """ルータが空を返しても、重要決定なら進行役ではなく独立役員が発言する。"""
+    result, _router_p, _speaker_p = _meeting(
+        routes=[{"roles": []}, {"roles": []}],
+        replies=[{"reply": "反対する。予防統制が未稼働。"}],
+        turns=[ChatTurn("representative", "リスクリミットを引き上げたい。")],
+    )
+    assert [t.speaker for t in result.turns] == [CRITIC_ROLE]
+    assert result.rounds == [[CRITIC_ROLE]]
+
+
+def test_guard_respects_speech_cap():
+    """ガードは上限を破らない(枠が埋まっていれば末尾の1名と入れ替える)。"""
+    result, _router_p, _speaker_p = _meeting(
+        routes=[{"roles": ["cio", "audit"]}, {"roles": []}],
+        replies=[{"reply": "発言。"}],
+        turns=[ChatTurn("representative", "マンデートを改訂したい。")],
+        max_speeches=2,
+    )
+    assert [t.speaker for t in result.turns] == ["cio", CRITIC_ROLE]  # audit を置換
+    assert len(result.turns) == 2
+
+
+def test_guard_does_not_fire_on_small_talk():
+    """雑談では強制しない(ルータの選定・進行役フォールバックのまま)。"""
+    result, _router_p, _speaker_p = _meeting(
+        routes=[{"roles": ["cio"]}, {"roles": []}],
+        replies=[{"reply": "承知した。"}],
+        turns=[ChatTurn("representative", "おはよう、調子はどう?")],
+    )
+    assert [t.speaker for t in result.turns] == ["cio"]
 
 
 def test_conduct_meeting_falls_back_to_facilitator_when_no_one_selected():
