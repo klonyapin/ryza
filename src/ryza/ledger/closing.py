@@ -224,11 +224,16 @@ def run_daily_close(
     }
 
 
-def _entries_watermark(conn: psycopg.Connection, book_id: str, as_of: _date) -> int | None:
+def _entries_watermark(conn: psycopg.Connection, book_id: str, as_of: _date) -> int:
     """NAV の入力になった仕訳の水位(``entry_date <= as_of`` の最大 entry_id)。
 
     リネージの input_refs(不変原則3)。同じ日付でも「どこまでの仕訳を見た値か」が
     残るため、締め後に立った仕訳による NAV の変化を後から説明できる。
+
+    仕訳が 1 本も無い日は **0**(NULL ではない)を書く。NULL のままだと
+    ``stored_watermark IS NULL`` で毎回 stale と判定され、値も通知も変わらないのに
+    ``producer_history`` だけが締めのたびに伸び続ける(独立審査 新-4)。0 は
+    「見た仕訳はゼロ件」を表す正しい水位であり、以後の比較にもそのまま使える。
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -237,7 +242,7 @@ def _entries_watermark(conn: psycopg.Connection, book_id: str, as_of: _date) -> 
             (book_id, as_of),
         )
         row = cur.fetchone()
-    return None if row is None or row[0] is None else int(row[0])
+    return 0 if row is None or row[0] is None else int(row[0])
 
 
 def _producer(
@@ -311,12 +316,16 @@ def _upsert_nav(
 #: ``age_business_days`` は「その日より後に締めが走った回数」= 営業日の実績カウント。
 #: 祝日カレンダーを持ち込まずに restatement の古さを測る(通知の材料性判定に使う)。
 #:
-#: ``non_capital_late`` は遅延仕訳に**拠出資本以外**(broker_fill・評価替え・費用など)が
-#: 含まれるかどうか。拠出資本の入出金は執行照合・ポジション照合の結論を動かさないが、
-#: 遅延約定はその日の建玉そのものを変えるため、締め時点の照合結論を無効化する
-#: (独立審査 再-2 → 設計リード裁定: ``recon_invalidated`` で機械可読にする)。
-#: 判定は navflow と同じ拠出資本の定義(``category='equity'`` かつ
-#: ``account_id <> 'retained'``)を使い、その勘定に**触れない**遅延仕訳の存在を見る。
+#: ``position_changing_late`` は遅延仕訳が**建玉を動かすか**(``jl.instrument_id`` を持つ
+#: 明細を含む仕訳が遅れて立ったか)。ポジション照合はその日の建玉に対して行われるので、
+#: 建玉が変われば締め時点の照合結論は無効になる(独立審査 再-2 → ``recon_invalidated``)。
+#:
+#: 判定は**行レベル・建玉性**で行う。仕訳単位で「拠出資本勘定に触れない仕訳か」を見る
+#: 述語は両方向に誤る(独立審査 新-1): 現物拠出(securities 借 / capital 貸)は 1 仕訳に
+#: capital 行を含むため建玉が増えるのに判定から漏れ、逆に建玉を一切動かさない費用
+#: アクルーアル(interest_expense / cash)は「拠出資本に触れない」だけで無効判定になる。
+#: 実測でこの行レベル述語は 現物拠出=True / 費用=False / 出資=False / 約定=True と分離する。
+#:
 #: 水位が無い日は ``entry_id > NULL`` が NULL になり EXISTS が false — 判定材料が
 #: 無い日に照合無効を主張しない(restatement 判定と同じ姿勢)。
 _STALE_SNAPSHOTS_SQL = """
@@ -334,19 +343,15 @@ WITH snap AS (
                AS current_watermark,
            EXISTS (
                SELECT 1 FROM ledger.journal_entries je
+               JOIN ledger.journal_lines jl ON jl.entry_id = je.entry_id
                WHERE je.book_id = %(book)s AND je.entry_date <= snap.snap_date
                  AND je.entry_id > snap.stored_watermark
-                 AND NOT EXISTS (
-                     SELECT 1 FROM ledger.journal_lines jl
-                     JOIN ledger.accounts a
-                       ON a.book_id = jl.book_id AND a.account_id = jl.account_id
-                     WHERE jl.entry_id = je.entry_id
-                       AND a.category = 'equity' AND a.account_id <> 'retained'
-                 )
-           ) AS non_capital_late
+                 AND jl.instrument_id IS NOT NULL
+           ) AS position_changing_late
     FROM snap
 )
-SELECT snap_date, stored_watermark, current_watermark, age_business_days, non_capital_late
+SELECT snap_date, stored_watermark, current_watermark, age_business_days,
+       position_changing_late
 FROM measured
 WHERE stored_watermark IS NULL
    OR coalesce(current_watermark, 0) > stored_watermark
@@ -410,7 +415,7 @@ def reclose_stale(
         stale = cur.fetchall()
 
     results: list[dict[str, Any]] = []
-    for snap_date, stored_wm, current_wm, age, non_capital_late in stale:
+    for snap_date, stored_wm, current_wm, age, position_changing_late in stale:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT nav, status, detail FROM ledger.nav_snapshots "
@@ -428,7 +433,7 @@ def reclose_stale(
         # restatement としては扱わない — 起きていない訂正を主張しないため。
         late_entries = stored_wm is not None and (current_wm or 0) > stored_wm
         restated = nav != prev_nav
-        recon_invalidated = bool(late_entries and non_capital_late)
+        recon_invalidated = bool(late_entries and position_changing_late)
         detail = (
             _restated_detail(
                 prev_detail, totals, run_id, prev_nav, nav,
@@ -476,7 +481,10 @@ def _restated_detail(
     訂正で最初の ``nav_before`` が消えないよう配列で追記する(独立審査 再-8)。
 
     ``recon_invalidated`` は**一度立ったら下ろさない**(勘定を戻す仕訳が来ても、その日の
-    照合が締め時点の建玉に対して行われた事実は変わらない)。
+    照合が締め時点の建玉に対して行われた事実は変わらない)。ただし不可逆なフラグをその
+    まま毎日の urgent 条件にすると「一度でも遅延約定が起きたら永久に赤」になるため
+    (中-5 で是正済みの欠陥の再発 — 独立審査 新-2)、**いつの再締めで立った/更新された
+    か**を ``recon_invalidated_by_run`` に残し、通知側が鮮度で絞れるようにする。
     """
     history = prev_detail.get("reclose")
     history = list(history) if isinstance(history, list) else []
@@ -502,8 +510,10 @@ def _restated_detail(
         restated_by_run=int(run_id),
         reclose=history,
     )
-    if recon_invalidated:
+    # 既に立っている日を再締めが触った(= 水位が動いた)ときも「更新」として run を打ち直す。
+    if recon_invalidated or prev_detail.get("recon_invalidated"):
         detail["recon_invalidated"] = True
+        detail["recon_invalidated_by_run"] = int(run_id)
     return detail
 
 

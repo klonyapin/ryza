@@ -46,9 +46,11 @@ from ryza.provenance import Run, start_run
 from ryza.risk import engine
 from ryza.risk.classify import classify_current_instruments
 from ryza.risk.navflow import (
+    NavFlowPoint,
     PendingFlow,
     load_nav_flow_data,
     pending_flows_note,
+    recon_invalidated_days,
     recon_invalidated_note,
     urgent_pending,
 )
@@ -72,9 +74,9 @@ class NavSeries:
 
     points: list[engine.NavPoint]
     pending_flows: tuple[PendingFlow, ...] = ()
-    #: 再締めで照合結論が無効化された日の注記(``navflow.recon_invalidated_note``)。
-    #: breaks 相当で urgent に上げる — 「照合済み NAV」として扱わせないため(再-2 の裁定)。
-    recon_note: str | None = None
+    #: navflow の生の点。照合無効フラグ(``recon_invalidated``)とそれを立てた run を
+    #: 呼び出し側が読むために保持する — 同じ 1 クエリの結果で、追加の読み出しはしない。
+    flow_points: tuple[NavFlowPoint, ...] = ()
 
     def __bool__(self) -> bool:  # 「系列があるか」の判定は点の有無で行う
         return bool(self.points)
@@ -96,7 +98,7 @@ def load_nav_series(conn: psycopg.Connection, book_id: str) -> NavSeries:
             for p in data.points
         ],
         pending_flows=data.pending,
-        recon_note=recon_invalidated_note(data.points),
+        flow_points=tuple(data.points),
     )
 
 
@@ -370,24 +372,44 @@ def run_risk_daily(
         returns = load_instrument_returns(
             conn, [p.instrument_id for p in positions], as_of=as_of
         )
-        if loaded.recon_note:
-            notes.insert(0, f"【要確認】{loaded.recon_note}")
+        # 照合無効(独立審査 再-2)。フラグ自体は不可逆だが、urgent にするのは**当該
+        # 再締めで新たに立った/更新された日**だけ(新-2 — 中-5 と同じ材料性の規律)。
+        # 既知分は notes に件数だけ残し、毎日 urgent にはしない。
+        fresh_recon = recon_invalidated_days(loaded.flow_points, by_run=run.run_id)
+        all_recon = recon_invalidated_days(loaded.flow_points)
+        recon_note = recon_invalidated_note(fresh_recon or all_recon, fresh=bool(fresh_recon))
+        if recon_note:
+            notes.insert(0, ("【要確認】" if fresh_recon else "") + recon_note)
         if pending_note:
             # 先頭に挿す(重要-4): notes は 1024 字で切られるため、測定に入っていない
             # 入出金の存在が末尾で消えないようにする。embed 側は独立フィールドで二重化。
             notes.insert(0, f"【要確認】{pending_note}")
         state = engine.evaluate(series, positions, returns, ips, extra_notes=notes)
-        effective = upsert_limits_state(conn, book_id, state, as_of=as_of, run_id=run.run_id)
+        # 測定窓に照合無効日が何日入ったかを metrics に残す(不変原則3 — 独立審査の
+        # 要求)。汚染系列で vol_exceeded が立った事実を事後監査で再現できるようにする。
+        # 窓は EWMA 実現ボラの営業日数 +1 点(その区間のリターンを作る NAV 点の数)。
+        window = ips.hard_limits.realized_vol_ewma_days + 1
+        window_days = {p.day for p in loaded.flow_points[-window:]}
+        effective = upsert_limits_state(
+            conn, book_id, state, as_of=as_of, run_id=run.run_id,
+            extra_metrics={
+                "recon_invalidated_days_in_window": len(
+                    window_days.intersection(all_recon)
+                ),
+                "recon_invalidated_days_total": len(all_recon),
+            },
+        )
         usage = engine.guardrail_usage(
             positions, state.nav, _load_cash(conn, book_id), ips
         )
         embed = build_risk_embed(
             book_id, state, effective, usage, ips, as_of=as_of,
-            pending_note=pending_note, recon_note=loaded.recon_note,
+            pending_note=pending_note,
+            recon_note=recon_note if fresh_recon else None,
         )
         # urgent: フラグ到達に加え、保有ありの ES 測定空白(判定保留)と、材料性のある
-        # 未反映フロー(navflow.urgent_pending)、そして再締めで照合結論が無効化された日
-        # (breaks 相当 — 独立審査 再-2 の裁定)も要確認として上げる。
+        # 未反映フロー(navflow.urgent_pending)、そして**当該再締めで新たに**照合結論が
+        # 無効化された日(breaks 相当 — 独立審査 再-2 の裁定)も要確認として上げる。
         oid = enqueue(
             conn,
             channel_ops,
@@ -397,14 +419,15 @@ def run_risk_daily(
                 any(effective.values())
                 or state.es95.deferred
                 or pending_urgent
-                or loaded.recon_note is not None
+                or bool(fresh_recon)
             ),
         )
         detail[book_id] = {
             "status": "measured",
             "pending_flows": len(loaded.pending_flows),
             "pending_urgent": pending_urgent,
-            "recon_invalidated": loaded.recon_note is not None,
+            "recon_invalidated_new": len(fresh_recon),
+            "recon_invalidated_total": len(all_recon),
             "drawdown": str(state.drawdown),
             "ewma_vol": state.ewma_vol_annual,
             "es95": state.es95.adopted,

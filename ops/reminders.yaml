@@ -562,6 +562,30 @@ reminders:
       body: "boardroom.conduct_meeting は、ルータが誰も選ばなかった場合に進行役の定型文(LLM 呼び出しなし)を返した後も、残枠があるため反応ラウンドのルータを1回回す(独立役員 再確認審査 懸念C)。『誰も反応すべきでない』と判断した直後に『反応すべき役職はいるか』を問い直す構造は筋が通らず、ルータ呼び出し1回ぶんの無駄でもある。整理の選択肢: (a) 進行役フォールバックの場合は反応ラウンドをスキップする(意味論としては最も素直)、(b) 進行役の定型文をトランスクリプトに入れずに反応ラウンドを回す、(c) 現行を維持し『代表発言の再解釈の機会』として docstring に根拠を明記する。いずれかを選び、テストで固定すること。挙動の是非は実運用のログ(meta.runs.params.runtime.rounds)を数ターン分見てから判断してよい。"
     status: pending
 
+  - id: mtm-replay-asof
+    what: "【優先度高】replay_position に as_of を足し、遅延約定日の MTM を再適用する(再々審査 新-3 — 恒久偽リターンの解消)"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "ledger: replay_position の as_of 対応 → 再締めで過去日の評価替えを再適用する"
+      labels: [impl, ledger, risk]
+      body: "再締め(`ledger.closing.reclose_stale`)は記帳済み仕訳の**集計だけ**をやり直し、評価替え(MTM)は打ち直さない。`_util.replay_position`(src/ryza/ledger/_util.py:215-264)が `entry_date` で絞らず全期間を再生するため、`post_mark_to_market`(src/ryza/ledger/posting.py:298-316)を過去日付で呼ぶと**その日に存在しなかった建玉**を過去日付の仕訳として書いてしまうからである。帰結として遅延約定のあった日の建玉は取得原価のまま残り、**恒久的な偽リターン**が立つ(独立審査の実測: 市場価格 1200 の日に 1000 で 1000 株を遅延記帳 → 真値 `[0.0]` に対し観測 `[+0.020]`、翌日以降も訂正されない)。振幅は『約定日の値洗い差 × 数量 / NAV』に限られ ±50% 級ではないが、`ewma_vol` を経由して重要-1 と同じ経路(誤 vol_exceeded)に乗る。是正: `replay_position` に `as_of`(`entry_date <= as_of` で絞る)を追加し、再締めが過去日の評価替えを**その日の建玉と終値**で再適用できるようにする。移動平均法の原価計算・`securities_book_value` の as_of との整合、既存呼び出し(post_fill の実現損益計算)への影響を確認すること。当面の防御として当該日は `detail.recon_invalidated` / `positions_stale` で名指しされている。**src/ryza/ledger/ は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 新-3。"
+    status: pending
+
+  - id: close-stage-failure-visibility
+    what: "締め段が落ちた日にリスク日次が未再締めの系列を黙って測る問題(再々審査 起草者留意点(a)の独立評価 — 中)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "jobs.daily: 締め段の失敗をリスク日次へ伝え、未再締めの系列で黙って測らせない"
+      labels: [impl, risk, ledger]
+      body: "`ledger.closing.reclose_stale` の呼び出し口は `execution/close.py` の `run_demo_close` だけであり、`jobs/daily.py` の `_run_stage` は execution 段の例外を握って後続を走らせる。したがって締めが落ちた日は、当日のスナップショットも再締めも走らないまま `run_risk_daily` が**未再締めの系列を黙って測る**(遅延仕訳が入ったままの NAV で DD・実現ボラ・ES を出し、`risk.limits_state` を更新する)。レポート上は『データ n 営業日』としか出ず、締めが飛んだ事実は実行サマリの execution 段にしか残らない。是正案: (1) `run_risk_daily` に『直近の締めが成功したか』を渡し、失敗日は測定を保留する(fail-safe — T-014 判断11 と同じ姿勢)か、(2) 少なくとも `state_metrics` と embed に『当日の締め未完了』を明記して urgent にする。締めの成否は execution 段の StageResult か、`ledger.nav_snapshots` に当日の行があるかで判定できる。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 起草者の留意点3点の独立評価 (a)。"
+    status: pending
+
   - id: protect-execution-config
     what: "config/execution.yaml を protected_areas に登録する(再締め審査 再-9)"
     conditions:
@@ -646,7 +670,7 @@ reminders:
       type: issue_create
       title: "migrations: journal_lines / meta.runs の索引を追加する"
       labels: [impl]
-      body: "ダッシュボードの NAV 系列(dashboard/queries.py fetch_nav_series)は ledger.journal_lines × journal_entries × accounts を全走査して出資フローを日次集計し、コスト集計(fetch_cost_daily / fetch_cost_summary)は meta.runs を started_at で全走査する。どちらも支える索引が無い(journal_lines の PK は (entry_id, line_no)、meta.runs の PK は run_id のみ)。現在は行数が小さく問題にならないが、仕訳と実行記録は単調増加するため放置すると再実行のたびに全表走査が効く。暫定対応として app.py 側に @st.cache_data(ttl=60) を入れてある(独立役員審査 中-10 の部分対応)。是正: (1) ledger.journal_lines (book_id, account_id) の索引、(2) ledger.journal_entries (book_id, entry_date) の索引、(3) meta.runs (started_at DESC) の索引、(4) meta.runs (job_name, run_id DESC) の索引を migrations で追加し、EXPLAIN で効いていることを確認する。**migrations は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 中-10。"
+      body: "ダッシュボードの NAV 系列(dashboard/queries.py fetch_nav_series)は ledger.journal_lines × journal_entries × accounts を全走査して出資フローを日次集計し、コスト集計(fetch_cost_daily / fetch_cost_summary)は meta.runs を started_at で全走査する。どちらも支える索引が無い(journal_lines の PK は (entry_id, line_no)、meta.runs の PK は run_id のみ)。現在は行数が小さく問題にならないが、仕訳と実行記録は単調増加するため放置すると再実行のたびに全表走査が効く。暫定対応として app.py 側に @st.cache_data(ttl=60) を入れてある(独立役員審査 中-10 の部分対応)。是正: (1) ledger.journal_lines (book_id, account_id) の索引、(2) ledger.journal_entries (book_id, entry_date) の索引、(3) meta.runs (started_at DESC) の索引、(4) meta.runs (job_name, run_id DESC) の索引を migrations で追加し、EXPLAIN で効いていることを確認する。**migrations は保護領域(定款第5条)のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 中-10。 **追記(2026-08-04・再締め審査 新-5)**: (2) の `ledger.journal_entries (book_id, entry_date)` は優先度が上がった。日次の再締め(`ledger.closing.reclose_stale`)の stale 検出が、スナップショット 1 日につき `journal_entries` への相関サブクエリを 2 本(水位 max・建玉性 EXISTS)回すため、コストは スナップショット数 × 仕訳数 で伸びる(`EXPLAIN ANALYZE` で `SubPlan 3` が `loops=15`)。年単位の運用で毎日の締めが線形に重くなる。索引に加えて安価な枝刈り(全スナップショットの `stored_watermark` 最大値より後ろの `entry_id` を持つ最古の `entry_date` を 1 回求め、その日以降のスナップショットだけを候補にする)も同時に検討すること。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 新-5。"
     status: pending
 
   - id: streamlit-upgrade-dads-visual-check

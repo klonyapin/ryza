@@ -16,7 +16,11 @@ from ryza.execution.runner import run_pending
 from ryza.gate.orders import advance_order_status, record_execution
 from ryza.ledger import posting
 from ryza.risk.engine import book_returns
-from ryza.risk.navflow import load_nav_flow_data, recon_invalidated_note
+from ryza.risk.navflow import (
+    load_nav_flow_data,
+    recon_invalidated_days,
+    recon_invalidated_note,
+)
 
 from .conftest import JST, make_test_config
 
@@ -278,13 +282,93 @@ def test_reclose_invalidates_recon_when_trade_entries_are_late(
             (d0,),
         )
         assert cur.fetchone()[0]["recon_invalidated"] is True
-    point = next(
-        p for p in load_nav_flow_data(conn, "DEMO_FUND").points if p.day == d0
-    )
+    points = load_nav_flow_data(conn, "DEMO_FUND").points
+    point = next(p for p in points if p.day == d0)
     assert point.recon_invalidated is True and point.status == "confirmed"
-    assert "照合結論が無効化された日" in (
-        recon_invalidated_note(load_nav_flow_data(conn, "DEMO_FUND").points) or ""
+    assert point.recon_invalidated_by_run == run_id  # 鮮度判定の手がかり(新-2)
+    assert recon_invalidated_days(points, by_run=run_id) == [d0]
+    assert "新たに無効化された日" in (
+        recon_invalidated_note(recon_invalidated_days(points), fresh=True) or ""
     )
+
+
+def _post_late_entry(conn, run_id, day, lines, description):
+    posting.post_entry(
+        conn, book_id="DEMO_FUND", entry_date=day, description=description, lines=lines,
+        evidence={"kind": "decision", "payload": {"test": "late"}, "source": "test"},
+        run_id=run_id, posted_by="test.execution",
+    )
+
+
+def test_recon_invalidation_follows_position_lines_not_account_category(conn, run_id):
+    """判定は行レベルの建玉性で行う(独立審査 新-1 の 4 ケース分離)。
+
+    仕訳単位で「拠出資本に触れない仕訳か」を見る述語は両方向に誤る:
+    現物拠出(securities 借 / capital 貸)は建玉が増えるのに拠出資本行を持つため漏れ、
+    費用アクルーアルは建玉を動かさないのに拠出資本に触れないだけで無効判定になる。
+    """
+    d0, d1 = _G_DAYS[0], _G_DAYS[1]
+    _close(conn, run_id, d0)
+    # 現物拠出: 1 仕訳に capital 行を含むが、建玉(instrument_id 付き)は増える。
+    _post_late_entry(
+        conn, run_id, d0,
+        [
+            {"account_id": "securities", "debit": Decimal(1_000_000), "currency": "JPY",
+             "instrument_id": 1},
+            {"account_id": "capital", "credit": Decimal(1_000_000), "currency": "JPY"},
+        ],
+        "現物拠出(遅延記帳)",
+    )
+    result = _close(conn, run_id, d1)
+    item = next(r for r in result["reclose"] if r["date"] == d0)
+    assert item["restated"] is True
+    assert item["recon_invalidated"] is True  # 建玉が動いた → 照合結論は無効
+
+
+def test_recon_invalidation_ignores_expense_accruals(conn, run_id):
+    """費用アクルーアル(建玉を動かさない)は照合結論を無効化しない(新-1 の逆方向)。"""
+    d0, d1 = _G_DAYS[0], _G_DAYS[1]
+    _close(conn, run_id, d0)
+    _post_late_entry(
+        conn, run_id, d0,
+        [
+            {"account_id": "interest_expense", "debit": Decimal(500), "currency": "JPY"},
+            {"account_id": "cash", "credit": Decimal(500), "currency": "JPY"},
+        ],
+        "支払利息の遅延アクルーアル",
+    )
+    result = _close(conn, run_id, d1)
+    item = next(r for r in result["reclose"] if r["date"] == d0)
+    assert item["restated"] is True  # NAV は動く
+    assert item["recon_invalidated"] is False  # が、建玉は動いていない
+
+
+def test_reclose_fills_watermark_for_snapshots_without_entries(conn, run_id):
+    """仕訳が 1 本も無い日も初回パスで水位を埋め、恒久 stale を止める(新-4)。"""
+    old_day = date(2020, 1, 6)  # シード仕訳(2026)より前 = entry_date <= old_day が空
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ledger.nav_snapshots (book_id, snap_date, nav, status, detail)
+            VALUES ('DEMO_FUND', %s, 0, 'confirmed', '{}'::jsonb)
+            """,
+            (old_day,),
+        )
+    first = _close(conn, run_id, _G_DAYS[0])
+    assert old_day in [r["date"] for r in first["reclose"]]
+
+    second = _close(conn, run_id, _G_DAYS[1])
+    assert old_day not in [r["date"] for r in second["reclose"]]  # 2 回目は対象外
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT detail FROM ledger.nav_snapshots "
+            "WHERE book_id = 'DEMO_FUND' AND snap_date = %s",
+            (old_day,),
+        )
+        detail = cur.fetchone()[0]
+    assert detail["producer"]["input_refs"]["ledger.journal_entries.max_entry_id"] == 0
+    # 締めのたびに 1 件ずつ伸びない(元の行に producer が無いため履歴も生えない)。
+    assert detail.get("producer_history", []) == []
 
 
 def test_reclose_reports_missing_nav_daily_row(conn, run_id):
