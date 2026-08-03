@@ -309,3 +309,14 @@ reminders:
       labels: [impl]
       body: "ops.discord_webhooks.webhook_url は URL を知る者が誰でも当該チャンネルへ投稿できる秘密で、Bot トークンより露出面が広い(独立役員審査 2026-08-03・migrations/0017)。現構成は単一 DB ロール(ryza)でアプリ全体が動くため、同一ロール内での読取制限は不可能。実弾移行までに配送コンポーネント(Bot)専用の DB ロールを分離し、他ジョブのロールからは REVOKE する。~/.ryza(ブリッジ資格情報)と DB に分散している秘密の保管一元化も同時に検討する。デモ期間は単一利用者 VM・非公開 DB のため残余リスクを受容(0017 冒頭コメント)。"
     status: pending
+
+  - id: dashboard-iap-oauth-client
+    what: "ダッシュボード IAP の OAuth クライアント紐付け(代表の同意画面設定待ち)"
+    conditions:
+      - type: date_after
+        date: "2026-08-04"
+    action:
+      type: notify
+      channel: 運営
+      body: "代表が OAuth 同意画面(https://console.cloud.google.com/auth/overview?project=ryza-main、アプリ名 Ryza Dashboard・External・テストユーザーに mileage_embassy_9x@icloud.com)を設定したか確認する。設定済みなら: gcloud iap oauth-clients create で OAuth クライアントを作成し IAP へ紐付け → 未認証 curl が 302 を返すこと・代表アカウントでダッシュボード(https://ryza-dashboard-weuuqovieq-uw.a.run.app)にログインできることを確認 → URL を #承認 へ報告し本リマインダーを done に。未設定なら代表へ再依頼。現状: IAP は有効で未認証は 502(IAP 生成・遮断確認済み)だが、OAuth クライアント不在のため代表もログイン不可(2026-08-03 デプロイ時のエラー『Empty Google Account OAuth client ID(s)/secret(s)』)。"
+    status: pending
