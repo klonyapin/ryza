@@ -25,7 +25,10 @@
 **risk 段(T-015)**: 00 §9 の順序どおり会計締めの直後に置く(設計リード裁定
 2026-08-03)— execution 段の締めが書いた当日の ``ledger.nav_snapshots``(NAV の正。
 ``risk.nav_daily`` は執行照合を重ねた risk 用ビュー)を読んで limits_state を更新し、
-リスクレポートを ops へ投入する。
+リスクレポートを ops へ投入する。**execution 段が落ちた日は締めの失敗を risk 段へ
+渡す**(``close_ok``)— 締めが走っていない日は当日スナップショットも再締めも無く、
+リスク日次は前日までの未再締め系列を測ることになるため、レポート先頭に警告を出して
+urgent にする(独立審査 再々審査 起草者の留意点 (a))。
 
 **各段は独立に失敗許容**: 各段を savepoint(``conn.transaction()``)で囲み、失敗しても
 後続段は走る(前段失敗時は前日データで動く)。実行サマリを ``#運営``(ops)へ投入する。
@@ -624,14 +627,28 @@ def run_daily(
             enqueue(conn, channel_ops, _build_breaks_embed(breaks, as_of=as_of), run.run_id)
         return detail
 
-    stages.append(_run_stage(conn, "execution", _execution))
+    execution_stage = _run_stage(conn, "execution", _execution)
+    stages.append(execution_stage)
 
     # ── 6. リスクエンジン(T-015)──────────────────────────────────────────────
     # 00 §9 の順序どおり会計締め(execution 段の照合→NAV 確定)の直後に置く(設計
     # リード裁定 2026-08-03)。execution 段が書いた当日 NAV を読んで limits_state を
     # 更新する。決定論・LLM 不関与のため dry-run でもそのまま実行する。
+    #
+    # **締めの成否を渡す**(独立審査 再々審査 (a)): execution 段は savepoint で囲まれて
+    # いるので、段が落ちた日は当日のスナップショットも再締めも**残らない**(段の
+    # ロールバックで消える)。つまり ``execution_stage.ok`` はそのまま「当日の締めが
+    # 系列に反映されたか」であり、偽なら risk 段は未再締めの・前日までの系列を測る。
+    # その事実を伏せたまま DD・実現ボラ・ES を出さない(risk 側が先頭表示+urgent)。
     stages.append(
-        _run_stage(conn, "risk", lambda: run_risk_daily(conn, run, as_of=as_of))
+        _run_stage(
+            conn,
+            "risk",
+            lambda: run_risk_daily(
+                conn, run, as_of=as_of,
+                close_ok=execution_stage.ok, close_error=execution_stage.error,
+            ),
+        )
     )
 
     # ── 7. 朝刊生成(冪等・Kill Switch ゲート)───────────────────────────────

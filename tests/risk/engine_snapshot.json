@@ -1,0 +1,7240 @@
+[
+ {
+  "index": 0,
+  "input": {
+   "n_points": 8,
+   "last_nav": "4681578",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "-537107"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_jp",
+     "value": "-912502"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "etf_jp",
+     "value": "2132371"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "etf_jp",
+     "value": "-1437298"
+    }
+   ],
+   "n_obs": {
+    "1": 19,
+    "2": 19,
+    "3": 40,
+    "4": 25
+   }
+  },
+  "as_of_day": "2029-06-08",
+  "nav": "4681578",
+  "peak_nav": "4979480",
+  "drawdown": "0.05982592559865688786780949015",
+  "n_returns": 7,
+  "sufficient": false,
+  "ewma_vol_annual": 0.556287276272,
+  "es95": {
+   "historical": 0.025912987868,
+   "parametric": 0.040727776933,
+   "adopted": 0.040727776933,
+   "n_obs": 11,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 7,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 7,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_obs",
+    "observed": 11,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 7/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "ES 観測 11日 < 20営業日 — ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 1,
+  "input": {
+   "n_points": 25,
+   "last_nav": "10848765",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "-1582755"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_jp",
+     "value": "-1678242"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "-2372478"
+    }
+   ],
+   "n_obs": {
+    "1": 5,
+    "2": 20,
+    "3": 25
+   }
+  },
+  "as_of_day": "2029-06-25",
+  "nav": "10848765",
+  "peak_nav": "11817359",
+  "drawdown": "0.08196366040838735626124246543",
+  "n_returns": 24,
+  "sufficient": true,
+  "ewma_vol_annual": 0.409505352736,
+  "es95": {
+   "historical": 0.009213805217,
+   "parametric": 0.015283221904,
+   "adopted": 0.015283221904,
+   "n_obs": 20,
+   "excluded": [
+    1
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 2,
+  "input": {
+   "n_points": 24,
+   "last_nav": "9199301",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "2569217"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "-267399"
+    }
+   ],
+   "n_obs": {
+    "1": 1,
+    "2": 5
+   }
+  },
+  "as_of_day": "2029-06-24",
+  "nav": "9199301",
+  "peak_nav": "9372519",
+  "drawdown": "0.01848147760490002740992042801",
+  "n_returns": 23,
+  "sufficient": true,
+  "ewma_vol_annual": 0.53555849704,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 3,
+  "input": {
+   "n_points": 25,
+   "last_nav": "11403523",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-25",
+  "nav": "11403523",
+  "peak_nav": "19229810",
+  "drawdown": "0.4069872245227591952286580055",
+  "n_returns": 24,
+  "sufficient": true,
+  "ewma_vol_annual": 2.012533963507,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": true,
+  "dd_hard": true,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [],
+  "excluded": [],
+  "notes": []
+ },
+ {
+  "index": 4,
+  "input": {
+   "n_points": 26,
+   "last_nav": "1113227",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "-1138619"
+    }
+   ],
+   "n_obs": {
+    "1": 25
+   }
+  },
+  "as_of_day": "2029-06-26",
+  "nav": "1113227",
+  "peak_nav": "1123468",
+  "drawdown": "0.009115524429712283749959945455",
+  "n_returns": 25,
+  "sufficient": true,
+  "ewma_vol_annual": 2.864452913154,
+  "es95": {
+   "historical": 0.07868881562,
+   "parametric": 0.097510874758,
+   "adopted": 0.097510874758,
+   "n_obs": 25,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": true,
+  "deferred": [],
+  "excluded": [],
+  "notes": []
+ },
+ {
+  "index": 5,
+  "input": {
+   "n_points": 12,
+   "last_nav": "20787090",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "2065769"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "-827734"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_us",
+     "value": "396070"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "equity_jp",
+     "value": "2077610"
+    }
+   ],
+   "n_obs": {
+    "1": 5,
+    "2": 20,
+    "3": 19,
+    "4": 25
+   }
+  },
+  "as_of_day": "2029-06-12",
+  "nav": "20787090",
+  "peak_nav": "20787090",
+  "drawdown": "0",
+  "n_returns": 11,
+  "sufficient": false,
+  "ewma_vol_annual": 0.255286195258,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    3
+   ],
+   "deferral_reason": "no_common_days"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 11,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 11,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "no_common_days",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 11/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 3](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 測定対象銘柄の共通観測日がゼロのため測定不能 — 判定保留(残部は存在しない)"
+  ]
+ },
+ {
+  "index": 6,
+  "input": {
+   "n_points": 4,
+   "last_nav": "15548324",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "-722443"
+    }
+   ],
+   "n_obs": {
+    "1": 19
+   }
+  },
+  "as_of_day": "2029-06-04",
+  "nav": "15548324",
+  "peak_nav": "16498478",
+  "drawdown": "0.05759040318749402217586373725",
+  "n_returns": 3,
+  "sufficient": false,
+  "ewma_vol_annual": 0.420862631661,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 3,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 3,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 3/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 7,
+  "input": {
+   "n_points": 22,
+   "last_nav": "10420932",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "-1996088"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "-2119789"
+    }
+   ],
+   "n_obs": {
+    "1": 19,
+    "2": 20
+   }
+  },
+  "as_of_day": "2029-06-22",
+  "nav": "10420932",
+  "peak_nav": "10771210",
+  "drawdown": "0.03251983760413175492818355598",
+  "n_returns": 21,
+  "sufficient": true,
+  "ewma_vol_annual": 0.36552729873,
+  "es95": {
+   "historical": 0.010758492659,
+   "parametric": 0.016418149707,
+   "adopted": 0.016418149707,
+   "n_obs": 20,
+   "excluded": [
+    1
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 8,
+  "input": {
+   "n_points": 5,
+   "last_nav": "17812930",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "-16223"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "-503105"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_us",
+     "value": "-1698696"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "equity_jp",
+     "value": "-1554286"
+    }
+   ],
+   "n_obs": {
+    "1": 0,
+    "2": 19,
+    "3": 40,
+    "4": 1
+   }
+  },
+  "as_of_day": "2029-06-05",
+  "nav": "17812930",
+  "peak_nav": "17812930",
+  "drawdown": "0",
+  "n_returns": 4,
+  "sufficient": false,
+  "ewma_vol_annual": 0.089143343533,
+  "es95": {
+   "historical": 0.007245496653,
+   "parametric": 0.008683947657,
+   "adopted": 0.008683947657,
+   "n_obs": 40,
+   "excluded": [
+    1,
+    2,
+    4
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 4,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 4,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 40,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 4,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 4/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2, 4](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)"
+  ]
+ },
+ {
+  "index": 9,
+  "input": {
+   "n_points": 22,
+   "last_nav": "14389689",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "1401819"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_jp",
+     "value": "-981979"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_jp",
+     "value": "-2964283"
+    }
+   ],
+   "n_obs": {
+    "1": 19,
+    "2": 5,
+    "3": 5
+   }
+  },
+  "as_of_day": "2029-06-22",
+  "nav": "14389689",
+  "peak_nav": "15186995",
+  "drawdown": "0.05249926005770068403920591269",
+  "n_returns": 21,
+  "sufficient": true,
+  "ewma_vol_annual": 0.272932920868,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2,
+    3
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2, 3](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 10,
+  "input": {
+   "n_points": 27,
+   "last_nav": "10424760",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "-1918577"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "2225987"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_us",
+     "value": "-1486325"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "cash",
+     "value": "1852437"
+    }
+   ],
+   "n_obs": {
+    "1": 0,
+    "2": 5,
+    "3": 25,
+    "4": 20
+   }
+  },
+  "as_of_day": "2029-06-27",
+  "nav": "10424760",
+  "peak_nav": "17462239",
+  "drawdown": "0.4030112633322679869402772462",
+  "n_returns": 26,
+  "sufficient": true,
+  "ewma_vol_annual": 1.939801123784,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": "no_common_days"
+  },
+  "dd_soft": true,
+  "dd_hard": true,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "no_common_days",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 測定対象銘柄の共通観測日がゼロのため測定不能 — 判定保留(残部は存在しない)"
+  ]
+ },
+ {
+  "index": 11,
+  "input": {
+   "n_points": 19,
+   "last_nav": "7473032",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "-399121"
+    }
+   ],
+   "n_obs": {
+    "1": 1
+   }
+  },
+  "as_of_day": "2029-06-19",
+  "nav": "7473032",
+  "peak_nav": "7950971",
+  "drawdown": "0.06011077137622562074493794532",
+  "n_returns": 18,
+  "sufficient": false,
+  "ewma_vol_annual": 0.303763019734,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 18,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 18,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 18/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 12,
+  "input": {
+   "n_points": 16,
+   "last_nav": "7992966",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "2177149"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "486546"
+    }
+   ],
+   "n_obs": {
+    "1": 5,
+    "2": 10
+   }
+  },
+  "as_of_day": "2029-06-16",
+  "nav": "7992966",
+  "peak_nav": "8820210",
+  "drawdown": "0.09378960364889271343879567493",
+  "n_returns": 15,
+  "sufficient": false,
+  "ewma_vol_annual": 0.47073533224,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 15,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 15,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 15/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 13,
+  "input": {
+   "n_points": 6,
+   "last_nav": "17054083",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "-94034"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "-2794409"
+    }
+   ],
+   "n_obs": {
+    "1": 20,
+    "2": 1
+   }
+  },
+  "as_of_day": "2029-06-06",
+  "nav": "17054083",
+  "peak_nav": "17943594",
+  "drawdown": "0.04957262185044980398018368004",
+  "n_returns": 5,
+  "sufficient": false,
+  "ewma_vol_annual": 0.265702882507,
+  "es95": {
+   "historical": 0.000270074876,
+   "parametric": 0.000462627395,
+   "adopted": 0.000462627395,
+   "n_obs": 20,
+   "excluded": [
+    2
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 5/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [2](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 14,
+  "input": {
+   "n_points": 26,
+   "last_nav": "8792830",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-26",
+  "nav": "8792830",
+  "peak_nav": "9667395",
+  "drawdown": "0.09046542527744030320474129794",
+  "n_returns": 25,
+  "sufficient": true,
+  "ewma_vol_annual": 0.443961704445,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [],
+  "excluded": [],
+  "notes": []
+ },
+ {
+  "index": 15,
+  "input": {
+   "n_points": 3,
+   "last_nav": "15453602",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "788783"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "-1206324"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_us",
+     "value": "2365391"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "cash",
+     "value": "-2342973"
+    }
+   ],
+   "n_obs": {
+    "1": 40,
+    "2": 1,
+    "3": 5,
+    "4": 25
+   }
+  },
+  "as_of_day": "2029-06-03",
+  "nav": "15453602",
+  "peak_nav": "15453602",
+  "drawdown": "0",
+  "n_returns": 2,
+  "sufficient": false,
+  "ewma_vol_annual": 0.181729125651,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    2,
+    3
+   ],
+   "deferral_reason": "no_common_days"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 2,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 2,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "no_common_days",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 2/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [2, 3](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 測定対象銘柄の共通観測日がゼロのため測定不能 — 判定保留(残部は存在しない)"
+  ]
+ },
+ {
+  "index": 16,
+  "input": {
+   "n_points": 7,
+   "last_nav": "14301152",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-07",
+  "nav": "14301152",
+  "peak_nav": "14741997",
+  "drawdown": "0.02990402182282359710153244503",
+  "n_returns": 6,
+  "sufficient": false,
+  "ewma_vol_annual": 0.152421478505,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 6,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 6,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 6/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 17,
+  "input": {
+   "n_points": 19,
+   "last_nav": "1436342",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "-1361154"
+    }
+   ],
+   "n_obs": {
+    "1": 0
+   }
+  },
+  "as_of_day": "2029-06-19",
+  "nav": "1436342",
+  "peak_nav": "2697131",
+  "drawdown": "0.4674556037508003875228900636",
+  "n_returns": 18,
+  "sufficient": false,
+  "ewma_vol_annual": 2.43676580999,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1
+   ],
+   "deferral_reason": "no_observations"
+  },
+  "dd_soft": true,
+  "dd_hard": true,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 18,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 18,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "no_observations",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 18/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES 測定不能(保有ありだがリターン系列なし)— 判定保留"
+  ]
+ },
+ {
+  "index": 18,
+  "input": {
+   "n_points": 13,
+   "last_nav": "1125518",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-13",
+  "nav": "1125518",
+  "peak_nav": "1150459",
+  "drawdown": "0.02167917326910389679249760313",
+  "n_returns": 12,
+  "sufficient": false,
+  "ewma_vol_annual": 2.184797189111,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 12,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 12,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 12/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 19,
+  "input": {
+   "n_points": 2,
+   "last_nav": "20640565",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "-325249"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "-1574137"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "etf_jp",
+     "value": "1913653"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "etf_jp",
+     "value": "-655056"
+    }
+   ],
+   "n_obs": {
+    "1": 25,
+    "2": 0,
+    "3": 40,
+    "4": 1
+   }
+  },
+  "as_of_day": "2029-06-02",
+  "nav": "20640565",
+  "peak_nav": "20640565",
+  "drawdown": "0",
+  "n_returns": 1,
+  "sufficient": false,
+  "ewma_vol_annual": 0.355501711558,
+  "es95": {
+   "historical": 0.007052334516,
+   "parametric": 0.009044391775,
+   "adopted": 0.009044391775,
+   "n_obs": 25,
+   "excluded": [
+    2,
+    4
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 4,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 1/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [2, 4](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 20,
+  "input": {
+   "n_points": 19,
+   "last_nav": "18452111",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "-1033498"
+    }
+   ],
+   "n_obs": {
+    "1": 0
+   }
+  },
+  "as_of_day": "2029-06-19",
+  "nav": "18452111",
+  "peak_nav": "19856878",
+  "drawdown": "0.07074460547121254408673911377",
+  "n_returns": 18,
+  "sufficient": false,
+  "ewma_vol_annual": 0.393197051651,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1
+   ],
+   "deferral_reason": "no_observations"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 18,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 18,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "no_observations",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 18/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES 測定不能(保有ありだがリターン系列なし)— 判定保留"
+  ]
+ },
+ {
+  "index": 21,
+  "input": {
+   "n_points": 25,
+   "last_nav": "11274280",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "2256"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "1806261"
+    }
+   ],
+   "n_obs": {
+    "1": 25,
+    "2": 40
+   }
+  },
+  "as_of_day": "2029-06-25",
+  "nav": "11274280",
+  "peak_nav": "12173263",
+  "drawdown": "0.07384897541439793094094820756",
+  "n_returns": 24,
+  "sufficient": true,
+  "ewma_vol_annual": 0.292956095864,
+  "es95": {
+   "historical": 0.003046245477,
+   "parametric": 0.00996635953,
+   "adopted": 0.00996635953,
+   "n_obs": 10,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "insufficient_obs",
+    "observed": 10,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "ES 観測 10日 < 20営業日 — ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 22,
+  "input": {
+   "n_points": 22,
+   "last_nav": "2783356",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "-36710"
+    }
+   ],
+   "n_obs": {
+    "1": 20
+   }
+  },
+  "as_of_day": "2029-06-22",
+  "nav": "2783356",
+  "peak_nav": "3521981",
+  "drawdown": "0.2097186214235681566709190084",
+  "n_returns": 21,
+  "sufficient": true,
+  "ewma_vol_annual": 0.844252762473,
+  "es95": {
+   "historical": 0.000884646642,
+   "parametric": 0.001152244446,
+   "adopted": 0.001152244446,
+   "n_obs": 20,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": true,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [],
+  "excluded": [],
+  "notes": []
+ },
+ {
+  "index": 23,
+  "input": {
+   "n_points": 11,
+   "last_nav": "20834182",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "2863586"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "1650424"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "-851202"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "equity_us",
+     "value": "-1306060"
+    }
+   ],
+   "n_obs": {
+    "1": 40,
+    "2": 25,
+    "3": 25,
+    "4": 5
+   }
+  },
+  "as_of_day": "2029-06-11",
+  "nav": "20834182",
+  "peak_nav": "20834182",
+  "drawdown": "0",
+  "n_returns": 10,
+  "sufficient": false,
+  "ewma_vol_annual": 0.165506387516,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    4
+   ],
+   "deferral_reason": "no_common_days"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "no_common_days",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 4,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 10/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [4](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 測定対象銘柄の共通観測日がゼロのため測定不能 — 判定保留(残部は存在しない)"
+  ]
+ },
+ {
+  "index": 24,
+  "input": {
+   "n_points": 29,
+   "last_nav": "1469987",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "-376"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "-130875"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_us",
+     "value": "2506231"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "etf_jp",
+     "value": "-210245"
+    }
+   ],
+   "n_obs": {
+    "1": 10,
+    "2": 25,
+    "3": 1,
+    "4": 40
+   }
+  },
+  "as_of_day": "2029-06-29",
+  "nav": "1469987",
+  "peak_nav": "2555005",
+  "drawdown": "0.4246637482118430296613900951",
+  "n_returns": 28,
+  "sufficient": true,
+  "ewma_vol_annual": 2.484388768665,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    3
+   ],
+   "deferral_reason": "no_common_days"
+  },
+  "dd_soft": true,
+  "dd_hard": true,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "no_common_days",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 3](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 測定対象銘柄の共通観測日がゼロのため測定不能 — 判定保留(残部は存在しない)"
+  ]
+ },
+ {
+  "index": 25,
+  "input": {
+   "n_points": 9,
+   "last_nav": "3284455",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "2700213"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "-2423141"
+    }
+   ],
+   "n_obs": {
+    "1": 0,
+    "2": 0
+   }
+  },
+  "as_of_day": "2029-06-09",
+  "nav": "3284455",
+  "peak_nav": "3284455",
+  "drawdown": "0",
+  "n_returns": 8,
+  "sufficient": false,
+  "ewma_vol_annual": 0.605857332031,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": "no_observations"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 8,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 8,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "no_observations",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 8/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES 測定不能(保有ありだがリターン系列なし)— 判定保留"
+  ]
+ },
+ {
+  "index": 26,
+  "input": {
+   "n_points": 28,
+   "last_nav": "15649986",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "1295877"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "-565822"
+    }
+   ],
+   "n_obs": {
+    "1": 10,
+    "2": 25
+   }
+  },
+  "as_of_day": "2029-06-28",
+  "nav": "15649986",
+  "peak_nav": "17564980",
+  "drawdown": "0.1090234090787464602863197112",
+  "n_returns": 27,
+  "sufficient": true,
+  "ewma_vol_annual": 0.272362816372,
+  "es95": {
+   "historical": 0.002682107144,
+   "parametric": 0.003299788915,
+   "adopted": 0.003299788915,
+   "n_obs": 25,
+   "excluded": [
+    1
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 27,
+  "input": {
+   "n_points": 1,
+   "last_nav": "15674098",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "2585876"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "-24608"
+    }
+   ],
+   "n_obs": {
+    "1": 19,
+    "2": 10
+   }
+  },
+  "as_of_day": "2029-06-01",
+  "nav": "15674098",
+  "peak_nav": "15674098",
+  "drawdown": "0",
+  "n_returns": 0,
+  "sufficient": false,
+  "ewma_vol_annual": null,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 0/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 28,
+  "input": {
+   "n_points": 6,
+   "last_nav": "2251835",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "1024749"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "2161289"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_us",
+     "value": "1976047"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "equity_jp",
+     "value": "2558754"
+    }
+   ],
+   "n_obs": {
+    "1": 10,
+    "2": 40,
+    "3": 0,
+    "4": 1
+   }
+  },
+  "as_of_day": "2029-06-06",
+  "nav": "2251835",
+  "peak_nav": "2256874",
+  "drawdown": "0.002232734304174712456255865414",
+  "n_returns": 5,
+  "sufficient": false,
+  "ewma_vol_annual": 0.8396885665,
+  "es95": {
+   "historical": 0.06987416091,
+   "parametric": 0.091180027449,
+   "adopted": 0.091180027449,
+   "n_obs": 40,
+   "excluded": [
+    1,
+    3,
+    4
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 40,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 4,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 5/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 3, 4](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)"
+  ]
+ },
+ {
+  "index": 29,
+  "input": {
+   "n_points": 15,
+   "last_nav": "15850345",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "2920396"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_jp",
+     "value": "1317213"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "etf_jp",
+     "value": "-2294278"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "equity_jp",
+     "value": "882921"
+    }
+   ],
+   "n_obs": {
+    "1": 19,
+    "2": 19,
+    "3": 19,
+    "4": 19
+   }
+  },
+  "as_of_day": "2029-06-15",
+  "nav": "15850345",
+  "peak_nav": "17602173",
+  "drawdown": "0.09952339407185692357415189591",
+  "n_returns": 14,
+  "sufficient": false,
+  "ewma_vol_annual": 0.33558271397,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2,
+    3,
+    4
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 14,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 14,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 4,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 14/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2, 3, 4](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 30,
+  "input": {
+   "n_points": 13,
+   "last_nav": "4563483",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "-2491207"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "558709"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_us",
+     "value": "-168385"
+    }
+   ],
+   "n_obs": {
+    "1": 20,
+    "2": 20,
+    "3": 1
+   }
+  },
+  "as_of_day": "2029-06-13",
+  "nav": "4563483",
+  "peak_nav": "5071981",
+  "drawdown": "0.1002562903922550183054707815",
+  "n_returns": 12,
+  "sufficient": false,
+  "ewma_vol_annual": 0.365095011121,
+  "es95": {
+   "historical": 0.043892528584,
+   "parametric": 0.043621721453,
+   "adopted": 0.043892528584,
+   "n_obs": 19,
+   "excluded": [
+    3
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 12,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 12,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_obs",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 12/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [3](残部で測定 — 除外分は過小方向)",
+   "ES 観測 19日 < 20営業日 — ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 31,
+  "input": {
+   "n_points": 10,
+   "last_nav": "10743900",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "-708806"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "1905224"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "-742265"
+    }
+   ],
+   "n_obs": {
+    "1": 20,
+    "2": 40,
+    "3": 19
+   }
+  },
+  "as_of_day": "2029-06-10",
+  "nav": "10743900",
+  "peak_nav": "19601923",
+  "drawdown": "0.4518956124865912390330275249",
+  "n_returns": 9,
+  "sufficient": false,
+  "ewma_vol_annual": 2.031066467524,
+  "es95": {
+   "historical": 0.015012328946,
+   "parametric": 0.014708064021,
+   "adopted": 0.015012328946,
+   "n_obs": 20,
+   "excluded": [
+    3
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": true,
+  "dd_hard": true,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 9,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 9,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 9/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [3](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 32,
+  "input": {
+   "n_points": 25,
+   "last_nav": "3566937",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "-1717803"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "-1695217"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_us",
+     "value": "357407"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "equity_us",
+     "value": "-2292984"
+    }
+   ],
+   "n_obs": {
+    "1": 10,
+    "2": 19,
+    "3": 10,
+    "4": 19
+   }
+  },
+  "as_of_day": "2029-06-25",
+  "nav": "3566937",
+  "peak_nav": "3653453",
+  "drawdown": "0.02368061119165895934613090684",
+  "n_returns": 24,
+  "sufficient": true,
+  "ewma_vol_annual": 0.881441917092,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2,
+    3,
+    4
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "instrument_id": 4,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2, 3, 4](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 33,
+  "input": {
+   "n_points": 15,
+   "last_nav": "9442709",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "-1453981"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "165784"
+    }
+   ],
+   "n_obs": {
+    "1": 1,
+    "2": 10
+   }
+  },
+  "as_of_day": "2029-06-15",
+  "nav": "9442709",
+  "peak_nav": "9982746",
+  "drawdown": "0.05409703903114433643809028097",
+  "n_returns": 14,
+  "sufficient": false,
+  "ewma_vol_annual": 0.432801503296,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 14,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 14,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 14/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 34,
+  "input": {
+   "n_points": 25,
+   "last_nav": "15338147",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "1052261"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "-1549732"
+    }
+   ],
+   "n_obs": {
+    "1": 10,
+    "2": 40
+   }
+  },
+  "as_of_day": "2029-06-25",
+  "nav": "15338147",
+  "peak_nav": "15712257",
+  "drawdown": "0.02381007388053797745288916799",
+  "n_returns": 24,
+  "sufficient": true,
+  "ewma_vol_annual": 0.328439447738,
+  "es95": {
+   "historical": 0.007565000129,
+   "parametric": 0.009182448457,
+   "adopted": 0.009182448457,
+   "n_obs": 40,
+   "excluded": [
+    1
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 35,
+  "input": {
+   "n_points": 24,
+   "last_nav": "7425077",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "737584"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "-1582919"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "2247070"
+    }
+   ],
+   "n_obs": {
+    "1": 40,
+    "2": 10,
+    "3": 19
+   }
+  },
+  "as_of_day": "2029-06-24",
+  "nav": "7425077",
+  "peak_nav": "7446916",
+  "drawdown": "0.002932623383961897784263982567",
+  "n_returns": 23,
+  "sufficient": true,
+  "ewma_vol_annual": 0.366190419966,
+  "es95": {
+   "historical": 0.007611787943,
+   "parametric": 0.009052442911,
+   "adopted": 0.009052442911,
+   "n_obs": 40,
+   "excluded": [
+    2,
+    3
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 40,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [2, 3](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)"
+  ]
+ },
+ {
+  "index": 36,
+  "input": {
+   "n_points": 22,
+   "last_nav": "7887019",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "-2588271"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "-1740124"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "925141"
+    }
+   ],
+   "n_obs": {
+    "1": 1,
+    "2": 5,
+    "3": 5
+   }
+  },
+  "as_of_day": "2029-06-22",
+  "nav": "7887019",
+  "peak_nav": "8116385",
+  "drawdown": "0.02825962543669379902505856979",
+  "n_returns": 21,
+  "sufficient": true,
+  "ewma_vol_annual": 0.458068710616,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2,
+    3
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2, 3](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 37,
+  "input": {
+   "n_points": 2,
+   "last_nav": "2144036",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "-2083255"
+    }
+   ],
+   "n_obs": {
+    "1": 19
+   }
+  },
+  "as_of_day": "2029-06-02",
+  "nav": "2144036",
+  "peak_nav": "2187961",
+  "drawdown": "0.02007576917504471057756513942",
+  "n_returns": 1,
+  "sufficient": false,
+  "ewma_vol_annual": 0.318692955693,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 1/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 38,
+  "input": {
+   "n_points": 2,
+   "last_nav": "4853350",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "-988213"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "-2535441"
+    }
+   ],
+   "n_obs": {
+    "1": 40,
+    "2": 1
+   }
+  },
+  "as_of_day": "2029-06-02",
+  "nav": "4853350",
+  "peak_nav": "8111631",
+  "drawdown": "0.4016801306666932950968800233",
+  "n_returns": 1,
+  "sufficient": false,
+  "ewma_vol_annual": 6.082923543421,
+  "es95": {
+   "historical": 0.016026099252,
+   "parametric": 0.020167083054,
+   "adopted": 0.020167083054,
+   "n_obs": 40,
+   "excluded": [
+    2
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": true,
+  "dd_hard": true,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 1/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [2](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 39,
+  "input": {
+   "n_points": 6,
+   "last_nav": "10834346",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-06",
+  "nav": "10834346",
+  "peak_nav": "10951748",
+  "drawdown": "0.01071993256236356059324958902",
+  "n_returns": 5,
+  "sufficient": false,
+  "ewma_vol_annual": 0.304569604355,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 5/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 40,
+  "input": {
+   "n_points": 21,
+   "last_nav": "12099230",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "1408711"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "2619011"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_jp",
+     "value": "-1900760"
+    }
+   ],
+   "n_obs": {
+    "1": 1,
+    "2": 19,
+    "3": 0
+   }
+  },
+  "as_of_day": "2029-06-21",
+  "nav": "12099230",
+  "peak_nav": "12972337",
+  "drawdown": "0.06730529741865324651988304035",
+  "n_returns": 20,
+  "sufficient": true,
+  "ewma_vol_annual": 0.321246245551,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2,
+    3
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2, 3](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 41,
+  "input": {
+   "n_points": 4,
+   "last_nav": "14866694",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "-333888"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_jp",
+     "value": "2882205"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "-2988346"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "cash",
+     "value": "-1222974"
+    }
+   ],
+   "n_obs": {
+    "1": 20,
+    "2": 20,
+    "3": 1,
+    "4": 40
+   }
+  },
+  "as_of_day": "2029-06-04",
+  "nav": "14866694",
+  "peak_nav": "15441632",
+  "drawdown": "0.03723298159158306583138362577",
+  "n_returns": 3,
+  "sufficient": false,
+  "ewma_vol_annual": 0.132449966279,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    3
+   ],
+   "deferral_reason": "no_common_days"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 3,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 3,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "no_common_days",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 3/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [3](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 測定対象銘柄の共通観測日がゼロのため測定不能 — 判定保留(残部は存在しない)"
+  ]
+ },
+ {
+  "index": 42,
+  "input": {
+   "n_points": 5,
+   "last_nav": "19674770",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "1799023"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "2691041"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_us",
+     "value": "-1998221"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "equity_jp",
+     "value": "-550567"
+    }
+   ],
+   "n_obs": {
+    "1": 1,
+    "2": 1,
+    "3": 20,
+    "4": 40
+   }
+  },
+  "as_of_day": "2029-06-05",
+  "nav": "19674770",
+  "peak_nav": "20082564",
+  "drawdown": "0.02030587329386825307764486646",
+  "n_returns": 4,
+  "sufficient": false,
+  "ewma_vol_annual": 0.218663102655,
+  "es95": {
+   "historical": 0.008955015299,
+   "parametric": 0.010234541497,
+   "adopted": 0.010234541497,
+   "n_obs": 10,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 4,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 4,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_obs",
+    "observed": 10,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 4/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "ES 観測 10日 < 20営業日 — ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 43,
+  "input": {
+   "n_points": 8,
+   "last_nav": "8803103",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "-365106"
+    }
+   ],
+   "n_obs": {
+    "1": 19
+   }
+  },
+  "as_of_day": "2029-06-08",
+  "nav": "8803103",
+  "peak_nav": "8995027",
+  "drawdown": "0.02133667858918044381634429780",
+  "n_returns": 7,
+  "sufficient": false,
+  "ewma_vol_annual": 0.335975084363,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 7,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 7,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 7/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 44,
+  "input": {
+   "n_points": 7,
+   "last_nav": "5579214",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "-1112544"
+    }
+   ],
+   "n_obs": {
+    "1": 20
+   }
+  },
+  "as_of_day": "2029-06-07",
+  "nav": "5579214",
+  "peak_nav": "5579214",
+  "drawdown": "0",
+  "n_returns": 6,
+  "sufficient": false,
+  "ewma_vol_annual": 0.438273885107,
+  "es95": {
+   "historical": 0.015432441327,
+   "parametric": 0.018028193505,
+   "adopted": 0.018028193505,
+   "n_obs": 20,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 6,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 6,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 6/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 45,
+  "input": {
+   "n_points": 23,
+   "last_nav": "5456072",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-23",
+  "nav": "5456072",
+  "peak_nav": "9296483",
+  "drawdown": "0.4131036436037155126298837958",
+  "n_returns": 22,
+  "sufficient": true,
+  "ewma_vol_annual": 1.954454714877,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": true,
+  "dd_hard": true,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [],
+  "excluded": [],
+  "notes": []
+ },
+ {
+  "index": 46,
+  "input": {
+   "n_points": 24,
+   "last_nav": "12511946",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "-2999980"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "415882"
+    }
+   ],
+   "n_obs": {
+    "1": 25,
+    "2": 25
+   }
+  },
+  "as_of_day": "2029-06-24",
+  "nav": "12511946",
+  "peak_nav": "13700824",
+  "drawdown": "0.08677419693881185540373338129",
+  "n_returns": 23,
+  "sufficient": true,
+  "ewma_vol_annual": 0.402384837874,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": "no_common_days"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "no_common_days",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "【要確認】ES: 測定対象銘柄の共通観測日がゼロのため測定不能 — 判定保留(残部は存在しない)"
+  ]
+ },
+ {
+  "index": 47,
+  "input": {
+   "n_points": 4,
+   "last_nav": "10842643",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "-748205"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "-2185299"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_us",
+     "value": "1544819"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "etf_jp",
+     "value": "1305010"
+    }
+   ],
+   "n_obs": {
+    "1": 19,
+    "2": 5,
+    "3": 40,
+    "4": 5
+   }
+  },
+  "as_of_day": "2029-06-04",
+  "nav": "10842643",
+  "peak_nav": "11175150",
+  "drawdown": "0.02975414200256819818973347114",
+  "n_returns": 3,
+  "sufficient": false,
+  "ewma_vol_annual": 0.606805964781,
+  "es95": {
+   "historical": 0.01106897904,
+   "parametric": 0.0130584237,
+   "adopted": 0.0130584237,
+   "n_obs": 40,
+   "excluded": [
+    1,
+    2,
+    4
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 3,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 3,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 40,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "instrument_id": 4,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 3/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2, 4](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)"
+  ]
+ },
+ {
+  "index": 48,
+  "input": {
+   "n_points": 8,
+   "last_nav": "2791292",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "1786421"
+    }
+   ],
+   "n_obs": {
+    "1": 40
+   }
+  },
+  "as_of_day": "2029-06-08",
+  "nav": "2791292",
+  "peak_nav": "2938946",
+  "drawdown": "0.05024046035551520851352831934",
+  "n_returns": 7,
+  "sufficient": false,
+  "ewma_vol_annual": 1.060916556033,
+  "es95": {
+   "historical": 0.04929359775,
+   "parametric": 0.063085732054,
+   "adopted": 0.063085732054,
+   "n_obs": 40,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 7,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 7,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 7/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 49,
+  "input": {
+   "n_points": 1,
+   "last_nav": "19879836",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-01",
+  "nav": "19879836",
+  "peak_nav": "19879836",
+  "drawdown": "0",
+  "n_returns": 0,
+  "sufficient": false,
+  "ewma_vol_annual": null,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 0/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 50,
+  "input": {
+   "n_points": 20,
+   "last_nav": "6875993",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-20",
+  "nav": "6875993",
+  "peak_nav": "7487321",
+  "drawdown": "0.08164842939150064489020839363",
+  "n_returns": 19,
+  "sufficient": false,
+  "ewma_vol_annual": 0.368711788023,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 19/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 51,
+  "input": {
+   "n_points": 2,
+   "last_nav": "15902404",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "-697846"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "-2914419"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_jp",
+     "value": "-1134536"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "cash",
+     "value": "-1086233"
+    }
+   ],
+   "n_obs": {
+    "1": 5,
+    "2": 0,
+    "3": 10,
+    "4": 5
+   }
+  },
+  "as_of_day": "2029-06-02",
+  "nav": "15902404",
+  "peak_nav": "15902404",
+  "drawdown": "0",
+  "n_returns": 1,
+  "sufficient": false,
+  "ewma_vol_annual": 0.297764838505,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2,
+    3,
+    4
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "instrument_id": 4,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 1/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2, 3, 4](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 52,
+  "input": {
+   "n_points": 23,
+   "last_nav": "6697055",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "-1167788"
+    }
+   ],
+   "n_obs": {
+    "1": 20
+   }
+  },
+  "as_of_day": "2029-06-23",
+  "nav": "6697055",
+  "peak_nav": "13553352",
+  "drawdown": "0.5058746352931732312419835329",
+  "n_returns": 22,
+  "sufficient": true,
+  "ewma_vol_annual": 2.037151780596,
+  "es95": {
+   "historical": 0.012800051056,
+   "parametric": 0.018120101495,
+   "adopted": 0.018120101495,
+   "n_obs": 20,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": true,
+  "dd_hard": true,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [],
+  "excluded": [],
+  "notes": []
+ },
+ {
+  "index": 53,
+  "input": {
+   "n_points": 22,
+   "last_nav": "2476642",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "2629787"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "-2616338"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_jp",
+     "value": "667950"
+    }
+   ],
+   "n_obs": {
+    "1": 40,
+    "2": 25,
+    "3": 10
+   }
+  },
+  "as_of_day": "2029-06-22",
+  "nav": "2476642",
+  "peak_nav": "2692161",
+  "drawdown": "0.08005427610012922704102763542",
+  "n_returns": 21,
+  "sufficient": true,
+  "ewma_vol_annual": 1.249080329307,
+  "es95": {
+   "historical": 0.12124545707,
+   "parametric": 0.157035407075,
+   "adopted": 0.157035407075,
+   "n_obs": 25,
+   "excluded": [
+    3
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": true,
+  "deferred": [],
+  "excluded": [
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [3](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 54,
+  "input": {
+   "n_points": 2,
+   "last_nav": "13542775",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "894996"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "-1193674"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "etf_jp",
+     "value": "1895037"
+    }
+   ],
+   "n_obs": {
+    "1": 25,
+    "2": 5,
+    "3": 25
+   }
+  },
+  "as_of_day": "2029-06-02",
+  "nav": "13542775",
+  "peak_nav": "13542775",
+  "drawdown": "0",
+  "n_returns": 1,
+  "sufficient": false,
+  "ewma_vol_annual": 0.093464296839,
+  "es95": {
+   "historical": 0.014590351009,
+   "parametric": 0.015035669595,
+   "adopted": 0.015035669595,
+   "n_obs": 25,
+   "excluded": [
+    2
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 1/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [2](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 55,
+  "input": {
+   "n_points": 14,
+   "last_nav": "3036913",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "1264469"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "38989"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_us",
+     "value": "1914627"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "etf_jp",
+     "value": "-1150395"
+    }
+   ],
+   "n_obs": {
+    "1": 25,
+    "2": 40,
+    "3": 0,
+    "4": 25
+   }
+  },
+  "as_of_day": "2029-06-14",
+  "nav": "3036913",
+  "peak_nav": "3233649",
+  "drawdown": "0.06084024580280667444116538313",
+  "n_returns": 13,
+  "sufficient": false,
+  "ewma_vol_annual": 0.964066634586,
+  "es95": {
+   "historical": 0.049322901254,
+   "parametric": 0.045158123671,
+   "adopted": 0.049322901254,
+   "n_obs": 25,
+   "excluded": [
+    3
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 13,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 13,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 13/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [3](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 56,
+  "input": {
+   "n_points": 8,
+   "last_nav": "15770335",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "-2119465"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_jp",
+     "value": "-741814"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_jp",
+     "value": "2406975"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "etf_jp",
+     "value": "-343001"
+    }
+   ],
+   "n_obs": {
+    "1": 20,
+    "2": 5,
+    "3": 20,
+    "4": 5
+   }
+  },
+  "as_of_day": "2029-06-08",
+  "nav": "15770335",
+  "peak_nav": "16519683",
+  "drawdown": "0.04536091885056147869181266977",
+  "n_returns": 7,
+  "sufficient": false,
+  "ewma_vol_annual": 0.289141035421,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    2,
+    4
+   ],
+   "deferral_reason": "no_common_days"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 7,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 7,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "no_common_days",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "instrument_id": 4,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 7/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [2, 4](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 測定対象銘柄の共通観測日がゼロのため測定不能 — 判定保留(残部は存在しない)"
+  ]
+ },
+ {
+  "index": 57,
+  "input": {
+   "n_points": 8,
+   "last_nav": "1865305",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-08",
+  "nav": "1865305",
+  "peak_nav": "1951142",
+  "drawdown": "0.04399321013027242507208598862",
+  "n_returns": 7,
+  "sufficient": false,
+  "ewma_vol_annual": 0.922740995003,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 7,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 7,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 7/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 58,
+  "input": {
+   "n_points": 25,
+   "last_nav": "3497211",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "1632796"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "-735368"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "2340944"
+    }
+   ],
+   "n_obs": {
+    "1": 5,
+    "2": 10,
+    "3": 1
+   }
+  },
+  "as_of_day": "2029-06-25",
+  "nav": "3497211",
+  "peak_nav": "3513279",
+  "drawdown": "0.004573505263885959526698562796",
+  "n_returns": 24,
+  "sufficient": true,
+  "ewma_vol_annual": 0.739701713076,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2,
+    3
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2, 3](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 59,
+  "input": {
+   "n_points": 21,
+   "last_nav": "11834284",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-21",
+  "nav": "11834284",
+  "peak_nav": "20265998",
+  "drawdown": "0.4160522467237981568931369676",
+  "n_returns": 20,
+  "sufficient": true,
+  "ewma_vol_annual": 2.103980822454,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": true,
+  "dd_hard": true,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [],
+  "excluded": [],
+  "notes": []
+ },
+ {
+  "index": 60,
+  "input": {
+   "n_points": 20,
+   "last_nav": "12427222",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "1956179"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "-2040051"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_us",
+     "value": "970158"
+    }
+   ],
+   "n_obs": {
+    "1": 0,
+    "2": 0,
+    "3": 0
+   }
+  },
+  "as_of_day": "2029-06-20",
+  "nav": "12427222",
+  "peak_nav": "12427222",
+  "drawdown": "0",
+  "n_returns": 19,
+  "sufficient": false,
+  "ewma_vol_annual": 0.499429869114,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2,
+    3
+   ],
+   "deferral_reason": "no_observations"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "no_observations",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 19/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2, 3](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES 測定不能(保有ありだがリターン系列なし)— 判定保留"
+  ]
+ },
+ {
+  "index": 61,
+  "input": {
+   "n_points": 21,
+   "last_nav": "5695960",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "2025364"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_jp",
+     "value": "835003"
+    }
+   ],
+   "n_obs": {
+    "1": 20,
+    "2": 25
+   }
+  },
+  "as_of_day": "2029-06-21",
+  "nav": "5695960",
+  "peak_nav": "5826695",
+  "drawdown": "0.02243724787379466404196547099",
+  "n_returns": 20,
+  "sufficient": true,
+  "ewma_vol_annual": 0.507705014225,
+  "es95": {
+   "historical": 0.033693959315,
+   "parametric": 0.034591460475,
+   "adopted": 0.034591460475,
+   "n_obs": 20,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": true,
+  "deferred": [],
+  "excluded": [],
+  "notes": []
+ },
+ {
+  "index": 62,
+  "input": {
+   "n_points": 30,
+   "last_nav": "14314178",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-30",
+  "nav": "14314178",
+  "peak_nav": "14967672",
+  "drawdown": "0.04366036348204316609824159696",
+  "n_returns": 29,
+  "sufficient": true,
+  "ewma_vol_annual": 0.335197221551,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [],
+  "excluded": [],
+  "notes": []
+ },
+ {
+  "index": 63,
+  "input": {
+   "n_points": 24,
+   "last_nav": "13887743",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "-115775"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "-2409802"
+    }
+   ],
+   "n_obs": {
+    "1": 5,
+    "2": 10
+   }
+  },
+  "as_of_day": "2029-06-24",
+  "nav": "13887743",
+  "peak_nav": "14157506",
+  "drawdown": "0.01905441537513740061279154676",
+  "n_returns": 23,
+  "sufficient": true,
+  "ewma_vol_annual": 0.294406082541,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 64,
+  "input": {
+   "n_points": 20,
+   "last_nav": "2131957",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-20",
+  "nav": "2131957",
+  "peak_nav": "2157793",
+  "drawdown": "0.01197334498721610460317555947",
+  "n_returns": 19,
+  "sufficient": false,
+  "ewma_vol_annual": 1.253767299955,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 19/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 65,
+  "input": {
+   "n_points": 19,
+   "last_nav": "13076459",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "-1618638"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "-694968"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "2087457"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "etf_jp",
+     "value": "917817"
+    }
+   ],
+   "n_obs": {
+    "1": 19,
+    "2": 25,
+    "3": 40,
+    "4": 5
+   }
+  },
+  "as_of_day": "2029-06-19",
+  "nav": "13076459",
+  "peak_nav": "13076459",
+  "drawdown": "0",
+  "n_returns": 18,
+  "sufficient": false,
+  "ewma_vol_annual": 0.301620548807,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    4
+   ],
+   "deferral_reason": "no_common_days"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 18,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 18,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "no_common_days",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 4,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 18/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 4](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 測定対象銘柄の共通観測日がゼロのため測定不能 — 判定保留(残部は存在しない)"
+  ]
+ },
+ {
+  "index": 66,
+  "input": {
+   "n_points": 22,
+   "last_nav": "467322",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "605845"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "-2206381"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "1189415"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "equity_us",
+     "value": "-164024"
+    }
+   ],
+   "n_obs": {
+    "1": 40,
+    "2": 0,
+    "3": 5,
+    "4": 20
+   }
+  },
+  "as_of_day": "2029-06-22",
+  "nav": "467322",
+  "peak_nav": "790452",
+  "drawdown": "0.4087914256653155409816155820",
+  "n_returns": 21,
+  "sufficient": true,
+  "ewma_vol_annual": 4.10544789939,
+  "es95": {
+   "historical": 0.10234885688,
+   "parametric": 0.114243846225,
+   "adopted": 0.114243846225,
+   "n_obs": 20,
+   "excluded": [
+    2,
+    3
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": true,
+  "dd_hard": true,
+  "vol_exceeded": true,
+  "es_exceeded": true,
+  "deferred": [],
+  "excluded": [
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [2, 3](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 67,
+  "input": {
+   "n_points": 19,
+   "last_nav": "20177508",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "212960"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "327579"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "-1321714"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "etf_jp",
+     "value": "-518630"
+    }
+   ],
+   "n_obs": {
+    "1": 0,
+    "2": 40,
+    "3": 19,
+    "4": 10
+   }
+  },
+  "as_of_day": "2029-06-19",
+  "nav": "20177508",
+  "peak_nav": "20964308",
+  "drawdown": "0.03753045414139116826560647745",
+  "n_returns": 18,
+  "sufficient": false,
+  "ewma_vol_annual": 0.29102721405,
+  "es95": {
+   "historical": 0.001258859094,
+   "parametric": 0.001643942227,
+   "adopted": 0.001643942227,
+   "n_obs": 40,
+   "excluded": [
+    1,
+    3,
+    4
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 18,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 18,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 40,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 4,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 18/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 3, 4](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)"
+  ]
+ },
+ {
+  "index": 68,
+  "input": {
+   "n_points": 16,
+   "last_nav": "9510176",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "1646072"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "-610015"
+    }
+   ],
+   "n_obs": {
+    "1": 0,
+    "2": 25
+   }
+  },
+  "as_of_day": "2029-06-16",
+  "nav": "9510176",
+  "peak_nav": "9752272",
+  "drawdown": "0.02482457421204002513465580123",
+  "n_returns": 15,
+  "sufficient": false,
+  "ewma_vol_annual": 0.574552648973,
+  "es95": {
+   "historical": 0.003934427719,
+   "parametric": 0.005636922526,
+   "adopted": 0.005636922526,
+   "n_obs": 25,
+   "excluded": [
+    1
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 15,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 15,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 15/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 69,
+  "input": {
+   "n_points": 2,
+   "last_nav": "5930081",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-02",
+  "nav": "5930081",
+  "peak_nav": "6066826",
+  "drawdown": "0.02253979263621537851917955122",
+  "n_returns": 1,
+  "sufficient": false,
+  "ewma_vol_annual": 0.35780811551,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 1/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 70,
+  "input": {
+   "n_points": 2,
+   "last_nav": "8690499",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "-1484899"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "2626920"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "etf_jp",
+     "value": "-2743355"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "equity_us",
+     "value": "-129924"
+    }
+   ],
+   "n_obs": {
+    "1": 5,
+    "2": 25,
+    "3": 20,
+    "4": 5
+   }
+  },
+  "as_of_day": "2029-06-02",
+  "nav": "8690499",
+  "peak_nav": "8690499",
+  "drawdown": "0",
+  "n_returns": 1,
+  "sufficient": false,
+  "ewma_vol_annual": 0.084738918171,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    4
+   ],
+   "deferral_reason": "no_common_days"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "no_common_days",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "instrument_id": 4,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 1/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 4](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 測定対象銘柄の共通観測日がゼロのため測定不能 — 判定保留(残部は存在しない)"
+  ]
+ },
+ {
+  "index": 71,
+  "input": {
+   "n_points": 6,
+   "last_nav": "3154695",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "-2247630"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "-2845114"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_jp",
+     "value": "-1078636"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "etf_jp",
+     "value": "368714"
+    }
+   ],
+   "n_obs": {
+    "1": 0,
+    "2": 25,
+    "3": 19,
+    "4": 10
+   }
+  },
+  "as_of_day": "2029-06-06",
+  "nav": "3154695",
+  "peak_nav": "3229502",
+  "drawdown": "0.02316363327844354950082086960",
+  "n_returns": 5,
+  "sufficient": false,
+  "ewma_vol_annual": 0.590746784986,
+  "es95": {
+   "historical": 0.070516046257,
+   "parametric": 0.09502576376,
+   "adopted": 0.09502576376,
+   "n_obs": 25,
+   "excluded": [
+    1,
+    3,
+    4
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 25,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 4,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 5/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 3, 4](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)"
+  ]
+ },
+ {
+  "index": 72,
+  "input": {
+   "n_points": 29,
+   "last_nav": "12573741",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "928287"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "802697"
+    }
+   ],
+   "n_obs": {
+    "1": 0,
+    "2": 19
+   }
+  },
+  "as_of_day": "2029-06-29",
+  "nav": "12573741",
+  "peak_nav": "13242705",
+  "drawdown": "0.05051566126406953866298463947",
+  "n_returns": 28,
+  "sufficient": true,
+  "ewma_vol_annual": 0.297899187115,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 73,
+  "input": {
+   "n_points": 18,
+   "last_nav": "7940112",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "-2767415"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "1201785"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "235831"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "cash",
+     "value": "-230490"
+    }
+   ],
+   "n_obs": {
+    "1": 19,
+    "2": 5,
+    "3": 10,
+    "4": 10
+   }
+  },
+  "as_of_day": "2029-06-18",
+  "nav": "7940112",
+  "peak_nav": "14611076",
+  "drawdown": "0.4565689754813403201790203541",
+  "n_returns": 17,
+  "sufficient": false,
+  "ewma_vol_annual": 1.983939286727,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2,
+    3,
+    4
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": true,
+  "dd_hard": true,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 17,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 17,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "instrument_id": 4,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 17/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2, 3, 4](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 74,
+  "input": {
+   "n_points": 27,
+   "last_nav": "2598912",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "868752"
+    }
+   ],
+   "n_obs": {
+    "1": 25
+   }
+  },
+  "as_of_day": "2029-06-27",
+  "nav": "2598912",
+  "peak_nav": "2811510",
+  "drawdown": "0.07561701719005089791606645539",
+  "n_returns": 26,
+  "sufficient": true,
+  "ewma_vol_annual": 0.962932832815,
+  "es95": {
+   "historical": 0.026693551363,
+   "parametric": 0.035472461545,
+   "adopted": 0.035472461545,
+   "n_obs": 25,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": true,
+  "deferred": [],
+  "excluded": [],
+  "notes": []
+ },
+ {
+  "index": 75,
+  "input": {
+   "n_points": 11,
+   "last_nav": "12402463",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "2107134"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_jp",
+     "value": "2020444"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "etf_jp",
+     "value": "2063334"
+    }
+   ],
+   "n_obs": {
+    "1": 1,
+    "2": 1,
+    "3": 40
+   }
+  },
+  "as_of_day": "2029-06-11",
+  "nav": "12402463",
+  "peak_nav": "12523051",
+  "drawdown": "0.009629282832114953456629698306",
+  "n_returns": 10,
+  "sufficient": false,
+  "ewma_vol_annual": 0.324002079999,
+  "es95": {
+   "historical": 0.013027532962,
+   "parametric": 0.015644978402,
+   "adopted": 0.015644978402,
+   "n_obs": 40,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 40,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 10/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)"
+  ]
+ },
+ {
+  "index": 76,
+  "input": {
+   "n_points": 3,
+   "last_nav": "19428946",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "2518337"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "-2529172"
+    }
+   ],
+   "n_obs": {
+    "1": 0,
+    "2": 5
+   }
+  },
+  "as_of_day": "2029-06-03",
+  "nav": "19428946",
+  "peak_nav": "20303603",
+  "drawdown": "0.04307890574889589793496257782",
+  "n_returns": 2,
+  "sufficient": false,
+  "ewma_vol_annual": 0.384891631731,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 2,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 2,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 2/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 77,
+  "input": {
+   "n_points": 23,
+   "last_nav": "2353467",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-23",
+  "nav": "2353467",
+  "peak_nav": "2353467",
+  "drawdown": "0",
+  "n_returns": 22,
+  "sufficient": true,
+  "ewma_vol_annual": 1.184965927137,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [],
+  "excluded": [],
+  "notes": []
+ },
+ {
+  "index": 78,
+  "input": {
+   "n_points": 6,
+   "last_nav": "19712052",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "-57676"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "1529500"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_jp",
+     "value": "-2729566"
+    }
+   ],
+   "n_obs": {
+    "1": 19,
+    "2": 1,
+    "3": 40
+   }
+  },
+  "as_of_day": "2029-06-06",
+  "nav": "19712052",
+  "peak_nav": "19873264",
+  "drawdown": "0.008112004147884313316624787956",
+  "n_returns": 5,
+  "sufficient": false,
+  "ewma_vol_annual": 0.179592213903,
+  "es95": {
+   "historical": 0.009806651733,
+   "parametric": 0.011310627625,
+   "adopted": 0.011310627625,
+   "n_obs": 40,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 40,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 5/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)"
+  ]
+ },
+ {
+  "index": 79,
+  "input": {
+   "n_points": 7,
+   "last_nav": "6560758",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "-689229"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "2240051"
+    }
+   ],
+   "n_obs": {
+    "1": 20,
+    "2": 1
+   }
+  },
+  "as_of_day": "2029-06-07",
+  "nav": "6560758",
+  "peak_nav": "6560758",
+  "drawdown": "0",
+  "n_returns": 6,
+  "sufficient": false,
+  "ewma_vol_annual": 0.662903360128,
+  "es95": {
+   "historical": 0.008185644776,
+   "parametric": 0.010516386216,
+   "adopted": 0.010516386216,
+   "n_obs": 20,
+   "excluded": [
+    2
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 6,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 6,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 6/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [2](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 80,
+  "input": {
+   "n_points": 10,
+   "last_nav": "3215392",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "-2317453"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "-880535"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "-1134507"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "equity_jp",
+     "value": "1471450"
+    }
+   ],
+   "n_obs": {
+    "1": 25,
+    "2": 20,
+    "3": 25,
+    "4": 40
+   }
+  },
+  "as_of_day": "2029-06-10",
+  "nav": "3215392",
+  "peak_nav": "5954319",
+  "drawdown": "0.4599899669466818959481344550",
+  "n_returns": 9,
+  "sufficient": false,
+  "ewma_vol_annual": 2.09922642486,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": "no_common_days"
+  },
+  "dd_soft": true,
+  "dd_hard": true,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 9,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 9,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "no_common_days",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 9/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "【要確認】ES: 測定対象銘柄の共通観測日がゼロのため測定不能 — 判定保留(残部は存在しない)"
+  ]
+ },
+ {
+  "index": 81,
+  "input": {
+   "n_points": 17,
+   "last_nav": "10008694",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-17",
+  "nav": "10008694",
+  "peak_nav": "10303457",
+  "drawdown": "0.02860816520125235636932342223",
+  "n_returns": 16,
+  "sufficient": false,
+  "ewma_vol_annual": 0.387001698815,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 16,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 16,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 16/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 82,
+  "input": {
+   "n_points": 5,
+   "last_nav": "1406379",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "-18599"
+    }
+   ],
+   "n_obs": {
+    "1": 1
+   }
+  },
+  "as_of_day": "2029-06-05",
+  "nav": "1406379",
+  "peak_nav": "1407873",
+  "drawdown": "0.001061175262257320084979255941",
+  "n_returns": 4,
+  "sufficient": false,
+  "ewma_vol_annual": 4.32140233044,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 4,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 4,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 4/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 83,
+  "input": {
+   "n_points": 30,
+   "last_nav": "4639883",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "-1224932"
+    }
+   ],
+   "n_obs": {
+    "1": 10
+   }
+  },
+  "as_of_day": "2029-06-30",
+  "nav": "4639883",
+  "peak_nav": "4908748",
+  "drawdown": "0.05477262226539231592251221696",
+  "n_returns": 29,
+  "sufficient": true,
+  "ewma_vol_annual": 0.521388406177,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 84,
+  "input": {
+   "n_points": 12,
+   "last_nav": "11878783",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-12",
+  "nav": "11878783",
+  "peak_nav": "12103781",
+  "drawdown": "0.01858906733358774419332273114",
+  "n_returns": 11,
+  "sufficient": false,
+  "ewma_vol_annual": 0.313010593546,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 11,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 11,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 11/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 85,
+  "input": {
+   "n_points": 11,
+   "last_nav": "5470886",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "-1408652"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "-1040091"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_us",
+     "value": "-332962"
+    }
+   ],
+   "n_obs": {
+    "1": 0,
+    "2": 0,
+    "3": 0
+   }
+  },
+  "as_of_day": "2029-06-11",
+  "nav": "5470886",
+  "peak_nav": "5984461",
+  "drawdown": "0.08581808787792250630424360690",
+  "n_returns": 10,
+  "sufficient": false,
+  "ewma_vol_annual": 0.991475887255,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2,
+    3
+   ],
+   "deferral_reason": "no_observations"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "no_observations",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 10/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2, 3](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES 測定不能(保有ありだがリターン系列なし)— 判定保留"
+  ]
+ },
+ {
+  "index": 86,
+  "input": {
+   "n_points": 24,
+   "last_nav": "14015752",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "-1236869"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_jp",
+     "value": "-2755986"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "etf_jp",
+     "value": "-2620309"
+    }
+   ],
+   "n_obs": {
+    "1": 19,
+    "2": 19,
+    "3": 40
+   }
+  },
+  "as_of_day": "2029-06-24",
+  "nav": "14015752",
+  "peak_nav": "14015752",
+  "drawdown": "0",
+  "n_returns": 23,
+  "sufficient": true,
+  "ewma_vol_annual": 0.257889550633,
+  "es95": {
+   "historical": 0.013785002329,
+   "parametric": 0.015908735253,
+   "adopted": 0.015908735253,
+   "n_obs": 40,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 40,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)"
+  ]
+ },
+ {
+  "index": 87,
+  "input": {
+   "n_points": 28,
+   "last_nav": "10504402",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-28",
+  "nav": "10504402",
+  "peak_nav": "19721938",
+  "drawdown": "0.4673747579979208939811087531",
+  "n_returns": 27,
+  "sufficient": true,
+  "ewma_vol_annual": 2.025670266737,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": true,
+  "dd_hard": true,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [],
+  "excluded": [],
+  "notes": []
+ },
+ {
+  "index": 88,
+  "input": {
+   "n_points": 15,
+   "last_nav": "10966940",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "-2292604"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "-2582091"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_jp",
+     "value": "2420692"
+    }
+   ],
+   "n_obs": {
+    "1": 19,
+    "2": 10,
+    "3": 0
+   }
+  },
+  "as_of_day": "2029-06-15",
+  "nav": "10966940",
+  "peak_nav": "12282251",
+  "drawdown": "0.1070903859561248178367304169",
+  "n_returns": 14,
+  "sufficient": false,
+  "ewma_vol_annual": 0.426226783012,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2,
+    3
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 14,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 14,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 14/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2, 3](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 89,
+  "input": {
+   "n_points": 1,
+   "last_nav": "3114094",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "2414788"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "2141966"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "etf_jp",
+     "value": "2886300"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "equity_us",
+     "value": "-2985718"
+    }
+   ],
+   "n_obs": {
+    "1": 19,
+    "2": 20,
+    "3": 0,
+    "4": 20
+   }
+  },
+  "as_of_day": "2029-06-01",
+  "nav": "3114094",
+  "peak_nav": "3114094",
+  "drawdown": "0",
+  "n_returns": 0,
+  "sufficient": false,
+  "ewma_vol_annual": null,
+  "es95": {
+   "historical": 0.103656473623,
+   "parametric": 0.135495767757,
+   "adopted": 0.135495767757,
+   "n_obs": 20,
+   "excluded": [
+    1,
+    3
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 0/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 3](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 90,
+  "input": {
+   "n_points": 22,
+   "last_nav": "5260328",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "2605160"
+    }
+   ],
+   "n_obs": {
+    "1": 20
+   }
+  },
+  "as_of_day": "2029-06-22",
+  "nav": "5260328",
+  "peak_nav": "5284766",
+  "drawdown": "0.004624235018163528905537160964",
+  "n_returns": 21,
+  "sufficient": true,
+  "ewma_vol_annual": 0.692873915485,
+  "es95": {
+   "historical": 0.037443125562,
+   "parametric": 0.046655428864,
+   "adopted": 0.046655428864,
+   "n_obs": 20,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": true,
+  "deferred": [],
+  "excluded": [],
+  "notes": []
+ },
+ {
+  "index": 91,
+  "input": {
+   "n_points": 6,
+   "last_nav": "8754875",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "694831"
+    }
+   ],
+   "n_obs": {
+    "1": 25
+   }
+  },
+  "as_of_day": "2029-06-06",
+  "nav": "8754875",
+  "peak_nav": "9172836",
+  "drawdown": "0.04556507932770192337462481614",
+  "n_returns": 5,
+  "sufficient": false,
+  "ewma_vol_annual": 0.355681576691,
+  "es95": {
+   "historical": 0.006050552515,
+   "parametric": 0.008957293158,
+   "adopted": 0.008957293158,
+   "n_obs": 25,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 5,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 5,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 5/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 92,
+  "input": {
+   "n_points": 30,
+   "last_nav": "13322004",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "etf_jp",
+     "value": "1338041"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "etf_jp",
+     "value": "1132198"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "-1642910"
+    }
+   ],
+   "n_obs": {
+    "1": 10,
+    "2": 1,
+    "3": 25
+   }
+  },
+  "as_of_day": "2029-06-30",
+  "nav": "13322004",
+  "peak_nav": "14251278",
+  "drawdown": "0.06520636254516963320763232603",
+  "n_returns": 29,
+  "sufficient": true,
+  "ewma_vol_annual": 0.407573962394,
+  "es95": {
+   "historical": 0.009770267653,
+   "parametric": 0.013828962356,
+   "adopted": 0.013828962356,
+   "n_obs": 25,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 25,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)"
+  ]
+ },
+ {
+  "index": 93,
+  "input": {
+   "n_points": 7,
+   "last_nav": "5325104",
+   "positions": [],
+   "n_obs": {}
+  },
+  "as_of_day": "2029-06-07",
+  "nav": "5325104",
+  "peak_nav": "5471450",
+  "drawdown": "0.02674720595089053176031947656",
+  "n_returns": 6,
+  "sufficient": false,
+  "ewma_vol_annual": 0.243878099502,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 6,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 6,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 6/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 94,
+  "input": {
+   "n_points": 3,
+   "last_nav": "10699061",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "-1418842"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_us",
+     "value": "-1313888"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "equity_us",
+     "value": "1554762"
+    }
+   ],
+   "n_obs": {
+    "1": 10,
+    "2": 0,
+    "3": 25
+   }
+  },
+  "as_of_day": "2029-06-03",
+  "nav": "10699061",
+  "peak_nav": "18329859",
+  "drawdown": "0.4163042388923995541918789446",
+  "n_returns": 2,
+  "sufficient": false,
+  "ewma_vol_annual": 2.002527343757,
+  "es95": {
+   "historical": 0.011332739325,
+   "parametric": 0.013065407392,
+   "adopted": 0.013065407392,
+   "n_obs": 25,
+   "excluded": [
+    1,
+    2
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": true,
+  "dd_hard": true,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 2,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 2,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 25,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 2/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)"
+  ]
+ },
+ {
+  "index": 95,
+  "input": {
+   "n_points": 11,
+   "last_nav": "14060841",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "1206573"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "cash",
+     "value": "425740"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "741474"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "equity_jp",
+     "value": "-1827584"
+    }
+   ],
+   "n_obs": {
+    "1": 20,
+    "2": 40,
+    "3": 10,
+    "4": 25
+   }
+  },
+  "as_of_day": "2029-06-11",
+  "nav": "14060841",
+  "peak_nav": "14286384",
+  "drawdown": "0.01578726989278742612546323828",
+  "n_returns": 10,
+  "sufficient": false,
+  "ewma_vol_annual": 0.201267080962,
+  "es95": {
+   "historical": 0.013232929981,
+   "parametric": 0.013612700939,
+   "adopted": 0.013612700939,
+   "n_obs": 20,
+   "excluded": [
+    3
+   ],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 10,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "データ不足 10/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)",
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [3](残部で測定 — 除外分は過小方向)"
+  ]
+ },
+ {
+  "index": 96,
+  "input": {
+   "n_points": 26,
+   "last_nav": "4247590",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_jp",
+     "value": "1802631"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_jp",
+     "value": "385289"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "-1257739"
+    },
+    {
+     "instrument_id": 4,
+     "asset_class": "equity_us",
+     "value": "342478"
+    }
+   ],
+   "n_obs": {
+    "1": 0,
+    "2": 10,
+    "3": 10,
+    "4": 19
+   }
+  },
+  "as_of_day": "2029-06-26",
+  "nav": "4247590",
+  "peak_nav": "4319717",
+  "drawdown": "0.01669715863330861720802543315",
+  "n_returns": 25,
+  "sufficient": true,
+  "ewma_vol_annual": 0.67283900702,
+  "es95": {
+   "historical": null,
+   "parametric": null,
+   "adopted": 0.0,
+   "n_obs": 0,
+   "excluded": [
+    1,
+    2,
+    3,
+    4
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   },
+   {
+    "instrument_id": 2,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 10,
+    "required": 20
+   },
+   {
+    "instrument_id": 4,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 19,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 2, 3, 4](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 保有銘柄がすべて除外され測定対象なし — 判定保留"
+  ]
+ },
+ {
+  "index": 97,
+  "input": {
+   "n_points": 18,
+   "last_nav": "17423256",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "1350541"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_jp",
+     "value": "-900663"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "2845467"
+    }
+   ],
+   "n_obs": {
+    "1": 25,
+    "2": 20,
+    "3": 40
+   }
+  },
+  "as_of_day": "2029-06-18",
+  "nav": "17423256",
+  "peak_nav": "17696167",
+  "drawdown": "0.01542204026442562392183572861",
+  "n_returns": 17,
+  "sufficient": false,
+  "ewma_vol_annual": 0.346827728901,
+  "es95": {
+   "historical": 0.013522827503,
+   "parametric": 0.019673810344,
+   "adopted": 0.019673810344,
+   "n_obs": 20,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 17,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 17,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 17/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ },
+ {
+  "index": 98,
+  "input": {
+   "n_points": 29,
+   "last_nav": "3971841",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "cash",
+     "value": "881124"
+    },
+    {
+     "instrument_id": 2,
+     "asset_class": "equity_jp",
+     "value": "638859"
+    },
+    {
+     "instrument_id": 3,
+     "asset_class": "cash",
+     "value": "562788"
+    }
+   ],
+   "n_obs": {
+    "1": 1,
+    "2": 25,
+    "3": 0
+   }
+  },
+  "as_of_day": "2029-06-29",
+  "nav": "3971841",
+  "peak_nav": "4802748",
+  "drawdown": "0.1730065787336749710790572397",
+  "n_returns": 28,
+  "sufficient": true,
+  "ewma_vol_annual": 0.797269781619,
+  "es95": {
+   "historical": 0.012356433009,
+   "parametric": 0.016903447252,
+   "adopted": 0.016903447252,
+   "n_obs": 25,
+   "excluded": [
+    1,
+    3
+   ],
+   "deferral_reason": "majority_excluded"
+  },
+  "dd_soft": true,
+  "dd_hard": false,
+  "vol_exceeded": true,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "es95",
+    "reason": "majority_excluded",
+    "observed": 25,
+    "required": 20
+   }
+  ],
+  "excluded": [
+   {
+    "instrument_id": 1,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 1,
+    "required": 20
+   },
+   {
+    "instrument_id": 3,
+    "measure": "es95",
+    "reason": "short_series",
+    "observed": 0,
+    "required": 20
+   }
+  ],
+  "notes": [
+   "ES: 短系列(<20営業日)のため測定から除外: instruments [1, 3](残部で測定 — 除外分は過小方向)",
+   "【要確認】ES: 除外銘柄が過半のため判定保留(残部の測定値は参考値)"
+  ]
+ },
+ {
+  "index": 99,
+  "input": {
+   "n_points": 8,
+   "last_nav": "8103042",
+   "positions": [
+    {
+     "instrument_id": 1,
+     "asset_class": "equity_us",
+     "value": "-2582945"
+    }
+   ],
+   "n_obs": {
+    "1": 40
+   }
+  },
+  "as_of_day": "2029-06-08",
+  "nav": "8103042",
+  "peak_nav": "8512314",
+  "drawdown": "0.04807999328972122034032109248",
+  "n_returns": 7,
+  "sufficient": false,
+  "ewma_vol_annual": 0.461010434278,
+  "es95": {
+   "historical": 0.022273362325,
+   "parametric": 0.027987759389,
+   "adopted": 0.027987759389,
+   "n_obs": 40,
+   "excluded": [],
+   "deferral_reason": null
+  },
+  "dd_soft": false,
+  "dd_hard": false,
+  "vol_exceeded": false,
+  "es_exceeded": false,
+  "deferred": [
+   {
+    "metric": "realized_vol",
+    "reason": "insufficient_returns",
+    "observed": 7,
+    "required": 20
+   },
+   {
+    "metric": "es95",
+    "reason": "insufficient_returns",
+    "observed": 7,
+    "required": 20
+   }
+  ],
+  "excluded": [],
+  "notes": [
+   "データ不足 7/20営業日 — 実現ボラ・ES フラグは判定保留(fail-safe)"
+  ]
+ }
+]

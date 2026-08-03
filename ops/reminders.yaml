@@ -682,7 +682,19 @@ reminders:
       type: issue_create
       title: "jobs.daily: 締め段の失敗をリスク日次へ伝え、未再締めの系列で黙って測らせない"
       labels: [impl, risk, ledger]
-      body: "`ledger.closing.reclose_stale` の呼び出し口は `execution/close.py` の `run_demo_close` だけであり、`jobs/daily.py` の `_run_stage` は execution 段の例外を握って後続を走らせる。したがって締めが落ちた日は、当日のスナップショットも再締めも走らないまま `run_risk_daily` が**未再締めの系列を黙って測る**(遅延仕訳が入ったままの NAV で DD・実現ボラ・ES を出し、`risk.limits_state` を更新する)。レポート上は『データ n 営業日』としか出ず、締めが飛んだ事実は実行サマリの execution 段にしか残らない。是正案: (1) `run_risk_daily` に『直近の締めが成功したか』を渡し、失敗日は測定を保留する(fail-safe — T-014 判断11 と同じ姿勢)か、(2) 少なくとも `state_metrics` と embed に『当日の締め未完了』を明記して urgent にする。締めの成否は execution 段の StageResult か、`ledger.nav_snapshots` に当日の行があるかで判定できる。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 起草者の留意点3点の独立評価 (a)。"
+      body: "`ledger.closing.reclose_stale` の呼び出し口は `execution/close.py` の `run_demo_close` だけであり、`jobs/daily.py` の `_run_stage` は execution 段の例外を握って後続を走らせる。したがって締めが落ちた日は、当日のスナップショットも再締めも走らないまま `run_risk_daily` が**未再締めの系列を黙って測る**(遅延仕訳が入ったままの NAV で DD・実現ボラ・ES を出し、`risk.limits_state` を更新する)。レポート上は『データ n 営業日』としか出ず、締めが飛んだ事実は実行サマリの execution 段にしか残らない。是正案: (1) `run_risk_daily` に『直近の締めが成功したか』を渡し、失敗日は測定を保留する(fail-safe — T-014 判断11 と同じ姿勢)か、(2) 少なくとも `state_metrics` と embed に『当日の締め未完了』を明記して urgent にする。締めの成否は execution 段の StageResult か、`ledger.nav_snapshots` に当日の行があるかで判定できる。出典: docs/reviews/risk-navflow-rollforward-independent-review.md 再々審査 起草者の留意点3点の独立評価 (a)。 **完了(2026-08-04)**: 是正案 (2) を採った(測定は続けて事実を必ず可視化する)。`jobs/daily.py` が execution 段の `StageResult.ok` を `run_risk_daily(close_ok=...)` へ渡す — 段は savepoint で囲まれているため、落ちた日は当日スナップショットも再締めも残らず、`ok` はそのまま『締めが系列に反映されたか』になる。失敗日は `risk/daily.py` がレポート先頭(独立フィールド『本日の締め』+ description 冒頭)に `⚠ 本日の締めが失敗 — 測定は前日までの系列に基づく` を出し、フラグが 1 つも立っていなくても urgent にし、`state_metrics` に `close_ok` / `close_error` を残す。ダッシュボードのリスクページも `close_ok=false` の測定を警告表示する。案 (1)(測定自体の保留)を採らなかったのは、保留すると `risk.limits_state` が更新されずゲートが古い状態で通し続けるため — 測定を止めるより『この数字は前日までの系列だ』と宣言する方が fail-safe である(独立審査もこの判断を支持。ただし誤 dd_hard の解除が委員会専決である点への留保が付き、IPS 復帰手順への追記を `ips-dd-release-procedure` に登録した)。 **独立審査の条件是正(重大-2)**: 初版の既定 `close_ok=True` は『知らない』を『成功した』と台帳に断定するため、締めが落ちた朝に CLI を手動再実行するだけで警告が消えた。既定を `None`(不明)に変え、そのときは `ledger.nav_snapshots` に当日行があるかを risk 側で自己検証する(無ければ `CLOSE_MISSING_NOTE` + urgent + `metrics.close_ok=false` / `close_self_checked=true`)。呼び出し側の作法に fail-safe を依存させない。出典: docs/reviews/risk-observability-independent-review.md 重大-2。"
+    status: done # 2026-08-04 実装: jobs/daily → run_risk_daily(close_ok) + レポート先頭警告 + urgent(審査 重大-2 是正済み)
+
+  - id: ips-dd-release-procedure
+    what: "IPS §3.2 復帰手順に『dd_hard 設定時イベントの close_ok 確認』を追記する(独立役員審査 2026-08-04 の留保条件)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "IPS §3.2 復帰条項の運用手順に close_ok 確認を明記する(CIO 起票)"
+      labels: [decision, risk, ips]
+      body: "締めが落ちた日でもリスク日次は測定を続ける(前日までの系列であることを宣言して続行 — `risk/daily.py` の `close_ok`)。この設計は独立役員審査 2026-08-04 で支持されたが、**留保条件が 1 つ付いている**: 未再締めの系列は過去 NAV が誤りうるため `dd_hard` が誤って立つ可能性があり、その解除は委員会専決(`risk.state.release_dd_hard`)である。誤検知でも解除には委員会の明示操作が要り、運用者は『測定の前提が壊れていた日に立ったフラグか』を判断する材料を手順として持っていない。是正: IPS §3.2 の復帰条項の運用手順に『dd_hard が立った際は、当該 `risk.limits_state_events`(event=engine_update)の `metrics.close_ok` / `close_self_checked` を確認し、false であれば締めを完了させたうえで再測定してから復帰可否を審議する』を明記する。**コード変更は不要**(`metrics` に既に記録済み)。IPS は L2 文書のため CIO 起票メモ+投資委員会決議で改訂すること(定款第4条)。起票メモには『この確認を怠ると、締め障害由来の誤 dd_hard がラッチとして残り、解除のたびに委員会の議事が消費される』というコストを添える。出典: docs/reviews/risk-observability-independent-review.md(設計判断の段落)。"
     status: pending
 
   - id: protect-execution-config
@@ -757,8 +769,8 @@ reminders:
       type: issue_create
       title: "risk.state_metrics に deferred / excluded を追加し、保留理由を機械可読にする"
       labels: [impl, risk]
-      body: "ryza.risk.state.state_metrics が残す測定値は `sufficient`(bool)と `n_returns` しか持たず、『どの指標がなぜ判定保留なのか』が読み手側で復元できない。ダッシュボードは暫定として『sufficient が偽なら vol/ES bullet を unknown にする』という粗い分岐で回避しているが(dashboard/app.py _insufficiency_note・独立役員審査 T-018 重大-3)、ES は観測不足以外の理由(価格欠測による銘柄除外など)でも採用値が変わるため、この分岐では保留理由を正しく説明できない。是正: state_metrics に `deferred`(判定を保留した指標名のリスト+各理由)と `excluded`(評価から外した銘柄+理由)を追加し、risk.limits_state_events.metrics 経由でダッシュボードと監査が同じ理由を読めるようにする。ダッシュボード側の暫定分岐は追加後に置き換える。**src/ryza/risk/ は保護領域のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 重大-3。"
-    status: pending
+      body: "ryza.risk.state.state_metrics が残す測定値は `sufficient`(bool)と `n_returns` しか持たず、『どの指標がなぜ判定保留なのか』が読み手側で復元できない。ダッシュボードは暫定として『sufficient が偽なら vol/ES bullet を unknown にする』という粗い分岐で回避しているが(dashboard/app.py _insufficiency_note・独立役員審査 T-018 重大-3)、ES は観測不足以外の理由(価格欠測による銘柄除外など)でも採用値が変わるため、この分岐では保留理由を正しく説明できない。是正: state_metrics に `deferred`(判定を保留した指標名のリスト+各理由)と `excluded`(評価から外した銘柄+理由)を追加し、risk.limits_state_events.metrics 経由でダッシュボードと監査が同じ理由を読めるようにする。ダッシュボード側の暫定分岐は追加後に置き換える。**src/ryza/risk/ は保護領域のため独立役員審査+みなし承認の手続を経ること。** 出典: docs/reviews/t018-dashboard-viz-independent-review.md 重大-3。 **完了(2026-08-04)**: `engine.Deferral`(指標名・理由コード・観測数/必要数)と `engine.Exclusion`(銘柄・対象測定・理由)を追加し、`RiskState.deferred` / `RiskState.excluded` として評価結果に載せ、`state_metrics` が `deferred` / `excluded_instruments` / `es95_deferred` として `risk.limits_state_events.metrics` に記録する。理由コードは `insufficient_returns` / `insufficient_obs` / `no_observations` / `majority_excluded`(保留)と `short_series` / `missing_price`(除外)。時価欠測で評価から外れた銘柄(`risk/daily.load_positions`)も同じ列に載るため、『ES の採用値が何を含まないか』を 1 か所で読める。ダッシュボードは新キーを優先して**指標ごとに**保留理由を表示し(`_deferral_note`)、除外銘柄を名指しする(`_exclusion_note`)。`deferred` キーを持たない過去のイベント行は従来表示に落とす(後方互換 — metrics は追記のみで遡って書き換わらない)。既存キー(`sufficient` / `n_returns` / `es95_*`)は残した。 **独立審査の条件是正(重大-1)**: 初版は `evaluate` が理由を代理指標から推測しており、過半でないのに `majority_excluded` と記録する誤りがあった(3 銘柄・1 銘柄短系列・残る 2 銘柄の共通観測日ゼロ)。理由は `es95()` 自身が `ESResult.deferral_reason` として返す構造に変え、`no_common_days` を独立コードとして追加した(`deferred` は理由の有無を見る派生値)。注記文も残部の有無で言い分ける。評価結果の全キーは `tests/risk/engine_snapshot.json` にゴールデン固定し、判定変更が必ずテスト差分に出るようにした。出典: docs/reviews/risk-observability-independent-review.md 重大-1・推奨。"
+    status: done # 2026-08-04 実装: engine.Deferral/Exclusion → state_metrics.deferred/excluded_instruments + ダッシュボード新表示(審査 重大-1 是正済み)
 
   - id: db-indexes-dashboard
     what: "ダッシュボードの重いクエリ向け索引を追加する(ledger.journal_lines / meta.runs。独立役員審査 T-018 中-10)"
