@@ -125,7 +125,11 @@ class SentenceTransformerEmbedder:
             ) from exc
         self._model_name = model_name
         self._model = SentenceTransformer(model_name)
-        self._native_dim = int(self._model.get_sentence_embedding_dimension())
+        # 次元取得メソッドは新旧で名前が異なる（get_embedding_dimension に改名）。両対応。
+        get_dim = getattr(self._model, "get_embedding_dimension", None)
+        if get_dim is None:
+            get_dim = self._model.get_sentence_embedding_dimension
+        self._native_dim = int(get_dim())
 
     @property
     def model_name(self) -> str:
