@@ -7,7 +7,7 @@
 # (status --porcelain が空)が落ちて冪等性が壊れる。先回りして置くことで自動生成を封じる。
 #
 # 構文は .gitignore と同じ。**.gitignore と整合させること**(片方だけ変えない)。
-# 除外しすぎない方針: 同じリポジトリルートを ops/deploy-{bot,daily,a13,ops-weekly}.sh も
+# 除外しすぎない方針: 同じリポジトリルートを ops/deploy-{bot,daily,a18,ops-weekly}.sh も
 # ビルドコンテキストに使うため、それらが必要とする src/・migrations/・config/ 等は残す。
 
 # ── git 本体(コンテナには不要。code_version は env RYZA_CODE_VERSION で注入する)──

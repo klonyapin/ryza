@@ -38,7 +38,7 @@ phases:
     summary: "定款 v0.4・権限マトリクス・定款監査・役職資産・役員室・開発管理規程・CI・組織サイト"
     milestones:
       - { name: "定款 v0.4+governance.yaml(批准済み)", status: done }
-      - { name: "週次定款監査ジョブ(A-13 系)", status: done }
+      - { name: "週次定款監査ジョブ(A-18 系)", status: done }
       - { name: "役職資産(personas)+役員室", status: done }
       - { name: "開発管理規程+ブランチ保護+CI required", status: done }
       - { name: "運用ダッシュボード(組織サイト・役員室 UI)", status: done }
