@@ -2,7 +2,7 @@
 # 正: docs/design/06-constitution.md(v0.1 ドラフト — 批准前。批准時に status を active へ)
 # 保護領域(定款第5条): 本ファイル自身の変更も代表承認必須。
 version: "0.1"
-status: draft # draft | active。批准(代表)で active
+status: active # 2026-08-03 代表批准(批准 PR マージ)により発効
 source: docs/design/06-constitution.md
 
 roles:
