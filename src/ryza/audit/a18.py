@@ -15,7 +15,8 @@
                           可視化 — 四半期ごとの執行点実装可否の再評価対象)
   A-18-4 全変更 PR 化   … 基準コミット(``PR_RULE_BASELINE_COMMIT``)以降の first-parent 履歴で、
                           (a) マージコミットでないコミット(= main への直 push)
-                          (b) 件名が PR マージ形式(``Merge pull request``)でないマージコミット
+                          (b) 件名が PR マージ形式(``Merge pull request #N``)でない、または
+                          PR #N が GitHub 上に実在しない/未マージのマージコミット
                           を保護領域か否かにかかわらず違反として列挙する。例外なし
                           (``Approved:`` トレーラ付き直 push も違反 — 2026-08-03 代表指示)
   A-18-5 通知なき発効   … ``decision='deemed'`` の通知参照(``outbox:<id>``)が指す
@@ -52,8 +53,12 @@ A-18 は既に(1)監査専用 clone ``/opt/ryza-audit`` から走り、(2)``--al
 
 **既知の限界(独立役員審査 2026-08-03 指摘により報告 notes へ毎回開示する)**:
 
-- PR 件名(``Merge pull request``)は自己申告であり GitHub API と未照合。件名偽装で承認を
-  装える(実弾移行前提条件として API 照合を実装する — ops/reminders.yaml 登録済み)
+- PR 件名(``Merge pull request #N``)とトレーラの PR URL は GitHub API(``repos/<slug>/pulls/N``)
+  で実在+マージ済みを照合する(:class:`PRVerifier`)。**API に到達できない実行では従来どおり
+  件名を信用する(fail-open)**— 週次監査を API 障害で止めないため。fail-open した件数と
+  理由は必ず notes に開示する。私有リポジトリに未認証でアクセスすると存在する PR も 404 に
+  なるため、``repos/<slug>`` の到達性を先に確認し、到達できない場合は 404 を「不在」と
+  解釈しない(認証不備で違反を大量生成しないための fail-open)
 - ``Approved:`` トレーラの参照は、DB 接続がある実行に限り ``governance.current_decisions`` と
   突合する(``decision:<id>`` は ID 一致、それ以外は ``proposal_ref`` 一致 — PR URL の承認記録が
   この経路で解決される)。否認済み(``effective_decision='vetoed'``)・却下・不在は承認として
@@ -64,13 +69,32 @@ A-18 は既に(1)監査専用 clone ``/opt/ryza-audit`` から走り、(2)``--al
   本リポジトリの承認手続はマージコミット(``Merge pull request``)で行われている(批准 PR #32 が
   実例)。squash 併用を始める場合は判定の拡張が必要
 
+**Approved トレーラ様式 v2(2026-08-04 独立役員審査 重大-1/重大-2 の恒久対策)**::
+
+    Approved: <GitHub Issue/PR URL または decision:<id>> [reviewed=<40桁 SHA>]
+
+``reviewed=`` は任意拡張であり、**付いていれば承継の範囲を「``reviewed`` の祖先」に限定**する
+(:func:`reviewed_shas`)。独立審査・``#承認`` 通知の後にブランチへ積んだコミットは
+``reviewed`` の祖先にならないため承継されず、従来どおり違反として列挙される(重大-2 の
+「審査後 push の吸収」の封鎖)。``reviewed`` が 40 桁 hex でない・リポジトリに実在しない
+場合は**様式不備として承継の起点にしない**(fail-safe — 不備を「制限なし」に読み替えない)。
+v1(``reviewed`` 無し)のトレーラは移行期の経過措置として従来どおり有効だが、それによる
+承継の件数を notes に「reviewed 無しの承継 N 件」として開示する。
+
+**v2 の限界(意図的な非目標)**: ``reviewed`` はトレーラの書き手の申告であり、「独立審査が
+実際にその SHA を見た」ことを A-18 は独立には確認できない(承認記録 ``governance.decisions``
+に審査対象 SHA を持たせない限り照合先が無い)。v2 が閉じるのは**トレーラを書いた後にブランチへ
+積んだ変更が自動的に承認へ吸い込まれる**経路であって、書き手自身の虚偽申告ではない。後者は
+「トレーラを書くのは承認手続を通した者」という手続前提と、PR 実在照合・否認照合が担う。
+
 **PR 承継(2026-08-04 設計リード裁定)**: first-parent 上のマージ M が有効な ``Approved:``
 トレーラを持つとき、M が main に持ち込んだコミット群(M の配下でまだ main に無かったもの)は
 M の承認を承継し違反としない。PR 単位のみなし承認は独立審査を経た PR の内容全体に及ぶためで、
 ブランチ内コミット(worktree の統合マージ含む)に個別トレーラを要求すると統合フローが構造的に
 違反を量産し監査が形骸化する。承継は ``inherited`` として集計し報告に必ず出す(黙って消さない)。
-承継の起点は「first-parent 上・件名がマージ形式・親2・トレーラ有効」の4条件を満たすコミット
-のみで、トレーラの無い PR マージ配下は従来どおり検査する。**起点のトレーラ有効性は必ず
+承継の起点は「first-parent 上・件名がマージ形式・親2・**GitHub 上に実在しマージ済み**・
+トレーラ有効・``reviewed`` があればその祖先」を満たすコミットのみで、トレーラの無い
+PR マージ配下は従来どおり検査する。**起点のトレーラ有効性は必ず
 :func:`trailer_approves` を通す** — 素の :func:`has_approval_trailer` で分岐すると、否認済みの
 承認がブランチ全体へ承継され、否認照合が承継経路から迂回される。``conn`` が無い(照合不能な)
 実行では形式的有効性のみで承継し、その件数を notes に開示する(黙って通さない)。
@@ -94,11 +118,17 @@ git 操作は subprocess で行い、リポジトリパスは引数化してテ�
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 import re
+import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+import urllib.error
+import urllib.request
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -125,14 +155,17 @@ GOVERNANCE_PATH = "config/governance.yaml"
 
 # 既知の限界の常時開示(独立役員審査条件)。報告 embed の notes に毎回載せる。
 STANDARD_DISCLOSURES: tuple[str, ...] = (
-    "PR 件名(Merge pull request)は自己申告で GitHub API 未照合(照合実装は実弾移行前提条件)",
+    "PR 件名(Merge pull request #N)とトレーラの PR URL は GitHub API で実在+マージ済みを"
+    "照合する。API に到達できない実行では従来どおり件名を信用する(fail-open)— "
+    "fail-open の件数と理由は本注記に併記する",
     "Approved トレーラは current_decisions と突合(decision:<id> は ID 一致・それ以外は "
     "proposal_ref 一致。否認済み・却下・不在は受理しない)。裸の数字と DB 外の承認記録"
     "(Issue 決議)は照合対象外",
     "マージのコンフリクト解消差分(evil merge)は --cc で検査し、保護パスに触れる場合は"
     "マージ自身の Approved トレーラを要求",
-    "A-18-4 のマージ判定は親数+PR 件名(A-18-1 と同一の検査)— 件名は自己申告で"
-    "GitHub API 未照合の限界を共有する",
+    "A-18-4 のマージ判定は親数+PR 件名+PR 実在照合(A-18-1 と同一の検査)",
+    "Approved トレーラの reviewed=<sha40> は任意拡張。付いていれば承継は reviewed の祖先に"
+    "限定され、無ければ PR マージ時点のブランチ全体に及ぶ(v1 経過措置 — 件数を開示する)",
 )
 
 # 文書⇔config のバージョン突合ペア(A-18-2)。(文書, config, config 内の version キー)
@@ -141,8 +174,22 @@ VERSION_PAIRS: tuple[tuple[str, str], ...] = (
     ("docs/design/06-constitution.md", "config/governance.yaml"),
 )
 
-# GitHub マージ PR のマージコミット件名。
-_PR_MERGE_RE = re.compile(r"^Merge pull request #\d+")
+# GitHub マージ PR のマージコミット件名(PR 番号を捕捉して実在照合に回す)。
+_PR_MERGE_RE = re.compile(r"^Merge pull request #(\d+)")
+
+# トレーラの任意拡張(``reviewed=<sha40>`` 等の key=value)。参照の後ろに空白区切りで並ぶ。
+_TRAILER_ATTR_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*)=(\S+)$")
+
+# トレーラ様式 v2 の審査対象コミット(承継の上限)。
+_REVIEWED_KEY = "reviewed"
+
+# GitHub PR の URL(トレーラ参照の実在照合に使う)。
+_PR_URL_RE = re.compile(
+    r"^https://github\.com/([^/]+)/([^/]+)/pull/(\d+)(?:[/#?].*)?$", re.IGNORECASE
+)
+
+# origin remote から owner/repo を取り出す(https / ssh の両形式)。
+_ORIGIN_SLUG_RE = re.compile(r"github\.com[:/]+([^/]+)/(.+?)(?:\.git)?/?$", re.IGNORECASE)
 
 # 見出し行のバージョン表記(例: 「# Ryza 投資方針書(IPS)v1.3」)。
 _DOC_VERSION_RE = re.compile(r"v(\d+(?:\.\d+)+)")
@@ -199,6 +246,205 @@ def _rev_list(repo: str | Path, since: str | None, *flags: str) -> list[str]:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# GitHub PR 実在照合(独立役員審査 2026-08-04 重大-1 の恒久対策)
+#
+# ``Merge pull request #N`` の件名も ``Approved: <PR URL>`` のトレーラも自己申告であり、
+# 実在しない PR 番号を書くだけで承認を装える(審査 PoC: 存在しない #999999 の件名+架空 URL で
+# Kill Switch 改変が violations=0 を通った)。PR 承継はこの偽造1件の爆風半径をブランチ全体へ
+# 拡大するため、起点の実在照合が承継の前提条件になる。
+#
+# **fail-open の設計**: API 不達(gh 未導入・トークン無し・ネットワーク障害・レート制限)で
+# 週次監査を止めると、監査が動かない週が「所見なし」と区別できなくなる(沈黙の多義化)。
+# 到達できない場合は従来挙動(件名を信用)へ縮退し、**縮退した件数と理由を必ず notes に出す**。
+# ────────────────────────────────────────────────────────────────────────────
+#: GitHub API のトークンを探す環境変数(監査 VM のランナーは GIT_TOKEN を export する)。
+_TOKEN_ENV_VARS: tuple[str, ...] = ("GH_TOKEN", "GITHUB_TOKEN", "GIT_TOKEN")
+
+#: API 呼び出し1回あたりの上限秒数(週次バッチなので長すぎない値)。
+GITHUB_API_TIMEOUT = 15.0
+
+
+def origin_slug(repo_path: str | Path) -> str | None:
+    """``origin`` remote から ``owner/repo`` を返す(GitHub でなければ None)。"""
+    try:
+        url = _git(repo_path, "remote", "get-url", "origin").strip()
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    m = _ORIGIN_SLUG_RE.search(url)
+    return f"{m.group(1)}/{m.group(2)}" if m else None
+
+
+def _github_api_get(path: str, *, timeout: float = GITHUB_API_TIMEOUT) -> tuple[str, Any]:
+    """GitHub API を GET する。戻り値は ``("ok", payload)`` / ``("not_found", None)`` /
+    ``("error", 理由)``。
+
+    ``gh`` があれば ``gh api``(認証を CLI に委ねられる)、無ければ ``urllib`` +
+    環境変数のトークンを使う。監査 VM(ops/deploy-a18.sh)は ``gh`` を持たず
+    ``GIT_TOKEN`` を export するため、両経路を用意しないと本番で常に fail-open になる。
+    """
+    if shutil.which("gh"):
+        try:
+            res = subprocess.run(
+                ["gh", "api", path], capture_output=True, text=True, check=False, timeout=timeout
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            # 監査自身が API の遅延で落ちない(fail-open して縮退を開示する)。
+            return "error", f"gh api 実行不能: {type(exc).__name__}"
+        if res.returncode == 0:
+            try:
+                return "ok", json.loads(res.stdout or "{}")
+            except json.JSONDecodeError:
+                return "error", "gh api の応答が JSON でない"
+
+        err = " ".join((res.stderr or "").split())
+        if "404" in err or "Not Found" in err:
+            return "not_found", None
+        return "error", f"gh api 失敗: {err[:160] or f'exit={res.returncode}'}"
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "ryza-a18-audit",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = next((os.environ[v] for v in _TOKEN_ENV_VARS if os.environ.get(v)), None)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(f"https://api.github.com/{path}", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (https 固定)
+            return "ok", json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return "not_found", None
+        return "error", f"GitHub API HTTP {exc.code}"
+    except Exception as exc:  # ネットワーク・DNS・タイムアウト・JSON 破損
+        return "error", f"GitHub API 不達: {type(exc).__name__}"
+
+
+@dataclass
+class PRVerifier:
+    """PR 番号の実在+マージ済みを GitHub API で照合する(結果はプロセス内でキャッシュ)。
+
+    判定は ``ok`` / ``bad`` / ``unverifiable`` の3値。``bad`` のみが承認の否定であり、
+    ``unverifiable`` は**従来挙動へ縮退**する(fail-open)。縮退の理由と件数は
+    :meth:`disclosures` が返し、報告 notes に必ず載る。
+
+    私有リポジトリに未認証でアクセスすると実在する PR も 404 になるため、初回に
+    ``repos/<slug>`` の到達性を確認し、到達できないときは 404 を「不在」と読まない。
+    この防御が無いと、トークンを失った週に全 PR が「実在しない」と判定され、
+    監査が違反を大量生成して信用を失う。
+    """
+
+    repo_path: str | Path | None = None
+    slug: str | None = None
+    #: API 呼び出し(テストは差し替えてネットワークに触れない)。None なら実 API。
+    api_get: Callable[[str], tuple[str, Any]] | None = None
+    enabled: bool = True
+    _cache: dict[int, tuple[str, str | None]] = field(default_factory=dict, repr=False)
+    _unavailable: dict[str, int] = field(default_factory=dict, repr=False)
+    _verified: int = field(default=0, repr=False)
+    _reachable: bool | None = field(default=None, repr=False)
+    _reach_reason: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.api_get is None:
+            self.api_get = _github_api_get
+        if self.slug is None and self.repo_path is not None:
+            self.slug = origin_slug(self.repo_path)
+
+    # ── 内部 ────────────────────────────────────────────────────────────────
+    def _degrade(self, reason: str) -> tuple[str, str | None]:
+        self._unavailable[reason] = self._unavailable.get(reason, 0) + 1
+        return "unverifiable", reason
+
+    def _unreachable_reason(self) -> str | None:
+        """リポジトリ自体に到達できるか(初回のみ問い合わせ)。到達不能なら理由を返す。"""
+        if self._reachable is None:
+            status, detail = self.api_get(f"repos/{self.slug}")
+            self._reachable = status == "ok"
+            self._reach_reason = (
+                None
+                if self._reachable
+                else (
+                    f"リポジトリ {self.slug} に API でアクセスできない"
+                    f"(認証不備・不達の可能性: {detail if status == 'error' else 'HTTP 404'})"
+                )
+            )
+        return self._reach_reason
+
+    # ── 照合 ────────────────────────────────────────────────────────────────
+    def check(self, number: int) -> tuple[str, str | None]:
+        """PR 番号1件を照合する。``("ok"|"bad"|"unverifiable", 理由)``。"""
+        if not self.enabled:
+            return self._degrade("GitHub PR 実在照合が無効化されている")
+        if not self.slug:
+            return self._degrade("origin が GitHub リポジトリでないため PR 番号を照合できない")
+        cached = self._cache.get(number)
+        if cached is not None:
+            return cached
+        unreachable = self._unreachable_reason()
+        if unreachable:
+            return self._degrade(unreachable)
+        status, payload = self.api_get(f"repos/{self.slug}/pulls/{number}")
+        if status == "not_found":
+            verdict: tuple[str, str | None] = ("bad", f"PR #{number} が GitHub に存在しない")
+        elif status != "ok":
+            return self._degrade(f"PR #{number} の照合に失敗({payload})")
+        elif not (payload or {}).get("merged_at"):
+            verdict = ("bad", f"PR #{number} は GitHub 上でマージされていない")
+        else:
+            verdict = ("ok", None)
+            self._verified += 1
+        self._cache[number] = verdict
+        return verdict
+
+    def check_ref(self, ref: str) -> tuple[str, str | None]:
+        """トレーラ参照が**自リポジトリの** PR URL なら照合する。対象外なら ``("skip", None)``。"""
+        m = _PR_URL_RE.match(ref)
+        if not m or not self.slug:
+            return "skip", None
+        if f"{m.group(1)}/{m.group(2)}".lower() != self.slug.lower():
+            return "skip", None  # 他リポジトリの PR は照合対象にしない
+        return self.check(int(m.group(3)))
+
+    def disclosures(self) -> list[str]:
+        """照合できた件数と fail-open した件数・理由(報告 notes へ)。"""
+        out = [
+            f"GitHub PR 実在照合を実施できず fail-open した参照 {n} 件: {reason}"
+            for reason, n in sorted(self._unavailable.items())
+        ]
+        if self._verified:
+            out.append(
+                f"GitHub PR 実在照合: {self._verified} 件を実在+マージ済みとして確認"
+            )
+        return out
+
+
+def pr_number_from_subject(subject: str) -> int | None:
+    """``Merge pull request #N`` 件名から PR 番号を返す(形式が違えば None)。"""
+    m = _PR_MERGE_RE.match(subject)
+    return int(m.group(1)) if m else None
+
+
+def verified_pr_merge(subject: str, pr_verifier: PRVerifier | None) -> tuple[bool, str | None]:
+    """件名が PR マージ形式で、かつ(照合できるなら)PR が実在しマージ済みか。
+
+    Returns:
+        ``(PR マージとして扱うか, 扱わない理由)``。照合不能(API 不達)は従来どおり
+        件名を信用する(fail-open)。
+    """
+    number = pr_number_from_subject(subject)
+    if number is None:
+        return False, None
+    if pr_verifier is None:
+        return True, None
+    state, detail = pr_verifier.check(number)
+    if state == "bad":
+        return False, detail
+    return True, None
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # glob マッチ(protected_areas のパターン)
 # ────────────────────────────────────────────────────────────────────────────
 def glob_to_regex(pattern: str) -> re.Pattern[str]:
@@ -251,15 +497,69 @@ def protected_patterns(gov: dict[str, Any]) -> list[re.Pattern[str]]:
 # ────────────────────────────────────────────────────────────────────────────
 # A-18-1 保護領域突合
 # ────────────────────────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class TrailerLine:
+    """``Approved:`` トレーラ1行の構造(様式 v2)。"""
+
+    #: 承認記録の参照(GitHub Issue/PR URL または ``decision:<id>``)
+    ref: str
+    #: 任意拡張の ``key=value``(現在は ``reviewed`` のみ意味を持つ)
+    attrs: dict[str, str]
+    #: 解釈できなかったトークン(``key=value`` 形式でない余剰語)
+    extras: tuple[str, ...] = ()
+
+
+def approval_trailers(message: str, trailer: str = "Approved:") -> list[TrailerLine]:
+    """``Approved: <参照> [key=value ...]`` トレーラ行を構造化して返す(様式 v2)。
+
+    v1(参照のみ)は先頭トークンだけが埋まった :class:`TrailerLine` になり、従来と同じに
+    扱われる。v2 の拡張(``reviewed=<sha40>``)は :func:`reviewed_shas` が読む。
+    """
+    pat = re.compile(rf"^{re.escape(trailer)}\s*(\S.*)$", re.MULTILINE)
+    lines: list[TrailerLine] = []
+    for m in pat.finditer(message):
+        tokens = m.group(1).split()
+        if not tokens:
+            continue
+        attrs: dict[str, str] = {}
+        extras: list[str] = []
+        for tok in tokens[1:]:
+            attr = _TRAILER_ATTR_RE.match(tok)
+            if attr:
+                attrs[attr.group(1).lower()] = attr.group(2)
+            else:
+                extras.append(tok)
+        lines.append(TrailerLine(ref=tokens[0], attrs=attrs, extras=tuple(extras)))
+    return lines
+
+
 def approval_trailer_refs(message: str, trailer: str = "Approved:") -> list[str]:
     """``Approved: <参照>`` トレーラ行の参照値を全て返す(定款第5条 C-5 様式)。
 
-    参照は「GitHub Issue URL または ``governance.decisions`` の ID」
+    参照は「GitHub Issue/PR URL または ``governance.decisions`` の ID」
     (config/governance.yaml の様式コメント)。1コミットに複数のトレーラを許すのは、
     複数の承認記録にまたがる変更(例: 独立役員審査 + 代表の明示承認)を表現するため。
     """
-    pat = re.compile(rf"^{re.escape(trailer)}\s*(\S+)", re.MULTILINE)
-    return [m.group(1) for m in pat.finditer(message)]
+    return [line.ref for line in approval_trailers(message, trailer)]
+
+
+def reviewed_shas(message: str, trailer: str = "Approved:") -> tuple[tuple[str, ...], str | None]:
+    """トレーラの ``reviewed=<sha40>`` を全て返す。``(SHA 群, 様式不備の理由)``。
+
+    様式 v2 の ``reviewed`` は「独立審査が実際に見たコミット」を固定する。承継はこの
+    祖先に限定され、審査後にブランチへ積んだコミットは承継されない(重大-2)。
+    **40 桁 hex でない値は様式不備**として理由を返し、呼び出し側は承継の起点に
+    しない(fail-safe — 不備を「制限なし」に読み替えると v2 が抜け道になる)。
+    """
+    shas: list[str] = []
+    for line in approval_trailers(message, trailer):
+        value = line.attrs.get(_REVIEWED_KEY)
+        if value is None:
+            continue
+        if not _FULL_SHA_RE.match(value):
+            return (), f"reviewed={value} が 40 桁 hex の完全 SHA でない"
+        shas.append(value.lower())
+    return tuple(shas), None
 
 
 def has_approval_trailer(message: str, trailer: str = "Approved:") -> bool:
@@ -290,9 +590,25 @@ class TrailerVerdict:
     unverifiable: list[str]
 
 
-def _verdict_for_ref(conn: Any, ref: str) -> tuple[str, str | None]:
-    """参照1件を突合し ``(判定, 理由)`` を返す。判定は ok / bad / unverifiable。"""
+def _verdict_for_ref(
+    conn: Any, ref: str, pr_verifier: PRVerifier | None = None
+) -> tuple[str, str | None]:
+    """参照1件を突合し ``(判定, 理由)`` を返す。判定は ok / bad / unverifiable。
+
+    突合は2段: (1) 参照が自リポジトリの PR URL なら GitHub API で実在+マージ済みを確認する
+    (架空 URL の空手形を封じる — 重大-1)。(2) ``governance.current_decisions`` と突合し
+    否認済み・却下・不在を弾く。``conn`` が無い実行では (2) を行わない。
+    """
     from ryza.governance.decisions import current_decision, current_decision_by_id
+
+    if pr_verifier is not None:
+        pr_state, pr_detail = pr_verifier.check_ref(ref)
+        if pr_state == "bad":
+            return "bad", f"承認記録 '{ref}': {pr_detail}"
+
+    if conn is None:
+        # DB 照合はできない。PR URL の実在照合(上)だけが効く従来経路。
+        return "unverifiable", None
 
     decision_id = decision_ref_id(ref)
     if decision_id is not None:
@@ -324,7 +640,11 @@ def _verdict_for_ref(conn: Any, ref: str) -> tuple[str, str | None]:
 
 
 def trailer_approves(
-    conn: Any | None, message: str, trailer: str = "Approved:"
+    conn: Any | None,
+    message: str,
+    trailer: str = "Approved:",
+    *,
+    pr_verifier: PRVerifier | None = None,
 ) -> TrailerVerdict | None:
     """コミットメッセージのトレーラを検証する。トレーラが無ければ ``None``。
 
@@ -332,17 +652,18 @@ def trailer_approves(
     まとめた読み口。**承認の有効性を判定する箇所は必ずここを通す** — 素の
     ``has_approval_trailer`` で分岐すると、その経路だけ否認済み承認を受理する穴になる。
 
-    ``conn`` が ``None`` なら照合できないので、従来どおりトレーラの存在をもって受理する。
+    ``conn`` が ``None`` なら承認記録との突合はできないので、従来どおりトレーラの存在を
+    もって受理する(ただし ``pr_verifier`` があれば PR URL の実在照合だけは効く)。
     """
     refs = approval_trailer_refs(message, trailer)
     if not refs:
         return None
-    if conn is None:
-        return TrailerVerdict(accepted=True, problems=[], unverifiable=[])
-    return verify_decision_refs(conn, refs)
+    return verify_decision_refs(conn, refs, pr_verifier=pr_verifier)
 
 
-def verify_decision_refs(conn: Any, refs: list[str]) -> TrailerVerdict:
+def verify_decision_refs(
+    conn: Any | None, refs: list[str], *, pr_verifier: PRVerifier | None = None
+) -> TrailerVerdict:
     """トレーラ参照を ``governance.current_decisions`` と突合する。
 
     受理の規則:
@@ -367,7 +688,7 @@ def verify_decision_refs(conn: Any, refs: list[str]) -> TrailerVerdict:
     resolved = 0
     accepted = False
     for ref in refs:
-        verdict, detail = _verdict_for_ref(conn, ref)
+        verdict, detail = _verdict_for_ref(conn, ref, pr_verifier)
         if verdict == "unverifiable":
             if detail:
                 unverifiable.append(detail)
@@ -392,12 +713,68 @@ def _find_introducing_merge(
     return None
 
 
+@dataclass(frozen=True)
+class MergeOrigin:
+    """承継の起点候補(main に取り込んだ first-parent マージ)の判定結果。"""
+
+    sha: str
+    subject: str
+    #: 件名が PR マージ形式・親2・(照合できるなら)GitHub 上で実在しマージ済み
+    is_pr: bool
+    #: PR として扱わない理由(実在しない・未マージ)。件名が PR 形式でない場合は None
+    not_pr_detail: str | None
+    #: ``Approved:`` トレーラが有効(否認済み・却下・不在でない)
+    approved: bool
+    #: 様式 v2 の ``reviewed=<sha40>``(空 = v1 様式で範囲制限なし)
+    reviewed: tuple[str, ...]
+    #: 様式不備(承継の起点にしない fail-safe の理由)
+    problem: str | None
+
+
+def _merge_origin(
+    repo: str | Path,
+    merge: str,
+    trailer: str,
+    conn: Any | None,
+    pr_verifier: PRVerifier | None,
+) -> MergeOrigin:
+    """承継の起点候補となるマージコミットを1件評価する(呼び出し側でキャッシュする)。"""
+    subject = _git(repo, "log", "-1", "--format=%s", merge).strip()
+    message = _git(repo, "log", "-1", "--format=%B", merge)
+    two_parent = len(_git(repo, "log", "-1", "--format=%P", merge).split()) == 2
+    # octopus マージ(親3以上)は起点にしない。GitHub の PR マージは常に親2であり、octopus に
+    # PR 件名を付けると複数ブランチの内容を1つの承認で通せてしまう(審査 2026-08-04 中-3)。
+    pr_ok, not_pr_detail = verified_pr_merge(subject, pr_verifier)
+    verdict = trailer_approves(conn, message, trailer, pr_verifier=pr_verifier)
+    reviewed, problem = reviewed_shas(message, trailer)
+    if problem is None:
+        missing = [r for r in reviewed if not _git_ok(repo, "cat-file", "-e", f"{r}^{{commit}}")]
+        if missing:
+            # 実在しない reviewed は祖先判定ができない。「制限なし」に読み替えず起点から外す。
+            problem = f"reviewed={missing[0][:12]} がリポジトリに存在せず審査範囲を確定できない"
+    return MergeOrigin(
+        sha=merge,
+        subject=subject,
+        is_pr=pr_ok and two_parent,
+        not_pr_detail=not_pr_detail,
+        approved=verdict is not None and verdict.accepted,
+        reviewed=reviewed,
+        problem=problem,
+    )
+
+
+def _within_reviewed(repo: str | Path, sha: str, reviewed: tuple[str, ...]) -> bool:
+    """``sha`` が ``reviewed`` のいずれかの祖先(自身を含む)か。"""
+    return any(_git_ok(repo, "merge-base", "--is-ancestor", sha, r) for r in reviewed)
+
+
 def check_protected_commits(
     repo_path: str | Path,
     gov: dict[str, Any],
     *,
     since_commit: str | None = RATIFICATION_COMMIT,
     conn: Any | None = None,
+    pr_verifier: PRVerifier | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, list[dict[str, Any]]]:
     """A-18-1: ``(違反, PR 承継で承認, 検査コミット数, トレーラ所見)`` を返す。
 
@@ -405,10 +782,12 @@ def check_protected_commits(
       (a) コミット本文の ``Approved:`` トレーラ。``conn`` が与えられれば
           :func:`verify_decision_refs` で参照(``decision:<id>`` / ``proposal_ref`` 一致)を
           実在照合し、**否認済み・却下・不在は承認と見なさない**
-      (b) GitHub マージ PR 経由 = ``Merge pull request`` マージコミット(**親2**)の配下で
-          main に到達
+      (b) GitHub マージ PR 経由 = ``Merge pull request #N`` マージコミット(**親2**・
+          ``pr_verifier`` があれば **PR #N が実在しマージ済み**)の配下で main に到達
       (c) **PR 承継**: 有効な ``Approved:`` トレーラを持つ first-parent 上の PR マージ M
-          (**親2**)が main に持ち込んだコミット群は、M の承認を承継する(下記)
+          (**親2**・実在)が main に持ち込んだコミット群は、M の承認を承継する(下記)。
+          M のトレーラが様式 v2(``reviewed=<sha40>``)なら、承継は **reviewed の祖先**に
+          限られ、審査後に積まれたコミットは (b)・(c) のいずれでも救済されない
     ``since_commit``(批准コミット)以前のコミットは ``rev-list since..HEAD`` により対象外。
 
     **トレーラが無効なら (b)・(c) では救済しない**: 「この承認記録で承認された」と明示的に
@@ -434,6 +813,7 @@ def check_protected_commits(
     violations: list[dict[str, Any]] = []
     inherited: list[dict[str, Any]] = []
     trailer_findings: list[dict[str, Any]] = []
+    origins: dict[str, MergeOrigin] = {}  # 起点マージの評価キャッシュ(API 呼び出しを減らす)
     for sha in commits:
         parents = _git(repo, "log", "-1", "--format=%P", sha).split()
         is_merge = len(parents) > 1
@@ -452,7 +832,7 @@ def check_protected_commits(
         # 承認の有効性判定は trailer_approves に集約する。PR 承継のように「別のコミットの
         # トレーラで承認する」規則も必ずこの関数を通す(素の has_approval_trailer で分岐すると
         # その経路だけ否認済み承認を受理する穴になる)。
-        verdict = trailer_approves(conn, message, trailer)
+        verdict = trailer_approves(conn, message, trailer, pr_verifier=pr_verifier)
         trailer_reason: str | None = None
         if verdict is not None:
             if verdict.accepted:
@@ -481,31 +861,47 @@ def check_protected_commits(
             if trailer_reason is not None or sha in first_parent
             else _find_introducing_merge(repo, sha, fp_merges)
         )
+        origin_reason: str | None = None
         if merge is not None:
-            m_subject = _git(repo, "log", "-1", "--format=%s", merge).strip()
-            # octopus マージ(親3以上)は起点にしない。GitHub の PR マージは常に親2であり、
-            # octopus に PR 件名を付けると複数ブランチの内容を1つの承認で通せてしまう
-            # (独立役員審査 2026-08-04 中-3 の PoC: 未審査の保護ファイル3件が violations=0 で
-            # 通過した)。起点候補の探索自体は全 first-parent マージに対して行う — octopus を
+            # 起点候補の探索自体は全 first-parent マージに対して行う — octopus や偽 PR を
             # 探索対象から外すと「持ち込んだマージ」が後続の別 PR に誤帰属するため。
-            m_is_two_parent = len(_git(repo, "log", "-1", "--format=%P", merge).split()) == 2
-            m_is_pr = bool(_PR_MERGE_RE.match(m_subject)) and m_is_two_parent
-            # 起点のトレーラも trailer_approves を通す。否認済みの PR トレーラで
-            # ブランチ全体を承継させると、否認照合が承継経路から迂回される。
-            m_verdict = trailer_approves(
-                conn, _git(repo, "log", "-1", "--format=%B", merge), trailer
-            )
-            m_approved = m_verdict is not None and m_verdict.accepted
-            if m_is_pr and not is_merge:
+            # 起点のトレーラは必ず trailer_approves を通す(否認済みの PR トレーラで
+            # ブランチ全体を承継させると、否認照合が承継経路から迂回される)。
+            if merge not in origins:
+                origins[merge] = _merge_origin(repo, merge, trailer, conn, pr_verifier)
+            origin = origins[merge]
+            if origin.is_pr and origin.problem is not None:
+                # 様式不備は「制限なし」ではなく「起点にしない」— fail-safe(重大-2 の恒久対策)。
+                origin_reason = (
+                    f"承継の起点 PR `{merge[:12]}` の Approved トレーラが様式不備: "
+                    f"{origin.problem}"
+                )
+            elif origin.is_pr and origin.reviewed and not _within_reviewed(
+                repo, sha, origin.reviewed
+            ):
+                # 様式 v2: 承継は reviewed の祖先に限る。独立審査・#承認 通知の**後**に
+                # 積まれたコミットは同じトレーラでは承認されない(重大-2「審査後 push の吸収」)。
+                origin_reason = (
+                    f"PR `{merge[:12]}` の Approved トレーラは reviewed="
+                    f"{origin.reviewed[0][:12]} を審査対象としており、本コミットはその祖先でない"
+                    "(審査後に積まれた変更は承継しない)"
+                )
+            elif origin.not_pr_detail is not None:
+                # 件名は PR マージだが GitHub 上に実在しない/未マージ(重大-1 の偽トレーラ)。
+                origin_reason = (
+                    f"持ち込んだマージ `{merge[:12]}` の PR 件名が GitHub と一致しない: "
+                    f"{origin.not_pr_detail}"
+                )
+            elif origin.is_pr and not is_merge:
                 continue  # (b) マージ PR 経由のブランチ内コミット = 代表承認(附則・従来どおり)
-            if m_is_pr and m_approved:
+            elif origin.is_pr and origin.approved:
                 # (c) PR 承継。PR 単位のみなし承認(定款第3条 v0.4)は独立審査を経た PR の
                 # 内容全体に及ぶ。ブランチ内コミット(worktree の統合マージ含む)に個別
                 # トレーラを要求すると、統合フローが構造的に違反を量産し監査が形骸化する
                 # (2026-08-04 設計リード裁定・g-a18 審査 C-3 の恒久対策)。
-                # 承継の起点は「first-parent 上・件名がマージ形式・親2・トレーラ有効」に限る。
-                # トレーラの無い PR マージ(#56 等の初期)は承継させない。
-                # conn が無い実行では形式的有効性のみで承継する。その事実は
+                # 承継の起点は「first-parent 上・件名がマージ形式・親2・PR 実在・トレーラ有効・
+                # reviewed があればその祖先」に限る。トレーラの無い PR マージ(#56 等の初期)は
+                # 承継させない。conn が無い実行では形式的有効性のみで承継する。その事実は
                 # decision_verified=False として持ち、報告 notes で件数を開示する。
                 inherited.append(
                     {
@@ -514,14 +910,19 @@ def check_protected_commits(
                         "subject": _git(repo, "log", "-1", "--format=%s", sha).strip(),
                         "files": touched,
                         "merge": merge[:12],
-                        "merge_subject": m_subject,
+                        "merge_subject": origin.subject,
                         "decision_verified": conn is not None,
+                        # v1(reviewed 無し)の承継は移行期の経過措置。件数を notes で開示する。
+                        "reviewed_scoped": bool(origin.reviewed),
+                        "reviewed": origin.reviewed[0] if origin.reviewed else None,
                     }
                 )
                 continue
 
         if trailer_reason is not None:
             reason = trailer_reason
+        elif origin_reason is not None:
+            reason = origin_reason
         elif is_merge:
             # マージ自身の差分は PR 件名では承認と見なさない(レビューはブランチ内容に対する
             # もので、マージ時に持ち込まれた差分をカバーしない)。トレーラ必須。
@@ -717,12 +1118,13 @@ def check_direct_pushes(
     repo_path: str | Path,
     *,
     since_commit: str | None = PR_RULE_BASELINE_COMMIT,
+    pr_verifier: PRVerifier | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """A-18-4: main への直 push・非 PR マージの一覧と、検査した first-parent コミット数を返す。
 
     基準コミット(全変更 PR 化ルール採用日の main HEAD)以降の first-parent 履歴で、
-    (a) マージコミットでないコミット = 直 push、(b) 件名が PR マージ形式
-    (``_PR_MERGE_RE``、A-18-1 と同一の検査)でないマージコミット = 非 PR マージ、
+    (a) マージコミットでないコミット = 直 push、(b) 件名が PR マージ形式でない、または
+    ``pr_verifier`` の照合で **PR が実在しない/未マージ**のマージコミット = 非 PR マージ、
     を違反とする。保護領域か否かは問わず、例外も設けない(``Approved:`` トレーラ付き
     直 push も違反 — 全 PR 化ルールに例外なし)。基準コミット以前は
     ``rev-list since..HEAD`` により対象外。
@@ -736,9 +1138,13 @@ def check_direct_pushes(
     for sha in fp_commits:
         parents = _git(repo, "log", "-1", "--format=%P", sha).split()
         if len(parents) > 1:
-            if _PR_MERGE_RE.match(_git(repo, "log", "-1", "--format=%s", sha)):
-                continue  # PR マージコミット(件名は自己申告 — 開示のとおり API 未照合)
+            subject = _git(repo, "log", "-1", "--format=%s", sha)
+            is_pr, not_pr_detail = verified_pr_merge(subject, pr_verifier)
+            if is_pr:
+                continue  # PR マージコミット(API 不達なら件名を信用する fail-open)
             reason = "main への非 PR マージ(全変更 PR 化ルール違反 — 例外なし)"
+            if not_pr_detail is not None:
+                reason = f"PR マージ件名だが GitHub と一致しない: {not_pr_detail}"
             # マージが main に持ち込んだ内容 = first parent との差分を列挙する。
             diff_args = (
                 "diff-tree", "--no-commit-id", "--name-only", "-r", "-m", "--first-parent", sha
@@ -884,20 +1290,30 @@ def run_a18(
     pr_since_commit: str | None = PR_RULE_BASELINE_COMMIT,
     version_pairs: tuple[tuple[str, str], ...] = VERSION_PAIRS,
     conn: Any | None = None,
+    verify_prs: bool = True,
+    pr_verifier: PRVerifier | None = None,
 ) -> dict[str, Any]:
     """A-18 の4検査を実行して構造化 dict を返す(git と設定ファイルのみの検査)。
 
     ``conn`` を渡すと A-18-1 が ``Approved:`` トレーラの参照先(``governance.decisions``
     の ID 形式)を ``governance.current_decisions`` と突合する(read-only)。渡さない
     場合は従来どおりトレーラの存在検査までで、その旨を notes に載せる。
+
+    ``verify_prs``(既定 True)で PR 件名・トレーラ PR URL の実在照合(:class:`PRVerifier`)を
+    行う。API に到達できない実行は従来挙動へ縮退し、縮退の件数と理由を notes に開示する。
+    ネットワークに触れたくない実行(テスト等)は ``verify_prs=False`` を渡す。
     """
+    if pr_verifier is None and verify_prs:
+        pr_verifier = PRVerifier(repo_path=repo_path)
     gov = load_governance(repo_path, governance_path)
     found, inherited, checked, trailer_findings = check_protected_commits(
-        repo_path, gov, since_commit=since_commit, conn=conn
+        repo_path, gov, since_commit=since_commit, conn=conn, pr_verifier=pr_verifier
     )
     # 既知違反の受容: violations からは外すが捨てない(報告で必ず別枠表示する)。
     violations, acknowledged, ack_notes = partition_acknowledged(found, gov)
-    direct_pushes, fp_checked = check_direct_pushes(repo_path, since_commit=pr_since_commit)
+    direct_pushes, fp_checked = check_direct_pushes(
+        repo_path, since_commit=pr_since_commit, pr_verifier=pr_verifier
+    )
     unnotified: list[dict[str, Any]] = []
     untracked_deemed = 0
     resolution_bypass: dict[str, Any] | None = None
@@ -917,6 +1333,7 @@ def run_a18(
         "checked_first_parent": fp_checked,
         "direct_pushes": direct_pushes,
         "decision_refs_verified": conn is not None,
+        "prs_verified": pr_verifier is not None,
         "trailer_findings": trailer_findings,
         "unnotified_deemed": unnotified,
         "resolution_bypass": resolution_bypass,
@@ -926,6 +1343,10 @@ def run_a18(
             *_staleness_note(repo_path),
             *ack_notes,
             *_unverified_inheritance_notes(inherited),
+            *_v1_inheritance_notes(inherited),
+            *(pr_verifier.disclosures() if pr_verifier is not None else [
+                "GitHub PR 実在照合は無効化されている(verify_prs=False)— 件名は自己申告のまま"
+            ]),
             *([] if conn is not None else [
                 "DB 接続なしの実行のため Approved トレーラの承認記録(否認済みか)と"
                 "みなし承認の通知配送(A-18-5)・決議の批判経由(A-18-6)は未照合"
@@ -948,6 +1369,22 @@ def _unverified_inheritance_notes(inherited: list[dict[str, Any]]) -> list[str]:
     return [
         f"decisions 照合なしの承継 {n} 件(DB 接続が無い実行のため、起点 PR のトレーラは"
         "形式的有効性のみで判定した — 否認済みかどうかは未照合)"
+    ]
+
+
+def _v1_inheritance_notes(inherited: list[dict[str, Any]]) -> list[str]:
+    """v1 様式(``reviewed`` 無し)で承継した件数を開示する(移行期の可視化)。
+
+    v1 の承継は「PR マージ時点のブランチ全体」に及ぶため、独立審査の後に積まれたコミットも
+    同じトレーラで承認扱いになりうる(重大-2)。v2(``reviewed=<sha40>``)への移行が
+    どこまで進んでいるかを毎週の報告で見えるようにする。
+    """
+    n = sum(1 for i in inherited if not i.get("reviewed_scoped"))
+    if not n:
+        return []
+    return [
+        f"reviewed 無し(様式 v1)の承継 {n} 件 — 承継範囲が PR マージ時点のブランチ全体に"
+        "及ぶ経過措置。以後の保護領域 PR は Approved: <URL> reviewed=<sha40> を推奨"
     ]
 
 
@@ -1024,7 +1461,14 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
             shown = ", ".join(paths[:5])
             if len(paths) > 5:
                 shown += f" ほか {len(paths) - 5} 件"
-            inh_lines.append(f"- {m}: {len(items)} コミット({shown})")
+            # 承継範囲(reviewed 限定か v1 のブランチ全体か)も出す。v1 の緑は
+            # 「審査後 push を含みうる」意味であり、v2 の緑と同じに見せない(重大-2)。
+            scope = (
+                "reviewed 限定"
+                if all(i.get("reviewed_scoped") for i in items)
+                else "様式 v1(範囲=マージ時点のブランチ全体)"
+            )
+            inh_lines.append(f"- {m}: {len(items)} コミット / {scope}({shown})")
         fields.append(
             {
                 "name": f"PR 承継で承認: {len(inherited)} コミット(起点 {len(by_merge)} PR)",
@@ -1186,6 +1630,7 @@ def run_and_report(
     always_report: bool = False,
     since_commit: str | None = RATIFICATION_COMMIT,
     pr_since_commit: str | None = PR_RULE_BASELINE_COMMIT,
+    verify_prs: bool = True,
 ) -> dict[str, Any]:
     """A-18 を実行し、所見があれば(または ``always_report``)#運営 へ enqueue する。
 
@@ -1198,7 +1643,12 @@ def run_and_report(
     まとめることで、検査時点と報告時点で承認状態が食い違う窓も狭くなる。
     """
     if dry_run:
-        result = run_a18(repo_path, since_commit=since_commit, pr_since_commit=pr_since_commit)
+        result = run_a18(
+            repo_path,
+            since_commit=since_commit,
+            pr_since_commit=pr_since_commit,
+            verify_prs=verify_prs,
+        )
         log.info(
             "[DRY_RUN] A-18 結果: violations=%d inherited=%d acknowledged=%d mismatches=%d "
             "declarations=%d direct_pushes=%d(enqueue %s)",
@@ -1217,7 +1667,11 @@ def run_and_report(
     conn = connect()
     try:
         result = run_a18(
-            repo_path, since_commit=since_commit, pr_since_commit=pr_since_commit, conn=conn
+            repo_path,
+            since_commit=since_commit,
+            pr_since_commit=pr_since_commit,
+            conn=conn,
+            verify_prs=verify_prs,
         )
         if has_findings(result) or always_report:
             oid = enqueue_alert(conn, result, run.run_id)
@@ -1244,10 +1698,17 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
     parser.add_argument(
         "--always-report", action="store_true", help="所見が無くても #運営 へ結果を投入する"
     )
+    parser.add_argument(
+        "--no-pr-verify", action="store_true",
+        help="GitHub API による PR 実在照合を行わない(オフライン実行)",
+    )
     args = parser.parse_args(argv)
 
     result = run_and_report(
-        args.repo, dry_run=args.dry_run, always_report=args.always_report
+        args.repo,
+        dry_run=args.dry_run,
+        always_report=args.always_report,
+        verify_prs=not args.no_pr_verify,
     )
     for v in result["violations"]:
         print(f"[違反] {v['commit']} {v['subject']}: {v['files']}", file=sys.stderr)

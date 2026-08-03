@@ -12,6 +12,7 @@ outbox 投入はテスト専用 DB で検証する。全変更 PR 化(A-18-4)は
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -216,11 +217,15 @@ def test_evil_merge_with_trailer_is_ok(repo):
 APPROVED = "Approved: https://github.com/x/y/pull/9"
 
 
-def _merge_pr_with_evil_merge(r: Path, merge_message: str) -> tuple[str, str]:
+def _merge_pr_with_evil_merge(
+    r: Path, merge_message: str | Callable[[str], str]
+) -> tuple[str, str]:
     """ブランチ内で「origin/main 統合の evil merge」を作り、PR マージで main へ取り込む。
 
     実運用の worktree フロー(ブランチ作業中に origin/main を統合してコンフリクトを解消する)
     を再現する。戻り値は (ブランチ内 evil merge の sha, main 側 PR マージの sha)。
+    ``merge_message`` が callable なら evil merge の sha を渡して件名を組み立てる
+    (様式 v2 の ``reviewed=<sha40>`` を書くため)。
     """
     base = _git(r, "rev-parse", "HEAD").strip()
     _git(r, "checkout", "-q", "-b", "prfeature")
@@ -238,7 +243,8 @@ def _merge_pr_with_evil_merge(r: Path, merge_message: str) -> tuple[str, str]:
     _git(r, "commit", "-m", "merge: origin/main をブランチへ統合(コンフリクト解消)")
     evil = _git(r, "rev-parse", "HEAD").strip()
     _git(r, "checkout", "-q", "main")
-    _git(r, "merge", "--no-ff", "-q", "prfeature", "-m", merge_message)
+    message = merge_message(evil) if callable(merge_message) else merge_message
+    _git(r, "merge", "--no-ff", "-q", "prfeature", "-m", message)
     assert base  # 起点の記録(可読性のため)
     return evil, _git(r, "rev-parse", "HEAD").strip()
 
@@ -350,6 +356,342 @@ def test_plain_branch_commits_are_not_counted_as_inherited(repo):
     _merge_pr(r, "f1", "src/prot/ks.py", "x = 1\n", 12)
     violations, inherited, _checked, _findings = _run_a181_full(r, since)
     assert violations == [] and inherited == []
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Approved トレーラ様式 v2(reviewed=<sha40> — 独立役員審査 2026-08-04 重大-2)
+#
+# 承継は「マージ時点のブランチ全体」に及ぶため、独立審査・#承認 通知の**後**に積んだ
+# コミットも同じトレーラで承認扱いになる(審査後 push の吸収)。v2 の reviewed は審査対象を
+# 固定し、承継をその祖先に限る。様式不備は「制限なし」ではなく「起点にしない」(fail-safe)。
+# ────────────────────────────────────────────────────────────────────────────
+def _pr_with_post_review_commit(r: Path, trailer_for) -> tuple[str, str]:
+    """審査対象コミットと『審査後に積んだコミット』を持つ PR を main へマージする。
+
+    戻り値は (審査対象コミット, 審査後コミット)。``trailer_for`` は審査対象 sha を受け取り
+    マージ件名の本文(トレーラ行)を返す。
+    """
+    _git(r, "checkout", "-q", "-b", "prfeature")
+    reviewed = _commit(r, "docs/protected.md", "reviewed\n", "docs: 審査を受けた保護領域変更")
+    after = _commit(
+        r, "src/prot/ks.py", "LIMIT = 999999\n", "feat: 審査後に積んだ Kill Switch 改変"
+    )
+    _git(r, "checkout", "-q", "main")
+    _git(
+        r, "merge", "--no-ff", "-q", "prfeature",
+        "-m", f"Merge pull request #9 from k/prfeature\n\n{trailer_for(reviewed)}",
+    )
+    return reviewed, after
+
+
+def test_reviewed_trailer_blocks_post_review_commits(repo):
+    """**重大-2**: reviewed 付きなら、審査後に積まれたコミットは承継されず違反として出る。"""
+    r, since = repo
+    reviewed, after = _pr_with_post_review_commit(
+        r, lambda sha: f"{APPROVED} reviewed={sha}"
+    )
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
+    assert [v["commit"] for v in violations] == [after[:12]]
+    assert "reviewed" in violations[0]["reason"] and "審査後" in violations[0]["reason"]
+    # 審査対象コミット自身は従来どおり PR 経由(附則 b)で承認される。
+    assert reviewed[:12] not in [v["commit"] for v in violations]
+    assert inherited == []
+
+
+def test_v1_trailer_still_covers_post_review_commits(repo):
+    """v1(reviewed 無し)は経過措置として従来どおり有効 — 審査後 push も吸収する。"""
+    r, since = repo
+    _reviewed, after = _pr_with_post_review_commit(r, lambda _sha: APPROVED)
+    violations, _inherited, _checked, _findings = _run_a181_full(r, since)
+    assert violations == []
+    assert after  # 承継(附則 b)で通っていることの対比
+
+
+def test_reviewed_scoped_inheritance_is_marked(repo):
+    """reviewed が evil merge を含むなら承継は成立し、reviewed 限定として記録される。"""
+    r, since = repo
+    evil, _merge = _merge_pr_with_evil_merge(
+        r, lambda ev: f"Merge pull request #9 from k/prfeature\n\n{APPROVED} reviewed={ev}"
+    )
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
+    assert violations == []
+    assert [i["commit"] for i in inherited] == [evil[:12]]
+    assert inherited[0]["reviewed_scoped"] is True and inherited[0]["reviewed"] == evil
+
+
+def test_reviewed_before_the_commit_blocks_inheritance(repo):
+    """reviewed が evil merge の**前**を指すなら、その evil merge は承継されない。"""
+    r, since = repo
+    evil, _merge = _merge_pr_with_evil_merge(
+        r,
+        lambda ev: "Merge pull request #9 from k/prfeature\n\n"
+        f"{APPROVED} reviewed={_git(r, 'rev-parse', ev + '^1').strip()}",
+    )
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
+    assert inherited == []
+    assert [v["commit"] for v in violations] == [evil[:12]]
+    assert "審査後" in violations[0]["reason"]
+
+
+def test_malformed_reviewed_is_not_an_inheritance_origin(repo):
+    """40 桁 hex でない reviewed は様式不備 — 承継の起点にしない(fail-safe)。
+
+    不備を「制限なし(= v1)」に読み替えると、``reviewed=x`` と書くだけで v2 の制限を外せる
+    抜け道になる。承継((c))だけでなく附則(b)も止め、PR 配下は全て検査対象に戻す。
+    """
+    r, since = repo
+    evil, _merge = _merge_pr_with_evil_merge(
+        r, f"Merge pull request #9 from k/prfeature\n\n{APPROVED} reviewed=abc123"
+    )
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
+    assert inherited == []
+    assert evil[:12] in [v["commit"] for v in violations]
+    assert all("様式不備" in v["reason"] for v in violations)
+    assert len(violations) == 2  # ブランチ内の通常コミットも(b)で救済されない
+
+
+def test_unknown_reviewed_sha_is_not_an_inheritance_origin(repo):
+    """リポジトリに存在しない reviewed は祖先判定ができない — 起点にしない(fail-safe)。"""
+    r, since = repo
+    evil, _merge = _merge_pr_with_evil_merge(
+        r, f"Merge pull request #9 from k/prfeature\n\n{APPROVED} reviewed={'0' * 40}"
+    )
+    violations, inherited, _checked, _findings = _run_a181_full(r, since)
+    assert inherited == []
+    assert evil[:12] in [v["commit"] for v in violations]
+    assert all("存在せず" in v["reason"] for v in violations)
+
+
+def test_v1_inheritance_count_is_disclosed(repo):
+    """v1 の承継は違反にしないが、件数を notes と embed に必ず開示する(移行期の可視化)。"""
+    r, since = repo
+    _evil, _merge = _merge_pr_with_evil_merge(
+        r, f"Merge pull request #9 from k/prfeature\n\n{APPROVED}"
+    )
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since, verify_prs=False)
+    assert result["inherited"][0]["reviewed_scoped"] is False
+    assert any("reviewed 無し(様式 v1)の承継 1 件" in n for n in result["notes"])
+    field = next(
+        f for f in a18.build_alert_embed(result)["fields"] if f["name"].startswith("PR 承継で承認")
+    )
+    assert "様式 v1" in field["value"]
+
+
+def test_approval_trailers_parses_v2_attributes():
+    """v2 は参照+``key=value`` の並び。参照の読み口(v1)は変わらない。"""
+    sha = "a" * 40
+    msg = (
+        "docs: 保護領域変更\n\n"
+        f"Approved: https://github.com/k/y/pull/9 reviewed={sha} mode=deemed\n"
+    )
+    lines = a18.approval_trailers(msg)
+    assert len(lines) == 1
+    assert lines[0].ref == "https://github.com/k/y/pull/9"
+    assert lines[0].attrs == {"reviewed": sha, "mode": "deemed"}
+    assert a18.approval_trailer_refs(msg) == ["https://github.com/k/y/pull/9"]
+    assert a18.reviewed_shas(msg) == ((sha,), None)
+
+
+def test_reviewed_shas_rejects_short_sha():
+    shas, problem = a18.reviewed_shas("docs: x\n\nApproved: https://x/1 reviewed=abc123\n")
+    assert shas == () and "40 桁" in problem
+    # reviewed が無いトレーラは v1 として扱う(不備ではない)。
+    assert a18.reviewed_shas("docs: x\n\nApproved: https://x/1\n") == ((), None)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# GitHub PR 実在照合(独立役員審査 2026-08-04 重大-1)
+#
+# 件名もトレーラ URL も自己申告であり、実在しない PR 番号を書けば承認を装える。承継は
+# その偽造1件の爆風半径をブランチ全体へ拡大するため、起点の実在照合が前提条件になる。
+# テストは api_get を注入してネットワークに触れない。
+# ────────────────────────────────────────────────────────────────────────────
+SLUG = "k/y"
+MERGED_PR = {"merged_at": "2026-08-04T00:00:00Z"}
+
+
+def _fake_api(prs: dict[int, dict], *, repo_ok: bool = True, error: str | None = None):
+    """``repos/<slug>`` と ``repos/<slug>/pulls/<N>`` に応答する擬似 API。"""
+    def api_get(path: str) -> tuple[str, object]:
+        if error is not None:
+            return "error", error
+        if "/pulls/" not in path:
+            return ("ok", {"full_name": SLUG}) if repo_ok else ("not_found", None)
+        number = int(path.rsplit("/", 1)[1])
+        payload = prs.get(number)
+        return ("ok", payload) if payload is not None else ("not_found", None)
+    return api_get
+
+
+def _verifier(prs: dict[int, dict], **kwargs) -> a18.PRVerifier:
+    return a18.PRVerifier(slug=SLUG, api_get=_fake_api(prs, **kwargs))
+
+
+def _run_a181_pr(r: Path, since: str | None, verifier: a18.PRVerifier):
+    gov = a18.load_governance(r)
+    return a18.check_protected_commits(r, gov, since_commit=since, pr_verifier=verifier)
+
+
+def test_nonexistent_pr_cannot_be_an_inheritance_origin(repo):
+    """**重大-1 の PoC**: 実在しない PR 番号の件名+架空 URL のトレーラでは承継しない。"""
+    r, since = repo
+    evil, _merge = _merge_pr_with_evil_merge(
+        r,
+        "Merge pull request #999999 from k/prfeature\n\n"
+        f"Approved: https://github.com/{SLUG}/pull/999999",
+    )
+    violations, inherited, _checked, _findings = _run_a181_pr(r, since, _verifier({}))
+    assert inherited == []
+    assert evil[:12] in [v["commit"] for v in violations]
+    assert any("存在しない" in v["reason"] for v in violations)
+
+
+def test_existing_pr_still_inherits(repo):
+    """実在しマージ済みの PR は従来どおり承継の起点になる(照合が正常系を壊さない)。"""
+    r, since = repo
+    evil, _merge = _merge_pr_with_evil_merge(
+        r,
+        f"Merge pull request #9 from k/prfeature\n\nApproved: https://github.com/{SLUG}/pull/9",
+    )
+    violations, inherited, _checked, _findings = _run_a181_pr(r, since, _verifier({9: MERGED_PR}))
+    assert violations == []
+    assert [i["commit"] for i in inherited] == [evil[:12]]
+
+
+def test_unmerged_pr_is_not_an_inheritance_origin(repo):
+    """PR が実在しても未マージなら起点にしない(番号だけ借りた件名を弾く)。"""
+    r, since = repo
+    evil, _merge = _merge_pr_with_evil_merge(
+        r,
+        f"Merge pull request #9 from k/prfeature\n\nApproved: https://github.com/{SLUG}/pull/9",
+    )
+    verifier = _verifier({9: {"merged_at": None}})
+    violations, inherited, _checked, _findings = _run_a181_pr(r, since, verifier)
+    assert inherited == []
+    assert any("マージされていない" in v["reason"] for v in violations)
+
+
+def test_nonexistent_pr_url_in_trailer_is_violation(repo):
+    """トレーラの PR URL が実在しなければ、DB 接続が無くても承認と見なさない。"""
+    r, since = repo
+    sha = _commit_with_trailer(r, f"https://github.com/{SLUG}/pull/999999")
+    violations, _inherited, _checked, _findings = _run_a181_pr(r, since, _verifier({}))
+    assert [v["commit"] for v in violations] == [sha[:12]]
+    assert "存在しない" in violations[0]["reason"]
+
+
+def test_api_error_fails_open_and_is_disclosed(repo):
+    """API 不達では従来挙動(件名を信用)へ縮退し、縮退の件数と理由を notes に出す。"""
+    r, since = repo
+    evil, _merge = _merge_pr_with_evil_merge(
+        r,
+        f"Merge pull request #9 from k/prfeature\n\nApproved: https://github.com/{SLUG}/pull/9",
+    )
+    verifier = _verifier({}, error="GitHub API 不達: URLError")
+    result = a18.run_a18(
+        r, since_commit=since, pr_since_commit=since, pr_verifier=verifier
+    )
+    assert result["violations"] == []
+    assert [i["commit"] for i in result["inherited"]] == [evil[:12]]
+    assert any("fail-open した参照" in n for n in result["notes"])
+
+
+def test_unreachable_repo_does_not_turn_404_into_violations(repo):
+    """私有リポジトリ+認証不備で全件 404 になる状況を「不在」と読まない(fail-open)。
+
+    この防御が無いと、トークンを失った週に全 PR が「実在しない」と判定され、監査が違反を
+    大量生成して信用を失う(赤の恒常化 = 05-governance §6-5 の形骸化)。
+    """
+    r, since = repo
+    evil, _merge = _merge_pr_with_evil_merge(
+        r,
+        f"Merge pull request #9 from k/prfeature\n\nApproved: https://github.com/{SLUG}/pull/9",
+    )
+    verifier = _verifier({}, repo_ok=False)
+    violations, inherited, _checked, _findings = _run_a181_pr(r, since, verifier)
+    assert violations == []
+    assert [i["commit"] for i in inherited] == [evil[:12]]
+    assert any("アクセスできない" in d for d in verifier.disclosures())
+
+
+def test_a18_4_fake_pr_merge_subject_is_violation(repo):
+    """A-18-4 も同じ照合を通す(件名だけの偽 PR マージを非 PR マージとして検出)。"""
+    r, since = repo
+    _git(r, "checkout", "-q", "-b", "f1")
+    _commit(r, "README.md", "a\n", "feat: ブランチ作業")
+    _git(r, "checkout", "-q", "main")
+    _git(r, "merge", "--no-ff", "-q", "f1", "-m", "Merge pull request #999999 from k/f1")
+    violations, checked = a18.check_direct_pushes(
+        r, since_commit=since, pr_verifier=_verifier({})
+    )
+    assert checked == 1 and len(violations) == 1
+    assert "存在しない" in violations[0]["reason"]
+    # 実在すれば従来どおり違反にしない。
+    ok, _checked = a18.check_direct_pushes(
+        r, since_commit=since, pr_verifier=_verifier({999999: MERGED_PR})
+    )
+    assert ok == []
+
+
+def test_pr_verifier_caches_and_counts():
+    """同じ PR 番号は1回しか問い合わせない(週次で API を叩きすぎない)。"""
+    calls: list[str] = []
+
+    def api_get(path: str) -> tuple[str, object]:
+        calls.append(path)
+        return ("ok", MERGED_PR) if "/pulls/" in path else ("ok", {"full_name": SLUG})
+
+    verifier = a18.PRVerifier(slug=SLUG, api_get=api_get)
+    assert verifier.check(9) == ("ok", None)
+    assert verifier.check(9) == ("ok", None)
+    assert calls == [f"repos/{SLUG}", f"repos/{SLUG}/pulls/9"]
+    assert any("1 件を実在+マージ済み" in d for d in verifier.disclosures())
+
+
+def test_pr_verifier_scope_and_disabled_states():
+    """他リポジトリの URL・PR でない URL は照合対象外。無効化時は unverifiable。"""
+    verifier = _verifier({9: MERGED_PR})
+    assert verifier.check_ref("https://github.com/other/repo/pull/9") == ("skip", None)
+    assert verifier.check_ref("https://github.com/k/y/issues/9") == ("skip", None)
+    assert verifier.check_ref(f"https://github.com/{SLUG}/pull/9") == ("ok", None)
+    disabled = a18.PRVerifier(slug=SLUG, api_get=_fake_api({}), enabled=False)
+    assert disabled.check(9)[0] == "unverifiable"
+    # slug が取れない(origin が GitHub でない)ときも fail-open。
+    no_slug = a18.PRVerifier(slug=None, api_get=_fake_api({}))
+    assert no_slug.check(9)[0] == "unverifiable"
+    assert no_slug.check_ref(f"https://github.com/{SLUG}/pull/9") == ("skip", None)
+
+
+def test_origin_slug_from_remote(repo):
+    """origin remote から owner/repo を取り出す(GitHub 以外は None)。"""
+    r, _since = repo
+    assert a18.origin_slug(r) is None  # remote 未設定
+    _git(r, "remote", "add", "origin", "https://github.com/klonyapin/ryza.git")
+    assert a18.origin_slug(r) == "klonyapin/ryza"
+    _git(r, "remote", "set-url", "origin", "git@github.com:klonyapin/ryza.git")
+    assert a18.origin_slug(r) == "klonyapin/ryza"
+    _git(r, "remote", "set-url", "origin", "https://example.com/x/y.git")
+    assert a18.origin_slug(r) is None
+
+
+def test_pr_verification_is_enabled_by_default():
+    """既定で照合を行う(統制を「既定で無効」に静かに戻せないことの固定)。
+
+    テストは verify_prs=False を明示して API に触れないが、その運用が既定になると本番でも
+    照合が止まる。既定値そのものを不変条件として固定する。
+    """
+    import inspect
+
+    assert inspect.signature(a18.run_a18).parameters["verify_prs"].default is True
+    assert inspect.signature(a18.run_and_report).parameters["verify_prs"].default is True
+
+
+def test_run_a18_without_pr_verification_is_disclosed(repo):
+    """照合を止めた実行は「無効化されている」ことを notes に必ず出す(沈黙を作らない)。"""
+    r, since = repo
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since, verify_prs=False)
+    assert result["prs_verified"] is False
+    assert any("GitHub PR 実在照合は無効化されている" in n for n in result["notes"])
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -524,7 +866,9 @@ def test_acknowledgement_registration_requires_approval():
 def test_real_repo_acknowledged_findings_are_matched():
     """実リポジトリの受容エントリが実在の違反に一致している(陳腐化していない)。"""
     root = Path(__file__).resolve().parents[2]
-    result = a18.run_a18(root)
+    # verify_prs=False: テストは GitHub API に触れない(ネットワーク・トークンに依存させない)。
+    # PR 実在照合そのものは注入した api_get で下の専用テスト群が検証する。
+    result = a18.run_a18(root, verify_prs=False)
     assert len(result["acknowledged"]) == len(_real_governance()["acknowledged_findings"])
     assert not any("acknowledged_findings のエントリが一致する違反を持たない" in n
                    for n in result["notes"])
