@@ -31,8 +31,9 @@ from ryza.db.conn import connect
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = REPO_ROOT / "ops" / "deploy-dashboard.sh"
 
-# 役員室ロールが書けてよい ops の表(0020)。ゲート 4.5/4.6 の期待値。
-BOARDROOM_OPS_TABLES = ("ops.org_icon_overrides", "ops.org_icon_override_log")
+# 役員室ロールが権限を持ってよい ops の表(0020 の 2 表 + 0024 の開発室)。
+# ゲート 4.5/4.6 の期待値であり、増減させるときはゲート側と同時に直すこと。
+BOARDROOM_OPS_TABLES = ("ops.org_icon_overrides", "ops.org_icon_override_log", "ops.dev_chat")
 
 
 def generate_role_sql(dash_role: str, br_role: str) -> str:
@@ -78,8 +79,9 @@ def extract_gate_statements(sql: str) -> list[str]:
 def test_generated_sql_contains_gate_with_all_assertions() -> None:
     sql = generate_role_sql("ryza_dashboard", "ryza_boardroom")
     gate = extract_gate_block(sql)
-    # 8つの例外(4.1〜4.7 の各項目。4.5 は「対象表の実在」と「権限表数」の2本)
-    assert gate.count("RAISE EXCEPTION") == 8
+    # 11 本の例外(4.1〜4.9。4.5 は「対象表の実在」と「権限表数」、4.9 は「列数」と
+    # 「想定外の列」の各2本)
+    assert gate.count("RAISE EXCEPTION") == 11
     for marker in (
         "ロールが揃っていない",
         "ロール属性が想定外",
@@ -89,6 +91,9 @@ def test_generated_sql_contains_gate_with_all_assertions() -> None:
         "ops 権限表数が想定外",
         "想定外テーブルに権限を持つ",
         "追記オンリー違反",
+        "表レベルの非 SELECT 権限がある",   # 4.8 開発室(0024 重大-1)
+        "書込可能列数が想定外",             # 4.9 列レベル INSERT の限定
+        "想定外の列権限がある",
     ):
         assert marker in gate, marker
 
@@ -97,8 +102,11 @@ def test_gate_reads_the_combined_privilege_view() -> None:
     """各検査が role_table_grants 直参照でなく列レベル併用のビューを見ていること(C-3)。"""
     sql = generate_role_sql("ryza_dashboard", "ryza_boardroom")
     gate = extract_gate_block(sql)
-    assert "information_schema.role_table_grants" not in gate
+    # 表・列を束ねた view を見るのは 4.3〜4.7 の 5 検査。4.8/4.9 は「表レベルか
+    # 列レベルか」を区別することが目的なので、専用の view を直接引く。
     assert gate.count("FROM ryza_gate_grants") == 5
+    assert gate.count("FROM information_schema.role_table_grants") == 1  # 4.8
+    assert gate.count("FROM information_schema.role_column_grants") == 2  # 4.9
     view = extract_gate_statements(sql)[0]
     assert "information_schema.role_table_grants" in view
     assert "information_schema.column_privileges" in view
@@ -151,13 +159,19 @@ def _create_boardroom(conn: psycopg.Connection, br: str, *, attrs: str = "LOGIN 
     conn.execute(f'CREATE ROLE "{br}" {attrs}')
 
 
-def _grant_expected(conn: psycopg.Connection, dash: str, br: str) -> None:
-    """本番の GRANT 構成を再現する(読取専用+役員室の ops 2表)。"""
+def _grant_readonly(conn: psycopg.Connection, dash: str) -> None:
     conn.execute(f'GRANT SELECT ON ALL TABLES IN SCHEMA ops TO "{dash}"')
     # 秘密テーブルは一括 GRANT から明示的に外す(deploy-dashboard.sh の REVOKE と同じ)
     conn.execute(f'REVOKE ALL ON ops.discord_webhooks FROM "{dash}"')
+
+
+def _grant_expected(conn: psycopg.Connection, dash: str, br: str) -> None:
+    """本番の GRANT 構成を再現する(読取専用+役員室の ops 3表)。"""
+    _grant_readonly(conn, dash)
     conn.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON ops.org_icon_overrides TO "{br}"')
     conn.execute(f'GRANT INSERT ON ops.org_icon_override_log TO "{br}"')
+    # 開発室は INSERT を列レベル (sender, body) に限定する(0024 独立役員審査 重大-1)
+    conn.execute(f'GRANT SELECT, INSERT (sender, body) ON ops.dev_chat TO "{br}"')
 
 
 def _run_gate(conn: psycopg.Connection, dash: str, br: str) -> None:
@@ -229,8 +243,7 @@ def test_gate_aborts_when_boardroom_grants_were_skipped(gate_env) -> None:
     """to_regclass ガード付き GRANT が黙ってスキップされた状態を検出する(0020 C-5)。"""
     conn, dash, br = gate_env
     _create_boardroom(conn, br)
-    conn.execute(f'GRANT SELECT ON ALL TABLES IN SCHEMA ops TO "{dash}"')
-    conn.execute(f'REVOKE ALL ON ops.discord_webhooks FROM "{dash}"')
+    _grant_readonly(conn, dash)
     with pytest.raises(errors.RaiseException, match="ops 権限表数が想定外"):
         _run_gate(conn, dash, br)
 
@@ -239,10 +252,10 @@ def test_gate_aborts_when_boardroom_reaches_unexpected_ops_table(gate_env) -> No
     """Kill Switch(ops.trading_state)への経路が出来ていないこと。"""
     conn, dash, br = gate_env
     _create_boardroom(conn, br)
-    conn.execute(f'GRANT SELECT ON ALL TABLES IN SCHEMA ops TO "{dash}"')
-    conn.execute(f'REVOKE ALL ON ops.discord_webhooks FROM "{dash}"')
-    # 表数は 2 のまま(4.5 を通過させ、4.6 の想定外テーブル検査を狙い撃ちする)
+    _grant_readonly(conn, dash)
+    # 表数は 3 のまま(4.5 を通過させ、4.6 の想定外テーブル検査を狙い撃ちする)
     conn.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON ops.org_icon_overrides TO "{br}"')
+    conn.execute(f'GRANT SELECT, INSERT (sender, body) ON ops.dev_chat TO "{br}"')
     conn.execute(f'GRANT SELECT ON ops.trading_state TO "{br}"')
     with pytest.raises(errors.RaiseException, match="想定外テーブルに権限を持つ"):
         _run_gate(conn, dash, br)
@@ -273,9 +286,9 @@ def test_gate_aborts_when_target_tables_are_missing(gate_env) -> None:
     _grant_expected(conn, dash, br)
     absent = f"ops.absent_{uuid.uuid4().hex[:8]}"
     stmts = [
-        s.replace("ops.org_icon_overrides", f"{absent}_a").replace(
-            "ops.org_icon_override_log", f"{absent}_b"
-        )
+        s.replace("ops.org_icon_override_log", f"{absent}_b")
+        .replace("ops.org_icon_overrides", f"{absent}_a")
+        .replace("ops.dev_chat", f"{absent}_c")
         for s in extract_gate_statements(generate_role_sql(dash, br))
     ]
     with pytest.raises(errors.RaiseException, match="役員室の書込先"):
@@ -311,10 +324,10 @@ def test_gate_aborts_on_column_level_grant_to_kill_switch(gate_env) -> None:
     """ops.trading_state への列 UPDATE(Kill Switch 状態の偽装経路)を検出する。"""
     conn, dash, br = gate_env
     _create_boardroom(conn, br)
-    conn.execute(f'GRANT SELECT ON ALL TABLES IN SCHEMA ops TO "{dash}"')
-    conn.execute(f'REVOKE ALL ON ops.discord_webhooks FROM "{dash}"')
-    # 権限表数は 2 のまま(4.5 を通過させ、4.6 の想定外テーブル検査を狙い撃ちする)
+    _grant_readonly(conn, dash)
+    # 権限表数は 3 のまま(4.5 を通過させ、4.6 の想定外テーブル検査を狙い撃ちする)
     conn.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON ops.org_icon_overrides TO "{br}"')
+    conn.execute(f'GRANT SELECT, INSERT (sender, body) ON ops.dev_chat TO "{br}"')
     conn.execute(f'GRANT UPDATE (state) ON ops.trading_state TO "{br}"')
     with pytest.raises(errors.RaiseException, match="想定外テーブルに権限を持つ"):
         _run_gate(conn, dash, br)
@@ -337,4 +350,57 @@ def test_gate_aborts_on_column_level_update_of_override_log(gate_env) -> None:
     _grant_expected(conn, dash, br)
     conn.execute(f'GRANT UPDATE (icon_url) ON ops.org_icon_override_log TO "{br}"')
     with pytest.raises(errors.RaiseException, match="追記オンリー違反"):
+        _run_gate(conn, dash, br)
+
+
+# ── 開発室 ops.dev_chat の列レベル限定(0024 独立役員審査 重大-1)────────────────
+
+
+def test_gate_aborts_on_table_level_insert_to_dev_chat(gate_env) -> None:
+    """表レベル INSERT は created_at の遡及・relayed_at の事前設定・inserted_by の詐称を許す。
+
+    0024 のガードトリガは BEFORE UPDATE OR DELETE で INSERT には発火しないため、
+    この入口を塞げるのは権限だけ。
+    """
+    conn, dash, br = gate_env
+    _create_boardroom(conn, br)
+    _grant_readonly(conn, dash)
+    conn.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON ops.org_icon_overrides TO "{br}"')
+    conn.execute(f'GRANT INSERT ON ops.org_icon_override_log TO "{br}"')
+    conn.execute(f'GRANT SELECT, INSERT ON ops.dev_chat TO "{br}"')  # 表レベル(想定外)
+    with pytest.raises(errors.RaiseException, match="表レベルの非 SELECT 権限がある"):
+        _run_gate(conn, dash, br)
+
+
+def test_gate_aborts_when_dev_chat_grant_was_skipped(gate_env) -> None:
+    """0024 未適用などで dev_chat の GRANT が落ちた状態を検出する。"""
+    conn, dash, br = gate_env
+    _create_boardroom(conn, br)
+    _grant_readonly(conn, dash)
+    conn.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON ops.org_icon_overrides TO "{br}"')
+    conn.execute(f'GRANT INSERT ON ops.org_icon_override_log TO "{br}"')
+    conn.execute(f'GRANT SELECT ON ops.dev_chat TO "{br}"')  # 書込列が 0
+    with pytest.raises(errors.RaiseException, match="書込可能列数が想定外"):
+        _run_gate(conn, dash, br)
+
+
+def test_gate_aborts_on_extra_column_grant_to_dev_chat(gate_env) -> None:
+    """証跡列(inserted_by)への INSERT を検出する — 書込主体の詐称経路。"""
+    conn, dash, br = gate_env
+    _create_boardroom(conn, br)
+    _grant_expected(conn, dash, br)
+    conn.execute(f'GRANT INSERT (inserted_by) ON ops.dev_chat TO "{br}"')
+    with pytest.raises(errors.RaiseException, match="書込可能列数が想定外"):
+        _run_gate(conn, dash, br)
+
+
+def test_gate_aborts_on_update_column_grant_to_dev_chat(gate_env) -> None:
+    """relayed_at は Bot だけが立てる状態。役員室ロールに UPDATE は与えない。"""
+    conn, dash, br = gate_env
+    _create_boardroom(conn, br)
+    _grant_expected(conn, dash, br)
+    conn.execute(f'REVOKE INSERT (body) ON ops.dev_chat FROM "{br}"')
+    conn.execute(f'GRANT UPDATE (relayed_at) ON ops.dev_chat TO "{br}"')
+    # 列数は 2(sender INSERT + relayed_at UPDATE)のまま想定外の組合せになる
+    with pytest.raises(errors.RaiseException, match="想定外の列権限がある"):
         _run_gate(conn, dash, br)
