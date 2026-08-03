@@ -383,6 +383,25 @@ def _render_flow_notice(
             f":red[スナップショット未生成の外部フロー({len(pending)} 件)]: {items}"
             " — まだ NAV 系列にもリターン測定にも入っていない(次の会計締めで反映)。"
         )
+    _render_recon_invalidated_notice(series)
+
+
+def _render_recon_invalidated_notice(series: list[dict[str, Any]]) -> None:
+    """再締めで照合結論が無効化された日の注記(独立審査 再-2 の裁定)。
+
+    遅延**約定**を取り込んだ日はその日の建玉が締め時点と違うため、``status`` が
+    confirmed でも照合済みを意味しない。画面上で confirmed に見えることが誤読の元に
+    なるので名指しする(リスク日次レポートは同じ日を urgent で上げる)。
+    """
+    days = [r["day"] for r in series if r.get("recon_invalidated")]
+    if not days:
+        return
+    st.caption(
+        f":red[照合結論が無効化された日({len(days)} 日)]: "
+        + " / ".join(str(d) for d in days[-8:])
+        + " — 再締めが遅延約定を取り込んだ日。status が confirmed でも"
+        "その日の照合は締め時点の建玉に対するもので、現在の帳簿とは一致しない。"
+    )
 
 
 def page_performance(conn) -> None:

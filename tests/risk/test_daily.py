@@ -262,6 +262,40 @@ def test_run_risk_daily_pending_same_day_material_is_urgent(conn, run_id):
     assert urgent is True
 
 
+def test_run_risk_daily_flags_recon_invalidated_days(conn, run_id):
+    """再締めで照合結論が無効化された日は breaks 相当で urgent(独立審査 再-2 の裁定)。"""
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_000_000})
+    with conn.cursor() as cur:  # ledger.closing.reclose_stale が立てたのと同じ状態
+        cur.execute(
+            """
+            UPDATE ledger.nav_snapshots
+            SET status = 'confirmed',
+                detail = detail || '{"recon_invalidated": true}'::jsonb
+            WHERE book_id = 'DEMO_FUND' AND snap_date = %s
+            """,
+            (date(2030, 1, 2),),
+        )
+
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF)
+    assert detail["DEMO_FUND"]["recon_invalidated"] is True
+    embed, urgent = _reports(conn)[0]
+    assert urgent is True  # 照合が無効な日を「照合済み NAV」として黙認しない
+    field = [f for f in embed["fields"] if f["name"] == "照合無効"]
+    assert field and "2030-01-02" in field[0]["value"]
+
+
+def test_run_risk_daily_without_recon_invalidation_is_quiet(conn, run_id):
+    """通常の系列では照合無効フィールドを出さない(毎日赤にしない)。"""
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_000_000})
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF)
+    assert detail["DEMO_FUND"]["recon_invalidated"] is False
+    embed, urgent = _reports(conn)[0]
+    assert urgent is False
+    assert not [f for f in embed["fields"] if f["name"] == "照合無効"]
+
+
 def test_build_risk_embed_pending_note_survives_note_truncation():
     """注記欄が 1024 字で切られても未反映フローの理由は消えない(重要-4)。"""
     state = SimpleNamespace(

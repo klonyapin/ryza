@@ -49,6 +49,7 @@ from ryza.risk.navflow import (
     PendingFlow,
     load_nav_flow_data,
     pending_flows_note,
+    recon_invalidated_note,
     urgent_pending,
 )
 from ryza.risk.state import upsert_limits_state
@@ -71,6 +72,9 @@ class NavSeries:
 
     points: list[engine.NavPoint]
     pending_flows: tuple[PendingFlow, ...] = ()
+    #: 再締めで照合結論が無効化された日の注記(``navflow.recon_invalidated_note``)。
+    #: breaks 相当で urgent に上げる — 「照合済み NAV」として扱わせないため(再-2 の裁定)。
+    recon_note: str | None = None
 
     def __bool__(self) -> bool:  # 「系列があるか」の判定は点の有無で行う
         return bool(self.points)
@@ -92,6 +96,7 @@ def load_nav_series(conn: psycopg.Connection, book_id: str) -> NavSeries:
             for p in data.points
         ],
         pending_flows=data.pending,
+        recon_note=recon_invalidated_note(data.points),
     )
 
 
@@ -224,12 +229,14 @@ def build_risk_embed(
     *,
     as_of: datetime,
     pending_note: str | None = None,
+    recon_note: str | None = None,
 ) -> dict[str, Any]:
     """日次リスクレポートの embed(00 §9「リスクレポート」— #運営 へ 1 通)。
 
-    未反映フローの注記(``pending_note``)は**独立フィールド**にする。注記欄は
-    1024 字で切り詰めるため、注記が多い日に「urgent だけ立って理由が消える」ことが
-    起きうる(独立審査 重要-4)。測定に入っていない入出金の存在は切ってはならない。
+    未反映フローの注記(``pending_note``)と照合無効の注記(``recon_note``)は
+    **独立フィールド**にする。注記欄は 1024 字で切り詰めるため、注記が多い日に
+    「urgent だけ立って理由が消える」ことが起きうる(独立審査 重要-4)。測定に入って
+    いない入出金と、照合が無効になった日の存在は切ってはならない。
     """
     hl = ips.hard_limits
     flagged = [name for name, on in effective.items() if on]
@@ -281,6 +288,10 @@ def build_risk_embed(
         fields.append(
             {"name": "未反映フロー", "value": f"【要確認】{pending_note}"[:1024], "inline": False}
         )
+    if recon_note:
+        fields.append(
+            {"name": "照合無効", "value": f"【要確認】{recon_note}"[:1024], "inline": False}
+        )
     if state.notes:
         fields.append(
             {"name": "注記", "value": "\n".join(state.notes)[:1024], "inline": False}
@@ -291,7 +302,7 @@ def build_risk_embed(
             f"IPS v{ips.version} §3.2 ハードリミットの日次測定"
             f"(データ {state.n_returns} 営業日 / 測定 as_of {state.as_of_day})。"
         ),
-        "color": COLOR_FLASH if flagged else COLOR_NORMAL,
+        "color": COLOR_FLASH if (flagged or recon_note) else COLOR_NORMAL,
         "fields": fields,
         "footer": {"text": DISCLAIMER},
     }
@@ -359,6 +370,8 @@ def run_risk_daily(
         returns = load_instrument_returns(
             conn, [p.instrument_id for p in positions], as_of=as_of
         )
+        if loaded.recon_note:
+            notes.insert(0, f"【要確認】{loaded.recon_note}")
         if pending_note:
             # 先頭に挿す(重要-4): notes は 1024 字で切られるため、測定に入っていない
             # 入出金の存在が末尾で消えないようにする。embed 側は独立フィールドで二重化。
@@ -369,21 +382,29 @@ def run_risk_daily(
             positions, state.nav, _load_cash(conn, book_id), ips
         )
         embed = build_risk_embed(
-            book_id, state, effective, usage, ips, as_of=as_of, pending_note=pending_note
+            book_id, state, effective, usage, ips, as_of=as_of,
+            pending_note=pending_note, recon_note=loaded.recon_note,
         )
         # urgent: フラグ到達に加え、保有ありの ES 測定空白(判定保留)と、材料性のある
-        # 未反映フロー(navflow.urgent_pending)も要確認として上げる。
+        # 未反映フロー(navflow.urgent_pending)、そして再締めで照合結論が無効化された日
+        # (breaks 相当 — 独立審査 再-2 の裁定)も要確認として上げる。
         oid = enqueue(
             conn,
             channel_ops,
             embed,
             run.run_id,
-            urgent=any(effective.values()) or state.es95.deferred or pending_urgent,
+            urgent=(
+                any(effective.values())
+                or state.es95.deferred
+                or pending_urgent
+                or loaded.recon_note is not None
+            ),
         )
         detail[book_id] = {
             "status": "measured",
             "pending_flows": len(loaded.pending_flows),
             "pending_urgent": pending_urgent,
+            "recon_invalidated": loaded.recon_note is not None,
             "drawdown": str(state.drawdown),
             "ewma_vol": state.ewma_vol_annual,
             "es95": state.es95.adopted,

@@ -266,8 +266,10 @@ def _sync_nav_daily_after_reclose(
     """
     for item in reclosed:
         item["nav_daily_missing"] = False
-        if not item["restated"]:
-            continue  # 水位だけ進んだ日は nav が動かないので nav_daily は無変更
+        # NAV が動いた日に加え、照合結論が無効化された日も書く — 後者は nav が同じでも
+        # 「confirmed だが照合無効」をリスク側へ伝える必要がある(独立審査 再-2 の裁定)。
+        if not (item["restated"] or item["recon_invalidated"]):
+            continue
         nav_date = item["date"]
         with conn.cursor() as cur:
             cur.execute(
@@ -297,6 +299,9 @@ def _sync_nav_daily_after_reclose(
         detail.update(
             reclose=history, positions_stale=True, restated=True, restated_by_run=run_id
         )
+        if item["recon_invalidated"]:
+            # 一度立ったら下ろさない(nav_snapshots 側と同じ扱い)。
+            detail["recon_invalidated"] = True
         with conn.cursor() as cur:
             cur.execute(
                 """

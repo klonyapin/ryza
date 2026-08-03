@@ -79,12 +79,13 @@ WITH flow AS (
     FROM attributed WHERE snap_date IS NOT NULL GROUP BY snap_date
 )
 SELECT 'snapshot' AS kind, s.snap_date AS day, s.nav, s.status,
-       coalesce(p.flow_eop, 0) AS flow_eop, coalesce(p.flow_bop, 0) AS flow_bop
+       coalesce(p.flow_eop, 0) AS flow_eop, coalesce(p.flow_bop, 0) AS flow_bop,
+       coalesce((s.detail ->> 'recon_invalidated')::boolean, false) AS recon_invalidated
 FROM ledger.nav_snapshots s
 LEFT JOIN per_snap p ON p.snap_date = s.snap_date
 WHERE s.book_id = %(book)s
 UNION ALL
-SELECT 'pending', a.entry_date, NULL, NULL, a.amount, 0
+SELECT 'pending', a.entry_date, NULL, NULL, a.amount, 0, false
 FROM attributed a WHERE a.snap_date IS NULL
 ORDER BY 1, 2
 """
@@ -99,6 +100,9 @@ class NavFlowPoint:
     status: str
     flow_eop: Decimal = Decimal(0)  # 当日仕訳(分子から引く)
     flow_bop: Decimal = Decimal(0)  # 前の測定日より後・当日より前(分母に足す)
+    #: 再締めの訂正でその日の照合結論が無効化されたか(``ledger.closing`` が立てる)。
+    #: True の日は ``status='confirmed'`` でも「照合済み NAV」として扱ってはならない。
+    recon_invalidated: bool = False
 
     @property
     def net_flow(self) -> Decimal:
@@ -129,7 +133,7 @@ def load_nav_flow_data(conn: psycopg.Connection, book_id: str) -> NavFlowData:
         rows: list[tuple[Any, ...]] = cur.fetchall()
     points: list[NavFlowPoint] = []
     pending: list[PendingFlow] = []
-    for kind, day, nav, status, flow_eop, flow_bop in rows:
+    for kind, day, nav, status, flow_eop, flow_bop, recon_invalidated in rows:
         if kind == "snapshot":
             points.append(
                 NavFlowPoint(
@@ -138,6 +142,7 @@ def load_nav_flow_data(conn: psycopg.Connection, book_id: str) -> NavFlowData:
                     status=status,
                     flow_eop=Decimal(flow_eop),
                     flow_bop=Decimal(flow_bop),
+                    recon_invalidated=bool(recon_invalidated),
                 )
             )
         else:  # pending: 金額は flow_eop 列に載せてある(UNION の列合わせ)
@@ -156,6 +161,25 @@ def pending_flows_note(pending: Sequence[PendingFlow]) -> str | None:
     return (
         f"NAV スナップショット未生成の外部フロー {len(pending)} 件: "
         f"{items} — 次の会計締めまでリターン測定に反映されない"
+    )
+
+
+def recon_invalidated_note(points: Sequence[NavFlowPoint]) -> str | None:
+    """照合結論が無効化された日の注記文(無ければ None)。文言はレポートと UI で共有する。
+
+    再締めが遅延**約定**を取り込んだ日は、その日の建玉が締め時点の照合対象と違う。
+    ``status='confirmed'`` の見た目に反して照合は無効なので、breaks 相当として上げる
+    (独立審査 再-2 に対する設計リード裁定)。拠出資本の入出金だけが遅れた日は照合の
+    結論を動かさないため、ここには現れない。
+    """
+    days = [p.day for p in points if p.recon_invalidated]
+    if not days:
+        return None
+    shown = " / ".join(str(d) for d in days[-8:])
+    return (
+        f"再締めで照合結論が無効化された日 {len(days)} 件: {shown}"
+        " — 遅延約定を取り込んだため、その日の status は照合済みを意味しない"
+        "(建玉明細も無効化済み)"
     )
 
 
@@ -199,5 +223,6 @@ __all__ = [
     "PendingFlow",
     "load_nav_flow_data",
     "pending_flows_note",
+    "recon_invalidated_note",
     "urgent_pending",
 ]

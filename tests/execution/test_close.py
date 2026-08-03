@@ -16,7 +16,7 @@ from ryza.execution.runner import run_pending
 from ryza.gate.orders import advance_order_status, record_execution
 from ryza.ledger import posting
 from ryza.risk.engine import book_returns
-from ryza.risk.navflow import load_nav_flow_data
+from ryza.risk.navflow import load_nav_flow_data, recon_invalidated_note
 
 from .conftest import JST, make_test_config
 
@@ -214,6 +214,77 @@ def test_reclose_invalidates_stale_positions_detail(conn, run_id):
     assert "positions" not in nd_detail and nd_detail["positions_stale"] is True
     assert nd_detail["reclose"][0]["previous_run_id"] == run_id
     assert row_run_id == run_id
+
+
+def test_reclose_keeps_recon_valid_for_capital_only_delay(conn, run_id):
+    """拠出資本だけが遅れた日は照合の結論を動かさない(recon_invalidated を立てない)。"""
+    d0, d1 = _G_DAYS[0], _G_DAYS[1]
+    _close(conn, run_id, d0)
+    _post_contribution(conn, run_id, d0, Decimal(5_000_000))
+
+    result = _close(conn, run_id, d1)
+    item = next(r for r in result["reclose"] if r["date"] == d0)
+    assert item["restated"] is True and item["recon_invalidated"] is False
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT detail FROM ledger.nav_snapshots "
+            "WHERE book_id = 'DEMO_FUND' AND snap_date = %s",
+            (d0,),
+        )
+        assert "recon_invalidated" not in cur.fetchone()[0]
+
+
+def test_reclose_invalidates_recon_when_trade_entries_are_late(
+    conn, run_id, passed_order, insert_bar
+):
+    """遅延**約定**が混じった日は照合結論を無効化する(再-2 の裁定)。
+
+    ``status`` 列は語彙を動かさず confirmed のまま、``recon_invalidated`` を機械可読で
+    立てる。リスク日次はこの日を breaks 相当として urgent に上げる。
+    """
+    d0, d1 = _G_DAYS[0], _G_DAYS[1]
+    insert_bar(1, d0, close=Decimal(1000), volume=Decimal(1_000_000))
+    first = _close(conn, run_id, d0)
+    assert first["status"] == "confirmed"
+
+    # 締めの後に d0 付けの約定が記帳される(_record_unrecorded_fills と同じ経路)。
+    posting.post_fill(
+        conn, book_id="DEMO_FUND", instrument_id=1, side="buy",
+        qty=Decimal(100), price=Decimal(1000), fee=Decimal(0),
+        entry_date=d0, run_id=run_id, fill_id=999_001, source="test",
+    )
+    insert_bar(1, d1, close=Decimal(1000), volume=Decimal(1_000_000))
+
+    result = _close(conn, run_id, d1)
+    item = next(r for r in result["reclose"] if r["date"] == d0)
+    assert item["recon_invalidated"] is True
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, detail FROM ledger.nav_snapshots "
+            "WHERE book_id = 'DEMO_FUND' AND snap_date = %s",
+            (d0,),
+        )
+        status, detail = cur.fetchone()
+    assert status == "confirmed"  # 列の語彙は動かさない
+    assert detail["recon_invalidated"] is True
+    assert detail["positions_stale"] is True
+
+    # risk.nav_daily 側にも写り、navflow 経由でリスク・ダッシュボードから読める。
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT detail FROM risk.nav_daily "
+            "WHERE book_id = 'DEMO_FUND' AND nav_date = %s",
+            (d0,),
+        )
+        assert cur.fetchone()[0]["recon_invalidated"] is True
+    point = next(
+        p for p in load_nav_flow_data(conn, "DEMO_FUND").points if p.day == d0
+    )
+    assert point.recon_invalidated is True and point.status == "confirmed"
+    assert "照合結論が無効化された日" in (
+        recon_invalidated_note(load_nav_flow_data(conn, "DEMO_FUND").points) or ""
+    )
 
 
 def test_reclose_reports_missing_nav_daily_row(conn, run_id):
