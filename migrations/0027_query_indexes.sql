@@ -135,9 +135,17 @@ COMMENT ON INDEX meta.runs_started_at_idx IS
 -- 変わると索引から自動的に外れる。索引本体は 16kB のまま増えない（追記される行の大半は
 -- 索引に入らないので書込増分もほぼゼロ）。
 --
+-- **【0031 で解消済み — 以下は当時の状態と、なぜ危険だったかの記録】**
+-- `meta.runs.status` には 0031 が CHECK 制約 `runs_status_check`
+-- （`running|success|failed`）を置き、**語彙は凍結された**。語彙に無い値は INSERT / UPDATE の
+-- 時点で拒否されるため、下記の「知らないうちに述語から外れた値が増える」経路はもう無い。
+-- 残る責務は、**語彙を増やすときに CHECK の改定と本索引の述語・`fetch_running_runs` の
+-- 述語・`provenance.runs.RUN_STATUSES` を同時に動かす**ことである（手順は 0031 の冒頭）。
+-- 以下は、その同時変更を怠ると何が壊れるのかの説明として残す。
+--
 -- **この索引の述語は語彙に依存しており、沈黙して劣化しうる**（独立役員審査 中-4）。
--- `meta.runs.status` に CHECK 制約は無く（0001）、`running|success|failed` という語彙の
--- 根拠は列コメントだけである。したがって:
+-- 当時 `meta.runs.status` に CHECK 制約は無く（0001）、`running|success|failed` という語彙の
+-- 根拠は列コメントだけであった。したがって:
 --   - `'starting'` / `'retrying'` のような値を後から足す
 --   - `fetch_running_runs` の述語を `status IN (...)` に広げる
 -- のいずれをやっても、**エラーも警告も出ないまま**この索引は使われなくなる。存在だけを
@@ -148,13 +156,20 @@ COMMENT ON INDEX meta.runs_started_at_idx IS
 -- 述語は `sent_at IS NULL` という構造的条件で、列が存在する限りドリフトしえない。ここは
 -- 自由文字列との比較である。恒久的な担保は status に CHECK を置いて語彙を凍結すること
 -- （`finished_at IS NULL` という構造的な同値条件も meta.runs にはある）。別 migration の
--- 案件として ops/reminders.yaml の meta-runs-status-check に登録した。
+-- 案件として ops/reminders.yaml の meta-runs-status-check に登録した
+-- → **0031 が前者（CHECK による語彙の凍結）を採って実施済み。** 後者（述語の構造化）を
+--    採らなかった理由は 0031 の冒頭に書いた（「実行中」の定義が status と finished_at の
+--    2 箇所に散り、一致を保証する制約がどこにも無いため）。
 --
 -- 実測（中央値、7 回。規模A / 規模B）:
 --   fetch_running_runs  2.14 → 0.004 ms（535x） / 28.3 → 0.005 ms（5,660x）
 CREATE INDEX IF NOT EXISTS runs_running_idx ON meta.runs (run_id DESC)
     WHERE status = 'running';
 
+-- 本文は当時のもの（CHECK 未設定を前提とする記述）。**0031 が同じ索引のコメントを
+-- 上書きして「CHECK により凍結済み」へ更新する**ので、DB 上の最終的な文言は 0031 のものになる。
+-- ここを書き換えないのは、適用済み migration の SQL を後から改変しないため（履歴の改竄に
+-- あたり、`meta.schema_migrations` に記録された適用と file の内容が食い違う）。
 COMMENT ON INDEX meta.runs_running_idx IS
     '実行中ジョブ一覧（fetch_running_runs）用の部分索引。終了で自動的に索引から外れる。'
     '述語は status の自由文字列に依存する（CHECK 未設定）— 語彙を変えると無言で'

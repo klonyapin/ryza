@@ -273,6 +273,10 @@ def build_veto_notice_embed(
             {"name": "提案参照", "value": proposal_ref, "inline": True},
             {"name": "種別", "value": kind, "inline": True},
             {"name": "否認者", "value": veto.vetoed_by, "inline": True},
+            # 出所(0030)を本文に出す。オーナー検証は呼び出し側供給の 2 引数比較でしかなく、
+            # DB も Discord も「本当に代表が押したか」を独立に知り得ない。代表本人が読む
+            # チャンネルに経路を書けば、身に覚えのない経路からの否認をその場で気付ける。
+            {"name": "出所", "value": veto.origin, "inline": True},
             {"name": "理由", "value": veto.reason[:1024], "inline": False},
         ],
         "footer": {"text": DISCLAIMER},
@@ -303,6 +307,7 @@ def build_veto_withdrawal_embed(
             {"name": "提案参照", "value": proposal_ref, "inline": True},
             {"name": "種別", "value": kind, "inline": True},
             {"name": "撤回者", "value": veto.vetoed_by, "inline": True},
+            {"name": "出所", "value": veto.origin, "inline": True},
             {"name": "理由", "value": veto.reason[:1024], "inline": False},
         ],
         "footer": {"text": DISCLAIMER},
@@ -460,6 +465,7 @@ def apply_veto(
     vetoed_by: str,
     owner_ids: Iterable[str],
     run_id: int,
+    origin: str,
     role: str = DEFAULT_NOTICE_ROLE,
     channel: str = OPS_CHANNEL,
 ) -> VetoNotice:
@@ -470,10 +476,15 @@ def apply_veto(
     ``expected_proposal_ref`` 照合は解決した ID に対してもう一度掛ける
     (0021 の対象取り違え防止をボタン経路でも通す)。
 
+    ``origin`` は**必須**(:data:`ryza.governance.decisions.VETO_ORIGINS`)。ここで既定値を
+    置くと、新しい呼び出し側が渡し忘れても黙って既定の経路として記録され、0030 が入れた
+    「経路の一次識別」が働かなくなる。呼び出し側は自分がどの経路かを必ず宣言する。
+
     Raises:
         AtomicityError / UnknownProposalError / AlreadyVetoedError
         NotOwnerError: 非オーナーの否認操作(否認は代表の専権 —— 定款第3条)
         NotVetoableError: 対象が approve / deemed 以外
+        ValueError: origin が語彙外
     """
     _require_owner("veto", proposal_ref, vetoed_by, owner_ids)
     _require_shared_transaction(conn)
@@ -489,9 +500,11 @@ def apply_veto(
             conn, int(row["decision_id"]), reason,
             vetoed_by=vetoed_by, owner_ids=owner_ids,
             expected_proposal_ref=proposal_ref,
-            # 出所(どの経路で否認が記録されたか)を事後に辿れるようにする。
-            # 否認は代表の作為であり Run は必須でないが、記録経路がジョブ・Bot 内にある場合は
-            # 埋める(0021 のコメント。独立役員審査 重要-5 後段)。
+            # 出所(どの経路で否認が記録されたか)を事後に辿れるようにする。run_id だけでは
+            # 足りない —— ボタン経路と /veto は同じ job_name で Run を開くため、meta.runs を
+            # 辿っても両者は区別できない(0030)。run_id が答えるのは「どの実行の中で
+            # 書かれたか」、origin が答えるのは「どの経路から書かれたか」である。
+            origin=origin,
             run_id=run_id,
         )
         outbox_id = enqueue(
@@ -510,6 +523,7 @@ def withdraw_veto(
     vetoed_by: str,
     owner_ids: Iterable[str],
     run_id: int,
+    origin: str,
     role: str = DEFAULT_NOTICE_ROLE,
     channel: str = OPS_CHANNEL,
 ) -> VetoNotice:
@@ -532,7 +546,10 @@ def withdraw_veto(
             conn, int(row["decision_id"]), reason,
             vetoed_by=vetoed_by, owner_ids=owner_ids,
             expected_proposal_ref=proposal_ref,
-            run_id=run_id,  # 出所の記録(重要-5 後段)
+            # 撤回にも出所を刻む。撤回は「取消義務を消す」操作であり、否認と同じだけ
+            # 経路を問える必要がある(むしろ、身に覚えのない撤回のほうが危険である)。
+            origin=origin,
+            run_id=run_id,  # どの実行の中で書かれたか(重要-5 後段)
         )
         outbox_id = enqueue(
             conn, channel,
