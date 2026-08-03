@@ -115,3 +115,39 @@ reminders:
       issue: 15
       body: "チェックポイント: 最初の運用可能版(データ取込→朝刊)は完成しているか。完成していれば実装監査を実施、未完成ならこのリマインダーの date を1ヶ月先に更新すること。"
     status: pending
+
+  - id: a13-protected-areas-registration
+    what: "protected_areas への src/ryza/audit/** 追記(governance.yaml は L1 のため代表明示承認とセット)"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "governance.yaml protected_areas に監査部門コード(src/ryza/audit/**)を追記"
+      labels: [decision]
+      body: "定款第5条により監査部門コードは保護領域。A-13 実装(src/ryza/audit/)の main 統合後、config/governance.yaml の protected_areas に `src/ryza/audit/**`(area: audit)を追記する。governance.yaml は L1 文書のため代表の明示承認が必要(定款第4条)。A-13 自身が未登録を notes で警告し続ける。"
+    status: pending
+
+  - id: a13-github-pr-verification
+    what: "A-13-1 の PR 実在照合を GitHub API で実装(実弾移行の前提条件)"
+    conditions:
+      - type: date_after
+        date: "2026-09-01"
+    action:
+      type: issue_create
+      title: "A-13-1: マージ PR の実在を GitHub API で照合する"
+      labels: [impl]
+      body: "現行の src/ryza/audit/a13.py は PR 件名(Merge pull request #N)の自己申告のみで承認と判定しており件名偽装でバイパス可能(独立役員審査 2026-08-03 で実証)。GitHub API で PR #N の実在・マージコミット SHA の一致・マージ実行者を照合する。定款第5条の実弾移行前提条件(ブランチ保護+トレーラ検査 CI)の実装判断と合わせて行う。"
+    status: pending
+
+  - id: a13-vm-wiring-check
+    what: "VM への A-13 配線確認(A13_REPO_PATH — git checkout と DB の両方に届く実行環境)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "A-13 監査の VM 配線確認(A13_REPO_PATH)"
+      labels: [impl]
+      body: "A-13(src/ryza/audit/a13.py)は git 履歴とデータベース(press.outbox)の両方を必要とするため、Cloud Run 版 ops-weekly では走らずスキップされる(週次ダイジェストに「スキップ(A13_REPO_PATH 未配線)」と表示)。GCE VM 上(daily と同居)で A13_REPO_PATH を設定した週次実行(systemd timer 等)を配線し、ダイジェストの A-13 行が「実行」になることを確認する。checkout の定期更新(git fetch/pull)も運用側で用意する(A-13 自身は read-only で fetch しない)。"
+    status: pending
