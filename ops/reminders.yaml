@@ -366,8 +366,8 @@ reminders:
       type: issue_create
       title: "protected_areas に ops/deploy-dashboard.sh を登録する"
       labels: [governance]
-      body: "ops/deploy-dashboard.sh は DB ロールの権限定義・IAP 許可リスト・稼働コードの検証を持つ実質的なデプロイ経路だが、config/governance.yaml の protected_areas には bot/daily/ops-weekly のデプロイのみが登録されており、本スクリプトは対象外になっている(独立役員審査 0020 C-4)。そのため監査 A-13-1(無承認変更検出)が本ファイルの変更を検出せず、権限定義が承認記録なしに書き換わっても気付けない。是正: config/governance.yaml の protected_areas に ops/deploy-dashboard.sh(および deploy 経路のスクリプト群)を追加する。governance.yaml 自体が保護領域のため、独立役員審査 → #承認 通知 → 48h みなし承認の手続を経ること。0020 の PR とは別 PR にするのは、承認の単位を『スキーマ』と『統制対象の定義変更』で混ぜないため(設計リード裁定 2026-08-03)。"
-    status: pending
+      body: "(対応済み)config/governance.yaml の protected_areas に ops/deploy-dashboard.sh(area: deploy_path)を追記した。governance.yaml は L1(保護領域)のため、統合には独立役員審査 → #承認 通知 → みなし承認の手続を要する。手続が完了せず本リマインダーが発火した場合は、当該 PR が未統合であることを意味する。"
+    status: done # 起票済み(governance.yaml へ登録)。発効は L1 手続の完了(統合)をもって
 
   - id: icon-rehost-storage
     what: "キャラクターアイコンを保存時に自前で再ホストする(独立役員審査 0020 C-6/C-7 の恒久是正)"

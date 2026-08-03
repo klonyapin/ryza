@@ -116,6 +116,12 @@ protected_areas:
     area: deploy_path
   - path: ops/deploy-ops-weekly.sh
     area: deploy_path
+  # 独立役員審査 2026-08-03(アイコン上書き 0020 の審査・C-4)が指摘した登録漏れ。
+  # 本スクリプトは DB ロールの権限定義・IAP 許可リスト・稼働コードの git 検証を持つ
+  # 実質的なデプロイ経路であり、未登録のままでは A-13-1 が権限定義の無承認変更を検出しない。
+  # 出典: docs/reviews/0020-org-icon-overrides-independent-review.md C-4
+  - path: ops/deploy-dashboard.sh
+    area: deploy_path
   - path: CLAUDE.md # 不変原則・議論規約の写し(C-1)
     area: constitution
   - path: src/ryza/audit/** # 監査部門コード(A-13/A-16 系。自己申告 notes の「未登録」警告を解消)
