@@ -819,3 +819,15 @@ reminders:
       labels: [governance]
       body: "boardroom.parse_speaker_sequence は表示用ラベル辞書 _SPEAKER_LABELS の逆写像で議事録本文から話者を復元する。決議精緻化審査 2026-08-03 懸念6 は、『代表』→『代表取締役』のような表示上の改称だけで、同一の過去本文の判定が『要確認』→『鮮度あり』へ**反転**する(fail-open)ことを実測した。証憑(minutes.body_md)は追記オンリーで書き換えられないのに、その解釈がコード側の可変な辞書に依存している。対処の選択肢: (a) 復元専用のラベル表を凍結し(過去の表記も含む追記オンリーの表として持つ)、表示用辞書と分離した上で回帰テストで固定する、(b) 議事録保存時に話者列を構造化して残す(governance.minutes への列追加 = 保護領域の migration。本文と冗長になるが解釈をコードから外せる)、(c) 本文の話者行に役職キー(英字)を機械可読な形で併記する。(b) が最も堅いが保護領域の手続を要する。いずれの場合も、既存行(旧表記)の解釈が変わらないことをテストで固定すること。"
     status: pending
+
+  - id: mtm-bar-arrival-revisit
+    what: "MTM 未再適用日(mtm_pending)のバー到着後の自動再訪"
+    conditions:
+      - type: date_after
+        date: "2026-08-12"
+    action:
+      type: issue_create
+      title: "MTM 再適用: 当日バーが後から取り込まれた日の自動再訪"
+      labels: [impl, ledger]
+      body: "MTM リプレイ審査(新-6 裁定)で門を「その日のバー」に限定した結果、当日バー欠測のまま再締めされた日は以後 stale でないため、後からバーが取り込まれても自動では再訪されない(mtm_pending のまま取得原価で恒久)。安全側の縮退だが新-3 の害が当該日に限り残る。是正案: 再締めの stale 検出に「mtm_pending かつ当日バーが現在は存在する日」を加える(水位方式と同型の1クエリ)。ledger は保護領域 — 独立審査手続を要する。"
+    status: pending
