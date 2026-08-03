@@ -6,12 +6,18 @@
 - **デプロイ先**: GCP(月額 $0〜数ドル構成)
 - **開発ステータスサイト(ローカル)**: `python3 site/build.py && python3 -m http.server 8080 -d site` → http://localhost:8080 。同内容は運用ダッシュボードの「開発ステータス」ページでも閲覧可(下記)
 
-## 運用ダッシュボード(ローカル専用)
+## 運用ダッシュボード(Cloud Run + IAP 公開+ローカル)
 
-Streamlit 製の閲覧用ダッシュボード(概況 / 取込 / 報道 / コスト / 市場観 / 開発ステータス)。**ローカル専用 — 公開ホスティングしない**(Cloud Run 公開版は 2026-08-02 に撤去済み)。**読み取り専用** — 書込・操作系 UI は無く、Kill Switch 等の操作は Discord Bot の管轄。
+Streamlit 製の組織ダッシュボード(概況 / 組織 / 承認・通知 / 規則 / 計画 / 取込 / 報道 / コスト / 市場観 / 役員室 / 開発ステータス)。**Cloud Run + IAP で公開**(2026-08-03 代表指示。認証は IAP の許可リストに全面委譲 — アプリ内に認証コードは無い。2026-08-02 に撤去した無認証 Cloud Run 公開版とは異なり、許可した Google アカウントしかアクセスできない)。役員室(議事録の追記のみ)を除き**読み取り専用** — Kill Switch 等の操作は Discord Bot の管轄。
+
+- **デプロイ**: `./ops/deploy-dashboard.sh`(冪等)。Cloud Build → Cloud Run(Direct VPC egress で VM 内 PostgreSQL の内部 IP へ接続・専用ロール `ryza_dashboard`)→ IAP 有効化+許可リスト付与
+- **コスト**: min-instances=0 / max-instances=1。**初回アクセスはコールドスタートで数十秒かかる**(許容の設計)
+- **計画ページの正**: `config/roadmap.yaml`(curated)。フェーズ・マイルストーンの状態が変わったら**設計リードが PR で更新する**(自動生成しない — 静的な計画に Issues/PR/meta.runs の動的状態を重ねて表示する設計)
+
+ローカル実行(従来どおり。IAP はクラウド側だけの層):
 
 ```sh
-uv sync --extra dashboard          # 依存導入(streamlit。本体依存には含めない)
+uv sync --extra dashboard          # 依存導入(streamlit・requests。本体依存には含めない)
 .venv/bin/streamlit run dashboard/app.py
 ```
 

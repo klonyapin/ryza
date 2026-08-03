@@ -1,0 +1,80 @@
+# config/roadmap.yaml — 全体計画(ロードマップ)の正
+#
+# **curated(手で書く)**: 静的な計画をここに保持し、動的な状態(Issues/PR/meta.runs)は
+# ダッシュボード「計画」ページが重ね合わせて表示する(2026-08-03 代表指示)。
+# 更新は設計リードの責務: フェーズ・マイルストーンの状態が変わったらこのファイルを PR で更新する。
+# status: done(完了)| doing(進行中)| todo(未着手)| future(将来・前提条件待ち)
+version: "1"
+updated: "2026-08-03"
+
+phases:
+  - id: p1
+    name: "Phase 1 基盤"
+    status: done
+    summary: "リポジトリ・DB・複式簿記・証憑/リネージ・週次ジョブ(T-001〜T-005)"
+    milestones:
+      - { name: "マイグレーション基盤+帳簿制約", status: done }
+      - { name: "記帳/締め/財務諸表(会計エンジン)", status: done }
+      - { name: "証憑・リネージ(provenance)", status: done }
+      - { name: "週次ジョブ ops-weekly(Cloud Run Job+Scheduler)", status: done }
+
+  - id: p2
+    name: "Phase 2 リサーチ+報道"
+    status: done
+    note: "運用中(毎朝 09:00 JST の日次サイクル)"
+    summary: "取込9ソース・階層0前処理・分析エージェント・朝刊・Discord Bot(T-006〜T-013)"
+    milestones:
+      - { name: "Discord Bot 基盤(4チャンネル・承認/KillSwitch・日報)", status: done }
+      - { name: "データ取込(J-Quants/TDnet/EDINET/RSS/FRED ほか)", status: done }
+      - { name: "階層0前処理(重複排除・分類・埋め込み)", status: done }
+      - { name: "分析エージェント+市場観ステート", status: done }
+      - { name: "朝刊(執筆規格・文体リンター)", status: done }
+      - { name: "実 LLM プロバイダ+日次サイクル本配線", status: done }
+
+  - id: p3
+    name: "Phase 3 ガバナンス"
+    status: done
+    note: "運用中(週次定款監査・全変更 PR 化)"
+    summary: "定款 v0.4・権限マトリクス・定款監査・役職資産・役員室・開発管理規程・CI"
+    milestones:
+      - { name: "定款 v0.4+governance.yaml(批准済み)", status: done }
+      - { name: "週次定款監査ジョブ(A-13 系)", status: done }
+      - { name: "役職資産(personas)+役員室", status: done }
+      - { name: "開発管理規程+ブランチ保護+CI required", status: done }
+
+  - id: p4
+    name: "Phase 4 デモ売買"
+    status: doing
+    summary: "コンプラゲート → リスク・執行 → FM 第一陣 → デモ売買開始"
+    milestones:
+      - { name: "T-014 コンプライアンスゲート", status: done }
+      - { name: "T-015 リスクエンジン", status: doing }
+      - { name: "T-016 デモ執行", status: doing }
+      - { name: "T-017 FM 第一陣(Ben・Jim)", status: todo, note: "指示書済み・未着手" }
+      - { name: "デモ売買開始", status: todo }
+
+  - id: p5
+    name: "Phase 5 評価・研究"
+    status: todo
+    summary: "E1〜E9 評価基盤・バックテスト・ストラテジー動物園・研究論文"
+    milestones:
+      - { name: "E1〜E9 評価基盤(Deflated Sharpe・PBO 込み)", status: todo }
+      - { name: "point-in-time バックテスト", status: todo }
+      - { name: "ストラテジー動物園(手法ライフサイクル)", status: todo }
+      - { name: "研究論文パイプライン", status: todo }
+
+  - id: p6
+    name: "Phase 6 実弾移行"
+    status: future
+    summary: "代表の明示承認が必須の専決事項(定款第3条)"
+    note: "前提条件: 監査 A-1〜A-5 稼働・予防統制(済)・IBKR 口座・代表の明示判断"
+    milestones:
+      - { name: "監査 A-1〜A-5 の稼働", status: todo }
+      - { name: "予防統制(ブランチ保護+承認トレーラ検査 CI)", status: done }
+      - { name: "IBKR 口座開設", status: todo }
+      - { name: "実弾移行の明示承認(代表専決)", status: todo }
+
+# 代表の判断・作業を待っている事項(curated。Issues の user-action ラベルと併せて表示)
+awaiting_representative:
+  - what: "J-Quants Light プランの課金判断(取込の銘柄カバレッジ拡大)"
+  - what: "e-Stat appId の取得(統計データ取込の有効化)"

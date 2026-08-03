@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
+import yaml
 
 from ryza.db.conn import connect
 from ryza.ingest.freshness import DEFAULT_SLAS, FreshnessSLA, _latest_as_of
@@ -262,3 +263,86 @@ def load_site_status(path: Path | None = None) -> dict[str, Any] | None:
     if match is None:
         return None
     return json.loads(match.group(1))
+
+
+# ── 承認・通知(組織サイト化 — 2026-08-03 代表指示)────────────────────────────
+def fetch_decisions(conn: psycopg.Connection, *, limit: int = 50) -> list[dict[str, Any]]:
+    """承認フローの決定履歴(``governance.decisions``・0007)。
+
+    みなし承認(定款第3条 v0.4)は ``decision='deemed'`` で記録される設計
+    (governance.yaml deemed_approval)。現行スキーマの CHECK は
+    approve|reject|question のみのため deemed 行はまだ存在しないが、UI 側は
+    decision 値で「みなし/明示」を区別する(スキーマ拡張時に自動追随)。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, proposal_ref, kind, decision, decided_by, note, decided_at
+            FROM governance.decisions
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        return _rows(cur)
+
+
+def fetch_running_runs(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    """実行中のジョブ(``meta.runs`` の status='running')。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT run_id, job_name, started_at, params
+            FROM meta.runs
+            WHERE status = 'running'
+            ORDER BY run_id DESC
+            """
+        )
+        return _rows(cur)
+
+
+def load_reminders(path: Path | None = None) -> list[dict[str, Any]]:
+    """リマインダー・レジストリ(``ops/reminders.yaml``)の一覧。
+
+    「セッション内の約束は無効 — 将来アクションは必ずここに登録」(CLAUDE.md)の
+    実体。pending が「代表が知るべき将来アクション」。ファイル読取のみ(DB 不要)。
+    """
+    path = path if path is not None else _REPO_ROOT / "ops" / "reminders.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    out = []
+    for r in data.get("reminders", []):
+        action = r.get("action") or {}
+        out.append(
+            {
+                "id": r.get("id"),
+                "what": r.get("what"),
+                "status": r.get("status", "pending"),
+                "action_type": action.get("type"),
+                "conditions": ", ".join(
+                    str(c.get("type")) for c in r.get("conditions", [])
+                ),
+            }
+        )
+    return out
+
+
+def load_org(path: Path | None = None) -> dict[str, Any]:
+    """組織メンバー台帳(``config/org.yaml``・キャラクター設定の正)。"""
+    path = path if path is not None else _REPO_ROOT / "config" / "org.yaml"
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def load_governance(path: Path | None = None) -> dict[str, Any]:
+    """権限マトリクス・統制テーブル(``config/governance.yaml``・定款の機械可読版)。"""
+    path = path if path is not None else _REPO_ROOT / "config" / "governance.yaml"
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def load_roadmap(path: Path | None = None) -> dict[str, Any]:
+    """全体計画(``config/roadmap.yaml``・curated)。更新は設計リードの責務。
+
+    静的な計画(フェーズ・マイルストーン)はこのファイルが正で、動的な状態
+    (Issues/PR/meta.runs)は「計画」ページが重ね合わせて表示する。
+    """
+    path = path if path is not None else _REPO_ROOT / "config" / "roadmap.yaml"
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
