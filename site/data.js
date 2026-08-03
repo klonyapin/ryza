@@ -1,5 +1,5 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-03 12:13 JST",
+ "generated_at": "2026-08-03 12:14 JST",
  "phase": "実装フェーズ(T-010 階層0前処理 進行中)",
  "milestones": [
   {
@@ -55,7 +55,7 @@ window.RYZA_DATA = {
   {
    "name": "T-007/T-008 朝刊・速報",
    "detail": "毎朝10:00 玲音の朝刊・文体リンター・速報と的中率追跡",
-   "status": "todo"
+   "status": "done"
   },
   {
    "name": "T-012 取込ソース一括拡張",
@@ -319,6 +319,11 @@ window.RYZA_DATA = {
  ],
  "commits": [
   {
+   "hash": "9c4823c",
+   "date": "08/03 12:13",
+   "subject": "chore(site): T-007/T-008 完了を反映"
+  },
+  {
    "hash": "770740b",
    "date": "08/03 12:13",
    "subject": "style: 増資コメントの行長修正"
@@ -362,11 +367,6 @@ window.RYZA_DATA = {
    "hash": "c92ce78",
    "date": "08/03 11:56",
    "subject": "wip(press): config ローダと文体リンター（L-1〜L-5・L-7・U字判定）"
-  },
-  {
-   "hash": "d17b66f",
-   "date": "08/03 11:51",
-   "subject": "chore(site): T-011 完了・T-007/T-008 着手を反映"
   }
  ]
 };
