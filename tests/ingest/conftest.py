@@ -1,7 +1,10 @@
 """ingest テストの共通フィクスチャ。
 
 ライブ PostgreSQL（compose.yaml の DB）に対して実行する。接続できない場合は skip。
-各テストは関数スコープの接続を使い、commit せず rollback して隔離する。
+各テストは関数スコープの接続を使い、commit せず rollback して隔離する。共有 DB に
+commit 済みの実データ(日次取込等)が残っていても件数 assert が壊れないよう、
+トランザクション内で対象テーブルを空にしてから yield する(tests/conftest.py の
+``clear_residual`` — rollback で削除ごと巻き戻るため実データは無傷)。
 
 **HTTP は全てモック**（受け入れ基準）。``FakeFetcher`` を注入し、取込コードは実 API へ
 一切アクセスしない。証憑ストアは ``tmp_path`` の ``LocalStorage``。
@@ -34,9 +37,13 @@ def migrated_db():
 
 
 @pytest.fixture
-def conn(migrated_db):
-    """関数スコープの接続。テストは commit せず rollback して隔離する。"""
+def conn(migrated_db, clear_residual):
+    """関数スコープの接続。テストは commit せず rollback して隔離する。
+
+    接続直後にトランザクション内で残留データを不可視化する(Issue #23)。
+    """
     c = connect()
+    clear_residual(c)
     try:
         yield c
     finally:
