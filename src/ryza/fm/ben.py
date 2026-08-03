@@ -186,7 +186,21 @@ def _to_intents(
     intents: list[Intent] = []
     rejected: list[dict[str, Any]] = []
 
-    for cand in list(content.get("candidates") or [])[: cfg.max_candidates]:
+    # 重複銘柄は候補数上限を数える前に潰す(先頭優先・決定論 — 審査 C-1)。
+    # 上限が重複で埋まって実質1銘柄になるのを避け、かつ集中度の二重割り当てを防ぐ。
+    unique_candidates: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for cand in content.get("candidates") or []:
+        instrument_id = int(cand["instrument_id"])
+        if instrument_id in seen:
+            rejected.append(
+                {"instrument_id": instrument_id, "reason": "同一銘柄の重複候補(先頭のみ採用)"}
+            )
+            continue
+        seen.add(instrument_id)
+        unique_candidates.append(cand)
+
+    for cand in unique_candidates[: cfg.max_candidates]:
         instrument_id = int(cand["instrument_id"])
         reason = _reject_reason(cand, instrument_id, candidates, held)
         if reason is None:

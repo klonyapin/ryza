@@ -63,6 +63,52 @@ CREATE TRIGGER fm_theses_no_mutation
 REVOKE UPDATE, DELETE ON trading.fm_theses FROM PUBLIC;
 
 -- ────────────────────────────────────────────────────────────────────────────
+-- TRUNCATE の封鎖(独立役員審査 2026-08-03 C-2)
+-- ────────────────────────────────────────────────────────────────────────────
+-- **TRUNCATE は行トリガを迂回する**(0015 の独立役員審査で実証済み)。0015 は文トリガ+
+-- REVOKE TRUNCATE を追記オンリー表の標準としたが、0014(trading/compliance)はこの標準の
+-- 前に書かれており文トリガを持たない。後発の 0018 が同じ穴を再導入しないだけでなく、
+-- 0014 の既存の穴もここで塞ぐ(審査指摘)。`TRUNCATE trading.fm_theses CASCADE` は
+-- FK でつながる trading.orders まで巻き込むため、封鎖は両表に必要。
+CREATE FUNCTION trading.forbid_truncate() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION
+        '% の TRUNCATE は禁止(追記オンリーの監査証跡・発注経路の証跡)。訂正は追記で行う',
+        TG_TABLE_NAME;
+END;
+$$;
+
+CREATE TRIGGER fm_theses_no_truncate
+    BEFORE TRUNCATE ON trading.fm_theses
+    FOR EACH STATEMENT EXECUTE FUNCTION trading.forbid_truncate();
+
+-- 0014 の表(ゲート判定ログ・約定・冪等台帳・注文)も同じ基準に揃える。
+CREATE TRIGGER gate_log_no_truncate
+    BEFORE TRUNCATE ON compliance.gate_log
+    FOR EACH STATEMENT EXECUTE FUNCTION trading.forbid_truncate();
+
+CREATE TRIGGER executions_no_truncate
+    BEFORE TRUNCATE ON trading.executions
+    FOR EACH STATEMENT EXECUTE FUNCTION trading.forbid_truncate();
+
+CREATE TRIGGER position_applies_no_truncate
+    BEFORE TRUNCATE ON trading.position_applies
+    FOR EACH STATEMENT EXECUTE FUNCTION trading.forbid_truncate();
+
+-- trading.orders は行の UPDATE(状態遷移)を許す可変表だが、TRUNCATE は
+-- gate_log_id / thesis_id の証跡ごと発注履歴を消すため封鎖する(A-3 ゲート迂回検知の前提)。
+CREATE TRIGGER orders_no_truncate
+    BEFORE TRUNCATE ON trading.orders
+    FOR EACH STATEMENT EXECUTE FUNCTION trading.forbid_truncate();
+
+REVOKE TRUNCATE ON trading.fm_theses FROM PUBLIC;
+REVOKE TRUNCATE ON trading.orders FROM PUBLIC;
+REVOKE TRUNCATE ON trading.executions FROM PUBLIC;
+REVOKE TRUNCATE ON trading.position_applies FROM PUBLIC;
+REVOKE TRUNCATE ON compliance.gate_log FROM PUBLIC;
+
+-- ────────────────────────────────────────────────────────────────────────────
 -- trading.orders.thesis_id: 注文案 → 論拠のリンク
 -- ────────────────────────────────────────────────────────────────────────────
 -- NULL 許容: ゲート(T-014)は FM 以外の経路(委員会の例外取引・リバランス等)からも
@@ -95,3 +141,7 @@ COMMENT ON COLUMN trading.fm_theses.as_of IS
 
 COMMENT ON COLUMN trading.orders.thesis_id IS
     '注文の論拠(trading.fm_theses)。FM 経路は必須、それ以外の経路(例外取引等)は NULL。';
+
+COMMENT ON FUNCTION trading.forbid_truncate IS
+    'TRUNCATE は行トリガを迂回するため文トリガで封鎖する(0015 と同基準)。'
+    'trading の追記オンリー表と trading.orders(発注証跡)に適用。';

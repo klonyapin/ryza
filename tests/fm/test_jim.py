@@ -181,6 +181,46 @@ def test_run_jim_end_to_end_passes_gate(
     assert status == "passed" and thesis_id == order["thesis_id"] and fm == "jim"
 
 
+def test_jim_duplicate_intents_produce_one_order(
+    conn, run, as_of, instrument, classify, insert_bars, nav_snapshot
+):
+    """Jim 経路でも同一銘柄の重複提案は1本に潰れる(審査 C-1・base の共通防御)。"""
+    from ryza.fm import base
+    from ryza.ips import load_and_validate
+
+    nav_snapshot()
+    iid = instrument(symbol="1306.T")
+    classify(iid, universe_tags=("liquid_equity",))
+    closes, volumes = _cross_series()
+    insert_bars(iid, closes, volumes=volumes)
+
+    cfg = JimConfig.load()
+    signal = jim.compute_signal(iid, jim.load_bars(conn, iid, as_of=as_of, cfg=cfg), cfg)
+    assert signal is not None
+    intents = [jim.build_intent(signal, cfg) for _ in range(3)]
+
+    ips, mandates = load_and_validate()
+    mandate = mandates[jim.FM]
+    candidates = {c.instrument_id: c for c in base.load_universe(conn, mandate, as_of=as_of)}
+    result = base.submit_intents(
+        conn, run, intents,
+        mandate=mandate, max_slots=cfg.max_slots, candidates=candidates,
+        producer=cfg.producer, book_id="DEMO_FUND", as_of=as_of, ips=ips, mandates=mandates,
+    )
+    assert result.proposed == 1 and result.passed == 1
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*), COALESCE(sum(qty * ref_price), 0)
+            FROM trading.orders WHERE fm = 'jim' AND instrument_id = %s
+            """,
+            (iid,),
+        )
+        count, notional = cur.fetchone()
+    # ポッド内集中度上限 20% × 仮想資本 ¥2,000,000 = ¥400,000 を超えない。
+    assert count == 1 and Decimal(notional) <= Decimal(400_000)
+
+
 def test_run_jim_records_blocked_proposals(
     conn, run, as_of, instrument, classify, insert_bars, nav_snapshot
 ):

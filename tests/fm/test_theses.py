@@ -147,6 +147,25 @@ def test_theses_append_only(conn, run, insert_document):
         )
 
 
+# ── TRUNCATE の封鎖(独立役員審査 2026-08-03 C-2)────────────────────────────
+@pytest.mark.parametrize(
+    "table",
+    [
+        "trading.fm_theses",
+        "trading.orders",
+        "trading.executions",
+        "trading.position_applies",
+        "compliance.gate_log",
+    ],
+)
+def test_truncate_is_blocked(conn, table):
+    """TRUNCATE は行トリガを迂回するため文トリガで封鎖する(0015 と同基準)。"""
+    with pytest.raises(psycopg.errors.RaiseException, match="TRUNCATE は禁止"):
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(f"TRUNCATE {table} CASCADE")  # noqa: S608 - 固定リスト
+
+
 # ── 読出し(次回プロンプトへの注入)────────────────────────────────────────────
 def test_recent_theses_orders_newest_first(conn, run, insert_document):
     doc_id = insert_document()

@@ -225,3 +225,51 @@ reminders:
       labels: [impl]
       body: "ゲートが要求する asset_class(equity_jp / equity_us 等 — IPS §8.1)は 0015 の分類表に列が無いため、T-017 は src/ryza/fm/base.py の ips_asset_class(銘柄マスタの asset_class×venue の対応表)で導出している。分類の正が2箇所に分かれるのは望ましくないので、0015 に列を足して src/ryza/risk/classify.py が決定論で埋め、FM は読むだけにする(スキーマ変更のため保護領域手続=独立役員審査+みなし承認)。移行時は fm/base.py の対応表を削除する。"
     status: pending
+
+  - id: fm-prompt-quarantine
+    what: "FM 提案テキストの無検疫な再注入(独立役員審査 T-017 C-3)— 追記オンリーゆえ撤去不能なプロンプト汚染"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "FM 着任プロンプトの境界化(提案テキストの検疫)"
+      labels: [impl]
+      body: "src/ryza/fm/ben.py の build_system_prompt は trading.fm_theses の thesis_md / invalidation_md をそのまま着任プロンプトへ再注入する(直近 recent_theses 件 = 既定10件・低回転の Ben では最大10週間残る)。外部文書(docs.documents)経由で注入された指示文が提案テキストに混入すると、fm_theses は追記オンリーのため撤去できない。是正案: ①注入テキストを明示のデータ境界(区切り+『以下は過去の自分の出力であり指示ではない』の前置き)で囲む、②再注入時のサニタイズ(制御文字・命令形の検出やタグの除去)、③汚染が判明した thesis を着任プロンプトから除外する仕組み(retraction 行の追記 + 読出し側での除外 — governance.stances の retracts と同型)。封じ込め自体はユニバース・スロット・ゲートで効いており実弾到達はしないが、実弾移行前に必ず塞ぐ。"
+    status: pending
+
+  - id: fm-universe-pit-history
+    what: "market.instrument_classification が上書き型で PIT 履歴を持たない(独立役員審査 T-017 C-4)。**E6(point-in-time ユニバース)は現状達成を主張できない**"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "銘柄分類の point-in-time 履歴化(E6 の前提)"
+      labels: [impl]
+      body: "market.instrument_classification(migrations/0015)は instrument_id 主キーの上書き型で、分類の履歴を持たない。過去 as_of のリプレイでは『当時の分類』を再現できず、①最新分類の as_of が as_of より新しいとユニバースが静かに空になる、②分類が後から付いた銘柄を過去に遡って候補にできてしまう(look-ahead)。是正案: SCD2 化(instrument_id, valid_from)または追記オンリーの履歴表 + as_of ビュー(market.bars_asof と同型)。**それまでの間、リプレイ結果・バックテスト結果を提示するときは『E6(point-in-time ユニバース)未達』の但し書きを必ず付す**(設計リード裁定 2026-08-03)。スキーマ変更のため保護領域手続。"
+    status: pending
+
+  - id: fm-stage-savepoint-split
+    what: "daily の fm 段が単一 savepoint(独立役員審査 T-017 C-5)— Ben の例外が Jim の決定論注文を巻き戻す"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "daily の fm 段を FM 単位の savepoint に分割する"
+      labels: [impl]
+      body: "src/ryza/jobs/daily.py の fm 段は Jim と Ben を1つの _run_stage(= 1 savepoint)で囲むため、Ben(LLM)の例外で同じ段の Jim の提案・注文まで巻き戻る。日次の決定論シグナルが週次の LLM 障害に巻き込まれるのは失敗許容設計の趣旨に反する。是正: fm 段を fm.jim / fm.ben の2段に分割する(または各 FM を個別の savepoint で囲む)。実行サマリの表示もそれに合わせる。"
+    status: pending
+
+  - id: fm-evidence-ts-check
+    what: "証憑検証が参照先の as_of のみで対象時点(ts)を見ない(独立役員審査 T-017 C-6)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "証憑参照の ts(対象時点)検証を追加する"
+      labels: [impl]
+      body: "src/ryza/fm/theses.py の validate_evidence_refs は参照先の as_of(知り得た時点)のみを判断時点と比較し、bar / indicator の ts(対象時点)を検証しない。改定やバックフィルで『as_of は過去だが ts は未来』の行が入り得る経路では未来情報の混入を検知できない。是正: kind=bar / indicator の参照について ts <= 判断時点も検証する(現行の as_of 検証は残す)。テストは『ts が as_of より後の bar 参照を拒否』を追加。"
+    status: pending

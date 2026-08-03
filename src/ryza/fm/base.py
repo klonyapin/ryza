@@ -35,7 +35,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 
 from ryza.fm import sizing
-from ryza.fm.theses import record_thesis
+from ryza.fm.theses import LONG_ONLY_DIRECTIONS, record_thesis
 from ryza.gate.compliance import GateResult, OrderProposal, PositionState
 from ryza.gate.orders import gate_and_record
 from ryza.ips import IPSConfig, Mandate, load_and_validate
@@ -178,6 +178,38 @@ def load_positions(conn: psycopg.Connection, book_id: str) -> tuple[PositionStat
         )
 
 
+def load_pending_orders(
+    conn: psycopg.Connection, book_id: str, fm: str
+) -> tuple[dict[int, Decimal], set[int]]:
+    """当該 FM の**未約定の通過注文**(passed/submitted)を (建て, 決済) に分けて返す。
+
+    ポジションは約定してはじめて動くため、通過済みで未約定の注文はどこにも現れない。
+    同じ FM が同じ日に二度走れば、同じ銘柄へ二度スロットを割り当て(建て)、あるいは
+    同じ建玉を二度売る(決済)ことができてしまう — 審査 C-1 の穴の実行またぎ版。
+
+    返り値は ``({建て注文の銘柄 → 数量}, {決済注文が出ている銘柄})``。前者はスロットを
+    占有し、後者は追加のクローズ提案を止める(いずれも fail-closed 側)。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, side, sum(qty) FROM trading.orders
+            WHERE book_id = %s AND fm = %s AND status IN ('passed', 'submitted')
+            GROUP BY instrument_id, side
+            """,
+            (book_id, fm),
+        )
+        rows = cur.fetchall()
+    entries: dict[int, Decimal] = {}
+    closing: set[int] = set()
+    for instrument_id, side, qty in rows:
+        if side in ("buy", "cover"):
+            entries[int(instrument_id)] = entries.get(int(instrument_id), Decimal(0)) + Decimal(qty)
+        else:
+            closing.add(int(instrument_id))
+    return entries, closing
+
+
 def load_prices(
     conn: psycopg.Connection,
     instrument_ids: list[int],
@@ -270,6 +302,33 @@ def _build_proposal(
     )
 
 
+def dedupe_intents(intents: list[Intent]) -> tuple[list[Intent], list[dict[str, Any]]]:
+    """同一 instrument_id の Intent を先頭のみ残す(決定論・審査 C-1)。
+
+    重複を許すと 1 銘柄に複数スロットが割り当たり、個々の注文はゲート G-3(ポッド内
+    集中度)を通りながら合計で上限を破れる — G-3 は同一実行内の pending 注文を
+    約定後想定に加算しないため。生成側(LLM・シグナル)の重複が実効的な集中度を決める
+    のは不変原則1 の趣旨に反するので、ゲートに投げる前にここで潰す。
+
+    返り値は ``(採用した Intent, 落とした理由の記録)``。
+    """
+    seen: set[int] = set()
+    kept: list[Intent] = []
+    dropped: list[dict[str, Any]] = []
+    for intent in intents:
+        if intent.instrument_id in seen:
+            dropped.append(
+                {
+                    "instrument_id": intent.instrument_id,
+                    "reason": "同一銘柄の重複提案(先頭のみ採用 — 集中度の二重割り当て防止)",
+                }
+            )
+            continue
+        seen.add(intent.instrument_id)
+        kept.append(intent)
+    return kept, dropped
+
+
 def submit_intents(
     conn: psycopg.Connection,
     run: Run,
@@ -287,9 +346,21 @@ def submit_intents(
 ) -> SubmitResult:
     """Intent(採否)を数量つきの注文案に変換し、記録 → ゲートへ通す。
 
-    処理順は決定論: クローズ(銘柄 ID 昇順)→ 新規建て(Intent の順)。スロットが尽きた
-    分・数量 0・価格欠落・保有なしのクローズは ``skipped`` に理由つきで残す(黙って
-    落とさない)。
+    処理順は**完全に決定論**(独立役員審査 2026-08-03 C-1/C-8):
+
+    1. **重複排除**: 同一 instrument_id の Intent は先頭のみ採用する。重複を許すと
+       1銘柄に複数スロットが割り当てられ、各注文が個別にはゲート G-3(ポッド内集中度)
+       を通りながら合計で上限を破れる(G-3 は pending 注文を post-trade に加算しない)。
+       LLM の出力の重複が実効集中度を決めてはならない — 不変原則1
+    2. **順序の固定**: クローズ → 新規建ての順、各群は **instrument_id 昇順**。
+       LLM の出力順(= 生成側の選好)がスロットの配分優先度を決めない
+    3. **実行内 held の更新**: 通過した新規建ての銘柄は即座に保有扱いにし、通過した
+       クローズはスロットを空ける。同一実行内で同じ銘柄に二度スロットを割り当てない
+       (1 の二重防御)。未約定の通過注文(``load_pending_orders``)も同様に扱い、
+       同じ日の二度目の実行で二重に建てる/二重に売ることを防ぐ
+
+    スロットが尽きた分・数量 0・価格欠落・保有なしのクローズ・語彙外 direction は
+    ``skipped`` に理由つきで残す(黙って落とさない)。
     """
     if ips is None or mandates is None:
         loaded_ips, loaded_mandates = load_and_validate()
@@ -299,20 +370,37 @@ def submit_intents(
     result = SubmitResult()
 
     positions = load_positions(conn, book_id)
+    # plan は1スロットの金額(仮想資本 ÷ スロット数)の正。空きスロット数は下で
+    # 「保有 + 未約定の通過注文」から数え直す(約定前の枠も占有として数える)。
     plan = sizing.slot_plan(mandate, max_slots=max_slots, positions=positions)
     held = sizing.held_positions(positions, mandate.fm)
+    pending_entries, closing = load_pending_orders(conn, book_id, mandate.fm)
+    for instrument_id, qty in pending_entries.items():
+        held.setdefault(instrument_id, qty)
     nav, cash = load_nav_and_cash(conn, book_id, as_of=as_of)
 
-    needed = {p.instrument_id for p in positions} | {i.instrument_id for i in intents}
+    unique, duplicates = dedupe_intents(intents)
+    result.skipped.extend(duplicates)
+
+    needed = {p.instrument_id for p in positions} | {i.instrument_id for i in unique}
     prices = load_prices(conn, sorted(needed), as_of=as_of)
 
-    closes = sorted(
-        (i for i in intents if i.direction == "close"), key=lambda i: i.instrument_id
+    ordered = sorted(
+        (i for i in unique if i.direction in LONG_ONLY_DIRECTIONS),
+        key=lambda i: (0 if i.direction == "close" else 1, i.instrument_id),
     )
-    buys = [i for i in intents if i.direction == "buy"]
-    free_slots = plan.free_slots
+    for intent in unique:
+        if intent.direction not in LONG_ONLY_DIRECTIONS:
+            # 語彙外・第一陣が扱わない direction は黙って落とさず理由を残す(審査 C-7)。
+            result.skipped.append(
+                {
+                    "instrument_id": intent.instrument_id,
+                    "reason": f"未対応の direction={intent.direction!r}(第一陣は buy/close)",
+                }
+            )
+    free_slots = max(max_slots - len(held), 0)
 
-    for intent in closes + buys:
+    for intent in ordered:
         candidate = candidates.get(intent.instrument_id)
         if candidate is None:
             result.skipped.append(
@@ -331,6 +419,14 @@ def submit_intents(
             if qty <= 0:
                 result.skipped.append(
                     {"instrument_id": intent.instrument_id, "reason": "保有なし(クローズ不要)"}
+                )
+                continue
+            if intent.instrument_id in closing:
+                result.skipped.append(
+                    {
+                        "instrument_id": intent.instrument_id,
+                        "reason": "決済注文が未約定(二重売り防止)",
+                    }
                 )
                 continue
             if held.get(intent.instrument_id, Decimal(0)) < 0:
@@ -394,6 +490,16 @@ def submit_intents(
             free_slots += 1 if side == "buy" else 0  # 通らなかった枠は戻す
         else:
             result.passed += 1
+            if side == "buy":
+                # 通過した新規建ては即座に保有扱い(実行内の二重割り当て防止 — 審査 C-1)。
+                # 約定前でもスロットは消費済みとみなす(fail-closed 側に倒す)。
+                held[intent.instrument_id] = qty
+            else:
+                # 通過したクローズはスロットを空け(新規建てより先に評価される)、
+                # 以降の二重売りを止める。
+                held.pop(intent.instrument_id, None)
+                closing.add(intent.instrument_id)
+                free_slots += 1
         result.orders.append(
             _order_summary(intent, thesis_id, order_id, gate_log_id, verdict, side, qty)
         )
@@ -426,8 +532,10 @@ __all__ = [
     "Candidate",
     "Intent",
     "SubmitResult",
+    "dedupe_intents",
     "ips_asset_class",
     "load_nav_and_cash",
+    "load_pending_orders",
     "load_positions",
     "load_prices",
     "load_universe",

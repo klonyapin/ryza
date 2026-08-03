@@ -185,6 +185,54 @@ def test_out_of_universe_candidate_is_rejected(conn, run, as_of, ben_universe, i
     assert "ユニバース外" in result["rejected"][0]["reason"]
 
 
+def test_duplicate_candidates_produce_one_order(
+    conn, run, as_of, ben_universe, insert_document
+):
+    """同一銘柄×3 を返しても注文は1本(ポッド内集中度の突破経路 — 審査 C-1)。"""
+    iid = ben_universe()
+    doc_id = insert_document()
+    llm, _ = _llm([
+        {"candidates": [_candidate(iid, doc_id) for _ in range(3)], "reviews": []}
+    ])
+    result = ben.run_ben(
+        conn, run, llm, model=MODEL, book_id=BOOK, as_of=as_of, cfg=_cfg(max_candidates=3)
+    )
+    assert result["candidates"] == 1 and result["proposed"] == 1
+    assert sum("重複" in r["reason"] for r in result["rejected"]) == 2
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*), COALESCE(sum(qty * ref_price), 0)
+            FROM trading.orders WHERE fm = 'ben' AND instrument_id = %s
+            """,
+            (iid,),
+        )
+        count, notional = cur.fetchone()
+    # ポッド内集中度上限 40% × 仮想資本 ¥2,000,000 = ¥800,000 を超えない。
+    assert count == 1 and Decimal(notional) <= Decimal(800_000)
+
+
+def test_candidate_cap_counts_distinct_instruments(
+    conn, run, as_of, ben_universe, insert_document
+):
+    """候補数上限は重複排除後に数える(重複で上限が埋まって実質1銘柄にならない)。"""
+    ids = [ben_universe(symbol=f"500{i}.T") for i in range(2)]
+    doc_id = insert_document()
+    llm, _ = _llm([
+        {
+            "candidates": [
+                _candidate(ids[0], doc_id), _candidate(ids[0], doc_id),
+                _candidate(ids[1], doc_id),
+            ],
+            "reviews": [],
+        }
+    ])
+    result = ben.run_ben(
+        conn, run, llm, model=MODEL, book_id=BOOK, as_of=as_of, cfg=_cfg(max_candidates=2)
+    )
+    assert result["candidates"] == 2 and result["passed"] == 2
+
+
 def test_candidate_cap_is_enforced(conn, run, as_of, ben_universe, insert_document):
     """候補数上限を超えた分は決定論に切り捨てる。"""
     ids = [ben_universe(symbol=f"100{i}.T") for i in range(3)]
