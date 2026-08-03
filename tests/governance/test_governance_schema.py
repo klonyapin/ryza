@@ -12,6 +12,7 @@ import psycopg
 import pytest
 import yaml
 
+from ryza.db import migrate
 from ryza.db.conn import connect
 from ryza.governance import personas
 from ryza.governance.decisions import RESERVED_KIND_BY_MATTER
@@ -533,7 +534,7 @@ def test_explicit_approval_by_representative_still_allowed(conn):
 # ── 事後否認と現決定 view(0021・定款 v0.4 第3条「いつでも否認できる」)────────
 _CURRENT_COLUMNS = (
     "effective_decision", "recorded_decision", "is_vetoed", "veto_reason",
-    "revert_commit", "derived_effects_ref", "veto_id", "veto_kind",
+    "revert_commit", "derived_effects_ref", "veto_id", "veto_kind", "veto_origin",
 )
 
 
@@ -546,15 +547,18 @@ def _new_veto(
     vetoed_by: str = "999",
     revert_commit: str | None = None,
     derived_effects_ref: str | None = None,
+    origin: str = "discord_button",
 ) -> int:
     cur.execute(
         """
         INSERT INTO governance.decision_vetoes
-            (decision_id, kind, vetoed_by, reason, revert_commit, derived_effects_ref)
-        VALUES (%s, %s, %s, %s, %s, %s)
+            (decision_id, kind, vetoed_by, reason, revert_commit, derived_effects_ref,
+             origin)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING veto_id
         """,
-        (decision_id, kind, vetoed_by, reason, revert_commit, derived_effects_ref),
+        (decision_id, kind, vetoed_by, reason, revert_commit, derived_effects_ref,
+         origin),
     )
     return cur.fetchone()[0]
 
@@ -692,8 +696,8 @@ def test_view_order_is_by_veto_id_not_timestamp(conn):
         cur.execute(
             """
             INSERT INTO governance.decision_vetoes
-                (decision_id, kind, vetoed_by, reason, vetoed_at)
-            VALUES (%s, 'withdrawal', '999', '撤回', now() - interval '10 days')
+                (decision_id, kind, vetoed_by, reason, vetoed_at, origin)
+            VALUES (%s, 'withdrawal', '999', '撤回', now() - interval '10 days', 'cli')
             """,
             (did,),
         )
@@ -810,4 +814,96 @@ def test_assume_role_end_to_end(conn, run_id):
     assert "独立役員" in prompt
     assert "職務規程(charter)" in prompt
     assert "デモ資金スケールの外挿懸念" in prompt
+    conn.rollback()
+
+
+# ── 否認の出所 origin(0030 / 独立役員審査 0021 C-8・重要-5)────────────────────
+# run_id では経路を識別できない(ボタン経路と /veto は同じ job_name で Run を開く)。
+# オーナー検証は呼び出し側供給の 2 引数比較でしかないため、「どの経路から書かれたか」が
+# 行に残っていることが、想定外の経路からの否認を事後に検出する唯一の手がかりになる。
+
+
+@pytest.mark.parametrize(
+    "origin", ["discord_button", "discord_command", "cli", "job"]
+)
+def test_veto_origin_is_recorded(conn, origin):
+    """語彙の4値はそのまま記録され、現決定 view から読める。"""
+    with conn.cursor() as cur:
+        did = _new_decision(cur, f"veto-origin-{origin}", "deemed")
+        _new_veto(cur, did, origin=origin)
+        row = _current(cur, f"veto-origin-{origin}")
+    assert row["veto_origin"] == origin
+    conn.rollback()
+
+
+def test_veto_origin_rejects_unknown_value(conn):
+    """語彙外の出所は CHECK が拒否する — 未知の経路が黙って混ざらない。"""
+    with conn.cursor() as cur:
+        did = _new_decision(cur, "veto-origin-unknown", "deemed")
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _new_veto(cur, did, origin="webhook")
+    conn.rollback()
+
+
+def test_veto_origin_is_required(conn):
+    """origin を渡し忘れた INSERT は落ちる(DEFAULT を残していない — 0030)。
+
+    バックフィル用の DEFAULT をそのまま残すと、出所を渡さない新しい経路が黙って
+    'discord_button' として記録され、この列の目的そのものが失われる。
+    """
+    with conn.cursor() as cur:
+        did = _new_decision(cur, "veto-origin-missing", "deemed")
+        with pytest.raises(psycopg.errors.NotNullViolation):
+            cur.execute(
+                """
+                INSERT INTO governance.decision_vetoes (decision_id, vetoed_by, reason)
+                VALUES (%s, '999', '出所なし否認')
+                """,
+                (did,),
+            )
+    conn.rollback()
+
+
+def test_veto_origin_backfills_existing_rows(conn):
+    """0030 は追記オンリーのまま既存行を 'discord_button' で埋める。
+
+    decision_vetoes は行トリガ(decision_vetoes_no_mutation)が UPDATE を拒否するため、
+    通常のバックフィル(UPDATE)ができない。0030 は `ADD COLUMN ... NOT NULL DEFAULT` が
+    DDL であって DML の行トリガを発火しないことを使い、追加と同時に埋めてから
+    DROP DEFAULT する。**その前提が壊れると migration 自体が適用できなくなる**ので、
+    ここで migration の実テキストを 0030 適用前の状態へ流し直して検証する。
+
+    DDL はトランザクション内で巻き戻せる(PostgreSQL)。この関数は commit しない。
+    """
+    sql = (migrate.MIGRATIONS_DIR / "0030_veto_origin.sql").read_text(encoding="utf-8")
+    with conn.cursor() as cur:
+        # 0030 適用前の状態を再現する(view は列に依存するので一緒に落ちる)。
+        cur.execute("ALTER TABLE governance.decision_vetoes DROP COLUMN origin CASCADE")
+        did = _new_decision(cur, "veto-origin-legacy", "deemed")
+        cur.execute(
+            """
+            INSERT INTO governance.decision_vetoes (decision_id, kind, vetoed_by, reason)
+            VALUES (%s, 'veto', '999', '0030 以前に書かれた否認')
+            RETURNING veto_id
+            """,
+            (did,),
+        )
+        legacy_id = cur.fetchone()[0]
+        cur.execute(sql)  # ← migration の実テキストを適用
+        cur.execute(
+            "SELECT origin FROM governance.decision_vetoes WHERE veto_id = %s",
+            (legacy_id,),
+        )
+        assert cur.fetchone()[0] == "discord_button"
+        # DEFAULT は残っていない(残ると渡し忘れが黙って通る)。
+        cur.execute(
+            "SELECT column_default FROM information_schema.columns "
+            "WHERE table_schema = 'governance' AND table_name = 'decision_vetoes' "
+            "AND column_name = 'origin'"
+        )
+        assert cur.fetchone()[0] is None
+        # view も 0030 のテキストで再作成され、出所を通す。
+        assert _current(cur, "veto-origin-legacy")["veto_origin"] == "discord_button"
+        # 2 度目の適用は何も壊さない(冪等)。
+        cur.execute(sql)
     conn.rollback()
