@@ -1,7 +1,7 @@
 # config/governance.yaml — 権限マトリクス・保護領域・統制テーブル(定款の機械可読版)
 # 正: docs/design/06-constitution.md(v0.3)
 # 保護領域(定款第5条): 本ファイル自身の変更も承認記録(みなし承認 48h または明示)必須。
-version: "0.3"
+version: "0.4"
 status: active # 2026-08-03 代表批准(批准 PR マージ)により発効
 source: docs/design/06-constitution.md
 
@@ -24,10 +24,11 @@ representative_reserved:
 # governance.decisions に decision='deemed' で記録し、明示承認と区別する。
 deemed_approval:
   channel: 承認
-  window_hours_default: 48 # マンデート・デモ内昇格・保護領域変更
-  window_hours_ips: 168 # IPS 改訂は 7 日
-  audit_metric: deemed_ratio # 異議ゼロの長期継続は形骸化アラート(監査部門)
-  live_escalation: リスク上限を緩める方向の IPS・マンデート改訂は実弾移行後は明示承認に格上げ
+  effective: on_notice # v0.4: 通知と同時に発効(期限待ちなし)。PR リンク必須
+  veto: anytime # 代表はいつでも否認可。否認 → 遅滞なく取消(revert)+派生効果を #運営 へ報告
+  audit_metric: deemed_ratio # 否認ゼロの長期継続は形骸化アラート(監査部門)
+  unnotified_change: violation # 通知なき発効は A-13 の無承認変更扱い
+  live_escalation: リスク上限を緩める方向の IPS・マンデート改訂は実弾移行後は事前明示承認に格上げ
 
 # 定款第4条: 変更対象4層と改訂権限。
 # 層帰属は最上位一致優先(glob が重複する場合は上位層の手続が勝つ)。
