@@ -382,3 +382,16 @@ class TestProtectedAreaPathsExist:
     def test_this_test_file_is_protected(self) -> None:
         """不変条件テスト自体が保護領域であること(テストを外して統制を消せないようにする)。"""
         assert "tests/test_ips.py" in _protected_paths()
+
+    def test_ci_workflow_is_protected(self) -> None:
+        """CI 定義が保護領域であること(独立役員審査 2026-08-04 中-5)。
+
+        不変条件テストを守っても、それを走らせる唯一の執行点(required status check)が
+        無防備なら統制は `Run tests` ステップの削除だけで静かに外れる。
+        """
+        assert ".github/workflows/ci.yml" in _protected_paths()
+
+    def test_ci_checkout_fetches_full_history(self) -> None:
+        """CI の checkout が全履歴を取ること(浅い clone では A-18 の実リポジトリ検査が落ちる)。"""
+        ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        assert "fetch-depth: 0" in ci

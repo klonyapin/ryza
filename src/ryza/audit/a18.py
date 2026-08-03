@@ -109,6 +109,9 @@ _PR_MERGE_RE = re.compile(r"^Merge pull request #\d+")
 # 見出し行のバージョン表記(例: 「# Ryza 投資方針書(IPS)v1.3」)。
 _DOC_VERSION_RE = re.compile(r"v(\d+(?:\.\d+)+)")
 
+# 受容記録の commit は 40 桁 hex の完全 SHA のみ(短縮 SHA は曖昧で誤一致・永久不一致を招く)。
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # git ヘルパ(subprocess・リポジトリパス引数化)
@@ -216,9 +219,10 @@ def check_protected_commits(
 
     承認とみなす条件(定款附則):
       (a) コミット本文の ``Approved:`` トレーラ
-      (b) GitHub マージ PR 経由 = ``Merge pull request`` マージコミットの配下で main に到達
-      (c) **PR 承継**: 有効な ``Approved:`` トレーラを持つ first-parent 上の PR マージ M が
-          main に持ち込んだコミット群は、M の承認を承継する(下記)
+      (b) GitHub マージ PR 経由 = ``Merge pull request`` マージコミット(**親2**)の配下で
+          main に到達
+      (c) **PR 承継**: 有効な ``Approved:`` トレーラを持つ first-parent 上の PR マージ M
+          (**親2**)が main に持ち込んだコミット群は、M の承認を承継する(下記)
     ``since_commit``(批准コミット)以前のコミットは ``rev-list since..HEAD`` により対象外。
     """
     repo = str(repo_path)
@@ -256,7 +260,13 @@ def check_protected_commits(
         merge = None if sha in first_parent else _find_introducing_merge(repo, sha, fp_merges)
         if merge is not None:
             m_subject = _git(repo, "log", "-1", "--format=%s", merge).strip()
-            m_is_pr = bool(_PR_MERGE_RE.match(m_subject))
+            # octopus マージ(親3以上)は起点にしない。GitHub の PR マージは常に親2であり、
+            # octopus に PR 件名を付けると複数ブランチの内容を1つの承認で通せてしまう
+            # (独立役員審査 2026-08-04 中-3 の PoC: 未審査の保護ファイル3件が violations=0 で
+            # 通過した)。起点候補の探索自体は全 first-parent マージに対して行う — octopus を
+            # 探索対象から外すと「持ち込んだマージ」が後続の別 PR に誤帰属するため。
+            m_is_two_parent = len(_git(repo, "log", "-1", "--format=%P", merge).split()) == 2
+            m_is_pr = bool(_PR_MERGE_RE.match(m_subject)) and m_is_two_parent
             m_approved = has_approval_trailer(
                 _git(repo, "log", "-1", "--format=%B", merge), trailer
             )
@@ -288,7 +298,7 @@ def check_protected_commits(
             # first-parent 上のマージ自身(件名偽装の余地がある経路)は従来どおり検査する。
             reason = "マージ自身のコンフリクト解消差分(evil merge)で Approved トレーラなし"
         elif sha not in first_parent:
-            reason = "マージ経由だが PR マージコミットが確認できない"
+            reason = "マージ経由だが PR マージコミット(親2)が確認できない"
         else:
             reason = "main への直接コミットで Approved トレーラなし"
         violations.append(
@@ -312,16 +322,34 @@ def _ack_key(commit: str, files: list[str] | tuple[str, ...]) -> tuple[str, tupl
     return commit.strip().lower(), tuple(sorted({str(f).strip() for f in files}))
 
 
-def acknowledged_index(gov: dict[str, Any]) -> dict[tuple[str, tuple[str, ...]], dict[str, Any]]:
-    """``acknowledged_findings`` を一致キー → エントリの索引に変換する。"""
+def acknowledged_index(
+    gov: dict[str, Any],
+) -> tuple[dict[tuple[str, tuple[str, ...]], dict[str, Any]], list[str]]:
+    """``acknowledged_findings`` を(一致キー → エントリ の索引, 無効エントリの注記)に変換する。
+
+    無効(commit / paths 欠落・40 桁 hex でない SHA)なエントリは索引に入れず、注記で開示する。
+    黙って落とすと運用者が「受容できた」と誤認する(独立役員審査 2026-08-04 低-7)。
+    """
     index: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
+    notes: list[str] = []
     for entry in gov.get("acknowledged_findings") or []:
-        commit = str(entry.get("commit", ""))
+        commit = str(entry.get("commit", "")).strip()
         paths = entry.get("paths") or []
         if not commit or not paths:
-            continue  # 不完全なエントリは受容として効かせない(fail-safe = 違反のまま出す)
+            # 不完全なエントリは受容として効かせない(fail-safe = 違反のまま出す)。
+            notes.append(
+                f"acknowledged_findings のエントリが無効(commit / paths のいずれかが欠落): "
+                f"{commit or '(commit なし)'}"
+            )
+            continue
+        if not _FULL_SHA_RE.match(commit):
+            notes.append(
+                f"acknowledged_findings のエントリが無効(40 桁 hex の完全 SHA が必要 — "
+                f"短縮 SHA は曖昧なため受け付けない): {commit}"
+            )
+            continue
         index[_ack_key(commit, paths)] = entry
-    return index
+    return index, notes
 
 
 def partition_acknowledged(
@@ -333,7 +361,7 @@ def partition_acknowledged(
     残る(将来の別の違反や、保護領域追加でパス集合が変わったケースを巻き込まない)。
     受容済みは捨てずに返し、報告側で必ず可視化する(黙って消さない)。
     """
-    index = acknowledged_index(gov)
+    index, notes = acknowledged_index(gov)
     matched: set[tuple[str, tuple[str, ...]]] = set()
     unacknowledged: list[dict[str, Any]] = []
     acknowledged: list[dict[str, Any]] = []
@@ -352,7 +380,7 @@ def partition_acknowledged(
                 "ack_reason": entry.get("reason"),
             }
         )
-    notes = [
+    notes += [
         f"acknowledged_findings のエントリが一致する違反を持たない(陳腐化・SHA/パスの誤り"
         f"の可能性): {key[0][:12]}({', '.join(key[1])})"
         for key in index
@@ -576,7 +604,15 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
         by_merge: dict[str, list[dict[str, Any]]] = {}
         for item in inherited:
             by_merge.setdefault(f"`{item['merge']}` {item['merge_subject']}", []).append(item)
-        inh_lines = [f"- {m}: {len(items)} コミット" for m, items in by_merge.items()]
+        # 免除した保護パスの和集合まで出す(件数だけでは「何が免除されたか」が見えない
+        # — 独立役員審査 2026-08-04 中-3)。長くなる場合は先頭数件+残数に丸める。
+        inh_lines = []
+        for m, items in by_merge.items():
+            paths = sorted({f for item in items for f in item["files"]})
+            shown = ", ".join(paths[:5])
+            if len(paths) > 5:
+                shown += f" ほか {len(paths) - 5} 件"
+            inh_lines.append(f"- {m}: {len(items)} コミット({shown})")
         fields.append(
             {
                 "name": f"PR 承継で承認: {len(inherited)} コミット(起点 {len(by_merge)} PR)",

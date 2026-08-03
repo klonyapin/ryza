@@ -148,6 +148,19 @@ protected_areas:
     area: deploy_path
   - path: .streamlit/config.toml
     area: deploy_path
+  # 独立役員審査 2026-08-04 中-5。CI は「開発管理 §2-3(検証)」の唯一の執行点であり、
+  # required status check の実体でもある。`Run tests` ステップを削るだけで不変条件テスト
+  # (帳簿分離・Kill Switch 経路・保護領域パス実在)が静かに無効化されるため、ops/lib/** を
+  # 登録したのと同じ論法で保護する。area: ci は本登録で新設。
+  - path: .github/workflows/ci.yml
+    area: ci
+  # 棚卸しの記録(2026-08-04・中-5): 以下は稼働経路でないため **対象外** と判断した。
+  #   site/Dockerfile … site/ は静的サイトの生成物であり、資産・注文・承認のどの経路にも
+  #                     触れない(改変の最悪影響は公開ページの表示崩れ)
+  #   compose.yaml    … ローカル開発用の DB 起動定義。本番の稼働イメージは
+  #                     docker/postgres/Dockerfile(登録済み)と Cloud Run 側の定義が決める
+  #   ops/fetch-fonts.sh … 生成物(フォント)がリポジトリに入るだけで稼働経路ではない
+  # この判断が変わる場合(site を動的化する・compose を本番に使う等)は登録し直すこと。
 
 # 承認記録の様式(定款第5条・C-5): 保護領域の変更コミットは本文末尾に
 #   Approved: <GitHub Issue URL または governance.decisions の ID>
@@ -171,6 +184,14 @@ approval_trailer: "Approved:"
 #     同じコミットが別の保護パスにも触れていたと判明した場合、paths 集合が変わるため受容は
 #     自動的に外れる(将来の別の違反を巻き込まない)
 #   - 一致する違反が無くなったエントリ(改番・登録漏れ)は報告 notes に「陳腐化」として出る
+#   - commit は **40 桁 hex の完全 SHA** のみ有効。短縮 SHA・欠落エントリは索引に入れず
+#     「無効」として notes に開示する(黙って落とすと受容できたと誤認するため)
+#   - **限界と担保(独立役員審査 2026-08-04 低-8)**: reason / approval_ref の**書換**は
+#     A-18-1 の一致キー(commit + paths)に影響しないため、受容の成否としては検出されない。
+#     担保は本ファイル自身が protected_areas(area: constitution)であること — 書換コミットは
+#     A-18-1 の突合対象になり Approved トレーラ(または承認済み PR)を要求される。すなわち
+#     「気付かれずに理由を書き換える」ことはできないが、「承認を経て書き換える」ことは可能。
+#     受容の削除は違反の復活として自動的に顕在化する(自己是正的)。
 # 履歴注記(2026-08-04): 当初は `2191285…`(ops/deploy-dashboard.sh・PR #58 配下の evil merge)も
 # 受容登録する予定だったが、同じ PR で A-18-1 に **PR 承継** ルール(トレーラ有効な PR マージが
 # 持ち込んだコミット群は承認を承継する)を入れた結果、親 PR #58 のマージがトレーラを持つため

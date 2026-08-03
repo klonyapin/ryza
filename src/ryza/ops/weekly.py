@@ -354,12 +354,17 @@ def run_a18_if_configured(*, dry_run: bool) -> str:
     from ryza.audit import a18
 
     try:
-        result = a18.run_and_report(repo_path, dry_run=dry_run)
+        # always_report=True: 受容済み既知違反(acknowledged)と PR 承継(inherited)は
+        # has_findings に数えないため、所見ゼロの定常状態では報告自体が出ず「必ず可視化」が
+        # 経路依存になっていた(独立役員審査 2026-08-04 中-4)。VM 経路(ops/deploy-a18.sh)は
+        # 既に --always-report を渡しており、週次からの呼び出しもこれに揃える。
+        result = a18.run_and_report(repo_path, dry_run=dry_run, always_report=True)
     except Exception as exc:
         log.exception("A-18 監査の実行に失敗(週次ジョブ自体は継続)")
         return f"失敗: {type(exc).__name__}: {exc}"
     status = (
-        f"実行(違反 {len(result['violations'])} / 不整合 {len(result['mismatches'])} / "
+        f"実行(違反 {len(result['violations'])} / 受容 {len(result.get('acknowledged') or [])} / "
+        f"PR 承継 {len(result.get('inherited') or [])} / 不整合 {len(result['mismatches'])} / "
         f"宣言 {len(result['declarations'])})"
     )
     log.info("A-18 監査完了: %s", status)

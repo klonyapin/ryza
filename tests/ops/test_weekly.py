@@ -374,6 +374,31 @@ def test_run_a18_if_configured_unwired(monkeypatch):
     assert weekly.run_a18_if_configured(dry_run=True) == weekly.A18_STATUS_UNWIRED
 
 
+def test_run_a18_always_reports_and_shows_acknowledged_and_inherited(monkeypatch, tmp_path):
+    """週次からの A-18 呼び出しは always_report=True(受容・承継が定常状態でも毎週見える)。
+
+    受容(acknowledged)と PR 承継(inherited)は has_findings に数えないため、所見ゼロでは
+    報告自体が出ず「必ず可視化」が経路依存になっていた(独立役員審査 2026-08-04 中-4)。
+    """
+    from ryza.audit import a18
+
+    captured: dict = {}
+
+    def fake_run_and_report(repo_path, **kwargs):
+        captured.update(kwargs)
+        return {
+            "violations": [], "mismatches": [], "declarations": [{"rule": "x"}],
+            "acknowledged": [{"commit": "abc123def456"}],
+            "inherited": [{"commit": "def456abc123"}, {"commit": "111222333444"}],
+        }
+
+    monkeypatch.setattr(a18, "run_and_report", fake_run_and_report)
+    monkeypatch.setenv("A18_REPO_PATH", str(tmp_path))
+    status = weekly.run_a18_if_configured(dry_run=True)
+    assert captured["always_report"] is True
+    assert "受容 1" in status and "PR 承継 2" in status
+
+
 def test_run_a18_if_configured_failure_is_reported(monkeypatch, tmp_path):
     """A-18 の失敗は握るが、状態行に「失敗」として必ず現れる(週次ジョブは継続)。"""
     monkeypatch.setenv("A18_REPO_PATH", str(tmp_path))  # git リポジトリでない → 失敗

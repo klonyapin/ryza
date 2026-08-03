@@ -31,7 +31,12 @@ jobs:
     env:
       RYZA_DATABASE_URL: postgresql://ryza:ryza@localhost:5432/ryza
     steps:
+      # fetch-depth: 0 = 全履歴。A-18 の実リポジトリ検査テスト(tests/audit/test_a18.py の
+      # 実リポジトリ系)は批准コミット c7af81e からの rev-list を行うため、既定の浅い clone
+      # (depth 1)では ValueError で必ず落ちる(独立役員審査 2026-08-04 中-6・--depth 1 で再現)。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # ── PostgreSQL(pgvector + pg_partman)をローカル構成と同一イメージで起動 ──
       - name: Build postgres image (pgvector + pg_partman)

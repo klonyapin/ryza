@@ -137,7 +137,19 @@ reminders:
       type: issue_create
       title: "A-18-1: マージ PR の実在を GitHub API で照合する"
       labels: [impl]
-      body: "現行の src/ryza/audit/a18.py は PR 件名(Merge pull request #N)の自己申告のみで承認と判定しており件名偽装でバイパス可能(独立役員審査 2026-08-03 で実証)。GitHub API で PR #N の実在・マージコミット SHA の一致・マージ実行者を照合する。定款第5条の実弾移行前提条件(ブランチ保護+トレーラ検査 CI)の実装判断と合わせて行う。"
+      body: "現行の src/ryza/audit/a18.py は PR 件名(Merge pull request #N)の自己申告のみで承認と判定しており件名偽装でバイパス可能(独立役員審査 2026-08-03 で実証)。GitHub API で PR #N の実在・マージコミット SHA の一致・マージ実行者を照合する。定款第5条の実弾移行前提条件(ブランチ保護+トレーラ検査 CI)の実装判断と合わせて行う。**2026-08-04 追記**: PR 承継ルールの導入で偽トレーラの爆風半径が『1コミット』から『ブランチ全体』に拡大したため、本件は `approved-trailer-v2`(期限 2026-08-10)と統合して実装してよい(実装するなら早い方に寄せる)。"
+    status: pending
+
+  - id: approved-trailer-v2
+    what: "Approved トレーラ様式 v2(reviewed=<sha40> 等)と PR 実在照合 — PR 承継の起点検証(独立審査 2026-08-04 重大-1/重大-2 の恒久対策)"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "Approved トレーラ様式 v2: 承継を reviewed SHA の祖先に限定し PR 実在を照合する"
+      labels: [governance]
+      body: "A-18-1 の PR 承継(2026-08-04 導入)は、first-parent 上の『件名がマージ形式・親2・Approved トレーラ有効』なマージが持ち込んだコミット群を承認扱いにする。独立役員審査(docs/reviews/g-a18-protect-independent-review.md「承継ルール審査記録」)は2つの構造的欠陥を PoC 付きで指摘した: **重大-1** `has_approval_trailer` は `^Approved:\\s*\\S+` を見るだけ、`_PR_MERGE_RE` は PR 番号の実在を見ないため、実在しない PR #999999 の件名+架空 URL のトレーラを持つマージが、ブランチ内 evil merge による Kill Switch 改変を violations=0 で通した。承継は偽トレーラ1件の爆風半径を『1コミット』から『ブランチ全体』へ公式化する。**重大-2** 承継は『マージ時点のブランチ全体』に及ぶため、独立審査・#承認 通知の**後**に積まれたコミットも同じトレーラで承認扱いになる(審査後 push の吸収)。実装内容: ①トレーラ様式を `Approved: <url> reviewed=<sha40> mode=deemed|principal notified=<ISO8601>` に拡張する(定款第5条 C-5 様式の改訂 = L1 手続)、②承継を `reviewed` SHA の祖先に限定する(reviewed より後に積まれたコミットは承継しない)、③`mode=deemed` は #承認 通知の実在と発効条件を機械検査する(定款 v0.4 は effective: on_notice のため 48h 経過検査ではなく**通知の実在**を照合する — 審査者の 48h 前提は v0.3 の様式で事実誤認、2026-08-04 設計リード裁定)、④様式不備のトレーラは承継の起点にしない(fail-safe)、⑤`a18-github-pr-verification`(PR 実在の API 照合)と統合してよい。移行: 既存の v1 トレーラ(reviewed 無し)は経過措置として当面 violations にしないが、承継の起点としては扱わない/扱う のいずれにするかを実装時に決めて記録すること。出典: 独立役員審査 2026-08-04 重大-1・重大-2 と反対意見書③(承継は reviewed SHA 固定を伴う場合のみ有効とし、それ以外は受容へ寄せる代替案)。"
     status: pending
 
   - id: risk-limits-state-freshness-gate

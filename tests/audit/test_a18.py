@@ -262,6 +262,8 @@ def test_pr_inheritance_is_visible_in_report(repo):
     )
     assert "1 コミット" in field["name"]
     assert merge[:12] in field["value"] and "1 コミット" in field["value"]
+    # 件数だけでなく「何を免除したか」= 保護パスも出す(独立役員審査 2026-08-04 中-3)。
+    assert "docs/protected.md" in field["value"]
 
 
 def test_pr_inheritance_requires_trailer_on_the_merge(repo):
@@ -307,6 +309,28 @@ def test_inheritance_does_not_cover_direct_main_commits(repo):
     violations, inherited, _ = _run_a181_full(r, since)
     assert [v["commit"] for v in violations] == [sha[:12]]
     assert inherited == []
+
+
+def test_octopus_merge_cannot_be_an_inheritance_origin(repo):
+    """octopus マージ(親3以上)は PR 件名+トレーラを付けても承継・附則(b)の起点にしない。
+
+    GitHub の PR マージは常に親2。octopus に PR 件名を付けると複数ブランチの内容を1つの
+    承認で通せてしまう(独立役員審査 2026-08-04 中-3 の PoC)。
+    """
+    r, since = repo
+    _git(r, "checkout", "-q", "-b", "o1")
+    a = _commit(r, "docs/protected.md", "a\n", "docs: o1 の保護領域変更")
+    _git(r, "checkout", "-q", "main")
+    _git(r, "checkout", "-q", "-b", "o2")
+    b = _commit(r, "src/prot/ks.py", "x = 1\n", "feat: o2 の保護領域変更")
+    _git(r, "checkout", "-q", "main")
+    _git(r, "merge", "--no-ff", "-q", "o1", "o2",
+         "-m", "Merge pull request #9 from k/octopus\n\n" + APPROVED)
+    assert len(_git(r, "log", "-1", "--format=%P").split()) == 3  # octopus であること
+    violations, inherited, _ = _run_a181_full(r, since)
+    assert inherited == []
+    assert sorted(v["commit"] for v in violations) == sorted([a[:12], b[:12]])
+    assert all("親2" in v["reason"] for v in violations)
 
 
 def test_plain_branch_commits_are_not_counted_as_inherited(repo):
@@ -433,12 +457,31 @@ def test_acknowledged_only_result_is_not_alerting():
     assert any(f["name"].startswith("受容済み既知違反") for f in embed["fields"])
 
 
-def test_partition_acknowledged_is_pure(repo):
-    """分割関数は単体でも使える(commit_full が無い場合は短縮 SHA で突合する)。"""
-    gov = {"acknowledged_findings": [{"commit": "abc123def456", "paths": ["CLAUDE.md"]}]}
-    v = {"commit": "abc123def456", "subject": "s", "files": ["CLAUDE.md"], "reason": "r"}
+def test_partition_acknowledged_is_pure():
+    """分割関数は単体でも使える(完全 SHA の一致・commit_full が無い場合は commit で突合)。"""
+    sha = "a" * 40
+    gov = {"acknowledged_findings": [{"commit": sha, "paths": ["CLAUDE.md"]}]}
+    v = {"commit": sha[:12], "commit_full": sha, "subject": "s",
+         "files": ["CLAUDE.md"], "reason": "r"}
     unack, ack, notes = a18.partition_acknowledged([v], gov)
     assert unack == [] and len(ack) == 1 and notes == []
+
+
+def test_short_sha_acknowledgement_is_invalid_and_disclosed():
+    """短縮 SHA のエントリは索引に入れず「無効」として notes 開示する(低-7)。"""
+    gov = {"acknowledged_findings": [{"commit": "abc123def456", "paths": ["CLAUDE.md"]}]}
+    v = {"commit": "abc123def456", "commit_full": "abc123def456" + "0" * 28,
+         "subject": "s", "files": ["CLAUDE.md"], "reason": "r"}
+    unack, ack, notes = a18.partition_acknowledged([v], gov)
+    assert len(unack) == 1 and ack == []
+    assert any("40 桁 hex の完全 SHA が必要" in n for n in notes)
+
+
+def test_incomplete_acknowledgement_entry_is_disclosed():
+    """commit / paths 欠落のエントリも黙って落とさず notes に出す(低-7)。"""
+    gov = {"acknowledged_findings": [{"commit": "b" * 40}, {"paths": ["CLAUDE.md"]}]}
+    _unack, _ack, notes = a18.partition_acknowledged([], gov)
+    assert sum("commit / paths のいずれかが欠落" in n for n in notes) == 2
 
 
 # ── 実リポジトリの受容記録(承認手続の固定)────────────────────────────────────
