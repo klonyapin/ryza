@@ -1,10 +1,9 @@
 """ingest テストの共通フィクスチャ。
 
-ライブ PostgreSQL（compose.yaml の DB）に対して実行する。接続できない場合は skip。
-各テストは関数スコープの接続を使い、commit せず rollback して隔離する。共有 DB に
-commit 済みの実データ(日次取込等)が残っていても件数 assert が壊れないよう、
-トランザクション内で対象テーブルを空にしてから yield する(tests/conftest.py の
-``clear_residual`` — rollback で削除ごと巻き戻るため実データは無傷)。
+テスト専用 DB(tests/conftest.py の ``migrated_db`` が用意)に対して実行する。
+接続できない場合は skip。各テストは関数スコープの接続を使い、commit せず rollback して
+隔離する。保険として、トランザクション内で対象テーブルを空にしてから yield する
+(tests/conftest.py の ``clear_residual`` — rollback で削除ごと巻き戻る)。
 
 **HTTP は全てモック**（受け入れ基準）。``FakeFetcher`` を注入し、取込コードは実 API へ
 一切アクセスしない。証憑ストアは ``tmp_path`` の ``LocalStorage``。
@@ -15,25 +14,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-import psycopg
 import pytest
 
-from ryza.db import migrate
-from ryza.db.conn import connect, database_url
+from ryza.db.conn import connect
 from ryza.ingest.base import FetchResult
 from ryza.provenance import EvidenceStore, LocalStorage, start_run
-
-
-@pytest.fixture(scope="session")
-def migrated_db():
-    """DB に接続できれば全マイグレーションを適用して yield。不可なら skip。"""
-    try:
-        with psycopg.connect(database_url(), connect_timeout=3):
-            pass
-    except Exception as exc:  # noqa: BLE001 - 接続不能は skip 理由として提示
-        pytest.skip(f"PostgreSQL に接続できないため skip: {exc}")
-    migrate.run()
-    yield
 
 
 @pytest.fixture

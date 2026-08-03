@@ -1,7 +1,7 @@
 """T-001 受け入れ基準の自動検証。
 
-ライブ PostgreSQL（compose.yaml の DB）に対して実行する。DB に接続できない場合は
-全テストを skip する（Docker 未導入環境向け）。
+テスト専用 DB(tests/conftest.py の ``migrated_db`` が用意)に対して実行する。
+DB に接続できない場合は全テストを skip する（Docker 未導入環境向け）。
 
 前提: `docker compose up -d` 済み、または RYZA_DATABASE_URL が有効な DB を指す。
 """
@@ -12,7 +12,7 @@ import psycopg
 import pytest
 
 from ryza.db import migrate
-from ryza.db.conn import connect, database_url
+from ryza.db.conn import connect
 
 # 5 スキーマ・全テーブルの期待集合（設計書 §2〜§6）。
 EXPECTED_TABLES: dict[str, set[str]] = {
@@ -25,18 +25,6 @@ EXPECTED_TABLES: dict[str, set[str]] = {
         "nav_snapshots", "reconciliations", "budgets",
     },
 }
-
-
-@pytest.fixture(scope="session")
-def migrated_db():
-    """DB に接続できれば全マイグレーションを適用して yield。不可なら skip。"""
-    try:
-        with psycopg.connect(database_url(), connect_timeout=3):
-            pass
-    except Exception as exc:  # noqa: BLE001 - 接続不能は skip 理由として提示
-        pytest.skip(f"PostgreSQL に接続できないため skip: {exc}")
-    migrate.run()
-    yield
 
 
 @pytest.fixture
