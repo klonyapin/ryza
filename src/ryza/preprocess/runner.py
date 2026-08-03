@@ -28,9 +28,8 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from ryza.db.conn import connect
-from ryza.preprocess import classify as classify_mod
-from ryza.preprocess import dedup as dedup_mod
-from ryza.preprocess import tagger as tagger_mod
+from ryza.preprocess.classify import Classifier, RuleClassifier
+from ryza.preprocess.dedup import DEFAULT_NEAR_THRESHOLD, classify_duplicate
 from ryza.preprocess.embed import (
     Embedder,
     HashingEmbedder,
@@ -40,6 +39,7 @@ from ryza.preprocess.embed import (
 )
 from ryza.preprocess.importance import ImportanceConfig, score_importance
 from ryza.preprocess.lang import detect_lang
+from ryza.preprocess.tagger import InstrumentDict, build_dictionary, tag
 from ryza.provenance import Run, record, start_run
 
 # 前処理ルール束のバージョン。ルール・モデルの改訂時に上げると全件が再処理対象になる。
@@ -117,12 +117,12 @@ def preprocess_document(
     *,
     embedder: Embedder,
     config: ImportanceConfig,
-    dictionary: tagger_mod.InstrumentDict,
-    classifier: classify_mod.Classifier | None = None,
+    dictionary: InstrumentDict,
+    classifier: Classifier | None = None,
     watchlist_ids: set[int] | None = None,
     held_ids: set[int] | None = None,
     anomaly_ids: set[int] | None = None,
-    near_threshold: float = dedup_mod.DEFAULT_NEAR_THRESHOLD,
+    near_threshold: float = DEFAULT_NEAR_THRESHOLD,
     version: str = PREPROCESS_VERSION,
 ) -> PreprocessOutcome:
     """1 文書を前処理し、meta 更新・埋め込み書き込み・リネージ登録まで行う。
@@ -130,7 +130,7 @@ def preprocess_document(
     ``held_ids`` は保有銘柄（将来 trade/ledger のポジションから供給。現状は呼び出し側が渡す。
     未指定は空）。``anomaly_ids`` は統計的異常が観測された銘柄集合（上流が判定して渡す）。
     """
-    classifier = classifier or classify_mod.RuleClassifier()
+    classifier = classifier or RuleClassifier()
     watchlist_ids = watchlist_ids or set()
     held_ids = held_ids or set()
     anomaly_ids = anomaly_ids or set()
@@ -146,7 +146,7 @@ def preprocess_document(
     write_embedding(conn, doc.doc_id, embedder.model_name, storage_vec)
 
     # ① 重複排除（content_hash 完全一致 + 埋め込み近傍の準重複）
-    dedup = dedup_mod.classify_duplicate(
+    dedup = classify_duplicate(
         conn,
         doc_id=doc.doc_id,
         content_hash=doc.content_hash,
@@ -158,7 +158,7 @@ def preprocess_document(
     classification = classifier.classify(doc.title, doc.body, doc.source_type)
 
     # ④ 銘柄タグ
-    tags = tagger_mod.tag(text, dictionary)
+    tags = tag(text, dictionary)
 
     # ⑤ 一次重要度
     anomaly = bool(set(tags.instrument_ids) & anomaly_ids)
@@ -241,7 +241,7 @@ def run_preprocess(
     name_map: dict[str, str] | None = None,
     held_ids: set[int] | None = None,
     anomaly_ids: set[int] | None = None,
-    near_threshold: float = dedup_mod.DEFAULT_NEAR_THRESHOLD,
+    near_threshold: float = DEFAULT_NEAR_THRESHOLD,
     limit: int = 500,
     version: str = PREPROCESS_VERSION,
 ) -> list[PreprocessOutcome]:
@@ -251,9 +251,9 @@ def run_preprocess(
     「先に取り込まれた側」が代表になる。
     """
     config = config or ImportanceConfig.load()
-    dictionary = tagger_mod.build_dictionary(conn, name_map=name_map)
+    dictionary = build_dictionary(conn, name_map=name_map)
     watchlist_ids = load_watchlist_ids(conn)
-    classifier = classify_mod.RuleClassifier()
+    classifier = RuleClassifier()
 
     docs = find_unprocessed(conn, version=version, limit=limit)
     outcomes: list[PreprocessOutcome] = []
