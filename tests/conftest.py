@@ -137,6 +137,57 @@ def clear_residual():
     return _clear
 
 
+_HISTORY_TABLE = "market.instrument_classification_history"
+_STAMP_TRIGGER = "instrument_classification_history_stamp_recorded_at"
+
+_RECORD_HISTORY_SQL = f"""
+    INSERT INTO {_HISTORY_TABLE}
+        (instrument_id, universe_tags, instrument_flags, is_single_name, product,
+         unit_size, source, as_of, run_id, created_at)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+
+@pytest.fixture
+def record_classification_history():
+    """**過去に記録された**分類履歴行を作る(テスト専用の抜け道)。
+
+    本番経路(``risk.classify.upsert_classification``)では ``created_at`` は DB の
+    BEFORE INSERT トリガが ``clock_timestamp()`` に固定するため申告できない — E6 の
+    カバレッジを偽装できないようにするための制約である(migrations/0026・審査 C-19)。
+    一方 PIT の検証には「当時に記録された分類」が要るので、テストだけが**記録時刻を
+    刻むトリガ 1 本**を一時的に外して記録時刻を指定する(DDL はトランザクション内で
+    巻き戻る。``tgenabled`` が 'O' のまま残ることは tests/test_migrations.py が固定する)。
+
+    追記オンリーのガード(UPDATE/DELETE/TRUNCATE)と ``CHECK (as_of <= created_at)`` は
+    外さないため、記録より前に有効化された分類や履歴の書き換えはテストからも作れない。
+    """
+
+    def _record(
+        conn,
+        instrument_id: int,
+        c,
+        *,
+        run_id: int,
+        as_of,
+        created_at,
+        source: str = "curated",
+    ) -> None:
+        with conn.cursor() as cur:
+            cur.execute(f"ALTER TABLE {_HISTORY_TABLE} DISABLE TRIGGER {_STAMP_TRIGGER}")
+            cur.execute(
+                _RECORD_HISTORY_SQL,
+                (
+                    instrument_id, list(c.universe_tags), list(c.instrument_flags),
+                    c.is_single_name, c.product, c.unit_size, source, as_of,
+                    run_id, created_at,
+                ),
+            )
+            cur.execute(f"ALTER TABLE {_HISTORY_TABLE} ENABLE TRIGGER {_STAMP_TRIGGER}")
+
+    return _record
+
+
 @pytest.fixture
 def fake_secret_manager(monkeypatch):
     """``ryza.secrets`` の GCE メタデータ + Secret Manager REST をモックする(Issue #30)。
