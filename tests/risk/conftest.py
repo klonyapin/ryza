@@ -41,14 +41,20 @@ def run_id(conn):
     return create_run(conn, "test.risk", params={"task": "T-015"})
 
 
-def nav_series(navs, *, start=date(2030, 1, 1), flows=None):
-    """営業日連続の NavPoint 列を組むヘルパ(数値は Decimal 化)。"""
+def nav_series(navs, *, start=date(2030, 1, 1), flows=None, bop_flows=None):
+    """営業日連続の NavPoint 列を組むヘルパ(数値は Decimal 化)。
+
+    ``flows`` は当日仕訳(EOP・分子から引く)、``bop_flows`` は区間内の仕訳
+    (BOP・分母に足す)。いずれも ``{index: 金額}``。
+    """
     flows = flows or {}
+    bop_flows = bop_flows or {}
     return [
         NavPoint(
             day=start + timedelta(days=i),
             nav=Decimal(str(nav)),
-            net_flow=Decimal(str(flows.get(i, 0))),
+            flow_eop=Decimal(str(flows.get(i, 0))),
+            flow_bop=Decimal(str(bop_flows.get(i, 0))),
         )
         for i, nav in enumerate(navs)
     ]

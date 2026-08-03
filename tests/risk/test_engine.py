@@ -73,6 +73,44 @@ def test_book_returns_simple():
     assert book_returns(nav_series([100, 102])) == pytest.approx([0.02])
 
 
+# ── BOP/EOP 分離(独立審査 2026-08-03 重要-1 のシナリオを真値で固定)──────────────
+def test_book_returns_bop_inflow_matches_true_return():
+    """シナリオ B: V₀=100万・期中 +50万・市場 +5% → 真値 +5.0%。
+
+    期末フロー一律仮定(旧式 `(nav − flow − nav₀)/nav₀`)だと +7.5% になる
+    (誤差 250bp)。期中に入った 50 万はその区間の運用元本なので分母に入れる。
+    """
+    series = nav_series([1_000_000, 1_575_000], bop_flows={1: 500_000})
+    assert book_returns(series) == pytest.approx([0.05])
+    # 旧式との差を明示(この値に戻ったら回帰)。
+    old = (1_575_000 - 500_000 - 1_000_000) / 1_000_000
+    assert old == pytest.approx(0.075)
+
+
+def test_book_returns_bop_outflow_matches_true_return():
+    """シナリオ C: V₀=100万・期中 −30万(払戻)・市場 +5% → 真値 +5.0%。"""
+    series = nav_series([1_000_000, 735_000], bop_flows={1: -300_000})
+    assert book_returns(series) == pytest.approx([0.05])
+
+
+def test_book_returns_bop_doubling_capital_with_loss():
+    """シナリオ H: V₀=100万・期中 +100万・市場 −3% → 真値 −3.0%。"""
+    series = nav_series([1_000_000, 1_940_000], bop_flows={1: 1_000_000})
+    assert book_returns(series) == pytest.approx([-0.03])
+
+
+def test_book_returns_degenerates_without_bop_flow():
+    """BOP フローが無い日は従来式に一致する(退化 — 定義変更の副作用が無いこと)。"""
+    series = nav_series([1_000_000, 1_100_000], flows={1: 50_000})
+    assert book_returns(series) == pytest.approx([(1_100_000 - 50_000 - 1_000_000) / 1_000_000])
+
+
+def test_book_returns_measurable_after_full_withdrawal():
+    """全額払戻で NAV 0 → 再出資した区間は分母 = flow_bop で測れる(除外しない)。"""
+    series = nav_series([1_000_000, 0, 1_050_000], flows={1: -1_000_000}, bop_flows={2: 1_000_000})
+    assert book_returns(series) == pytest.approx([0.0, 0.05])
+
+
 # ── EWMA 実現ボラ(手計算固定値)──────────────────────────────────────────────
 def test_ewma_vol_fixed_value():
     # α=2/21、σ²₁=r₁²、σ²₃ = (19/21)((19/21)·1e-4 + (2/21)·4e-4) + (2/21)·2.25e-4
