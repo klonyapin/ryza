@@ -31,6 +31,13 @@
   本リポジトリの承認手続はマージコミット(``Merge pull request``)で行われている(批准 PR #32 が
   実例)。squash 併用を始める場合は判定の拡張が必要
 
+**既知違反の受容(acknowledged_findings)**: 是正不能な過去の違反(git 履歴の書き換えなしには
+消せない evil merge 等)は ``config/governance.yaml`` の ``acknowledged_findings`` に
+commit(完全 SHA)・paths(触れた保護パス集合)・理由・承認記録の参照とともに登録できる。
+A-18-1 は一致した違反を ``violations`` から外す代わりに ``acknowledged`` へ移し、報告 embed の
+別フィールドとして **必ず表示** する(黙って消さない)。一致は commit と paths の完全一致を要求し、
+一致しない受容エントリは notes に「陳腐化」として開示する。
+
 **evil merge 対策**: マージコミット自身のコンフリクト解消差分は ``git diff-tree --cc``
 (全親と異なるファイルのみ列挙)で検査する。保護パスに触れる場合は **マージコミット自身の**
 ``Approved:`` トレーラを必須とし、PR マージ件名だけでは承認と見なさない(レビュー承認は
@@ -245,12 +252,71 @@ def check_protected_commits(
         violations.append(
             {
                 "commit": sha[:12],
+                # 受容記録(acknowledged_findings)の突合は完全 SHA で行う(短縮形は曖昧)。
+                "commit_full": sha,
                 "subject": _git(repo, "log", "-1", "--format=%s", sha).strip(),
                 "files": touched,
                 "reason": reason,
             }
         )
     return violations, len(commits)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# A-18-1 既知違反の受容(acknowledged_findings — 独立役員審査 C-3)
+# ────────────────────────────────────────────────────────────────────────────
+def _ack_key(commit: str, files: list[str] | tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
+    """受容記録の一致キー: (完全 SHA, 保護パスの正規化集合)。順序差では外れない。"""
+    return commit.strip().lower(), tuple(sorted({str(f).strip() for f in files}))
+
+
+def acknowledged_index(gov: dict[str, Any]) -> dict[tuple[str, tuple[str, ...]], dict[str, Any]]:
+    """``acknowledged_findings`` を一致キー → エントリの索引に変換する。"""
+    index: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
+    for entry in gov.get("acknowledged_findings") or []:
+        commit = str(entry.get("commit", ""))
+        paths = entry.get("paths") or []
+        if not commit or not paths:
+            continue  # 不完全なエントリは受容として効かせない(fail-safe = 違反のまま出す)
+        index[_ack_key(commit, paths)] = entry
+    return index
+
+
+def partition_acknowledged(
+    violations: list[dict[str, Any]], gov: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """違反を(未受容, 受容済み, 陳腐化した受容エントリの注記)に分割する。
+
+    一致条件は **完全 SHA と保護パス集合の完全一致**。片方でも違えば受容は効かず、違反として
+    残る(将来の別の違反や、保護領域追加でパス集合が変わったケースを巻き込まない)。
+    受容済みは捨てずに返し、報告側で必ず可視化する(黙って消さない)。
+    """
+    index = acknowledged_index(gov)
+    matched: set[tuple[str, tuple[str, ...]]] = set()
+    unacknowledged: list[dict[str, Any]] = []
+    acknowledged: list[dict[str, Any]] = []
+    for v in violations:
+        key = _ack_key(str(v.get("commit_full") or v["commit"]), v["files"])
+        entry = index.get(key)
+        if entry is None:
+            unacknowledged.append(v)
+            continue
+        matched.add(key)
+        acknowledged.append(
+            {
+                **v,
+                "acknowledged_on": entry.get("acknowledged_on"),
+                "approval_ref": entry.get("approval_ref"),
+                "ack_reason": entry.get("reason"),
+            }
+        )
+    notes = [
+        f"acknowledged_findings のエントリが一致する違反を持たない(陳腐化・SHA/パスの誤り"
+        f"の可能性): {key[0][:12]}({', '.join(key[1])})"
+        for key in index
+        if key not in matched
+    ]
+    return unacknowledged, acknowledged, notes
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -404,13 +470,16 @@ def run_a18(
 ) -> dict[str, Any]:
     """A-18 の4検査を実行して構造化 dict を返す(DB・Discord に依存しない純検査)。"""
     gov = load_governance(repo_path, governance_path)
-    violations, checked = check_protected_commits(repo_path, gov, since_commit=since_commit)
+    found, checked = check_protected_commits(repo_path, gov, since_commit=since_commit)
+    # 既知違反の受容: violations からは外すが捨てない(報告で必ず別枠表示する)。
+    violations, acknowledged, ack_notes = partition_acknowledged(found, gov)
     direct_pushes, fp_checked = check_direct_pushes(repo_path, since_commit=pr_since_commit)
     return {
         "as_of": datetime.now(UTC).isoformat(),
         "since_commit": since_commit,
         "checked_commits": checked,
         "violations": violations,
+        "acknowledged": acknowledged,
         "mismatches": check_versions(repo_path, version_pairs),
         "declarations": list_declarations(gov),
         "pr_since_commit": pr_since_commit,
@@ -420,6 +489,7 @@ def run_a18(
         "notes": [
             *_coverage_notes(gov),
             *_staleness_note(repo_path),
+            *ack_notes,
             *STANDARD_DISCLOSURES,
         ],
     }
@@ -451,6 +521,22 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
             {
                 "name": "A-18-1 保護領域突合",
                 "value": f"✅ 違反なし(検査 {result['checked_commits']} コミット)",
+                "inline": False,
+            }
+        )
+
+    # 受容済み既知違反は violations から外れるが、必ず別枠で可視化する(黙って消さない)。
+    acknowledged = result.get("acknowledged") or []
+    if acknowledged:
+        ack_lines = [
+            f"- `{a['commit']}` {a['subject']}({', '.join(a['files'])}"
+            f"{' / 承認記録: ' + a['approval_ref'] if a.get('approval_ref') else ''})"
+            for a in acknowledged
+        ]
+        fields.append(
+            {
+                "name": f"受容済み既知違反: {len(acknowledged)} 件(A-18-1・是正不能として受容)",
+                "value": "\n".join(ack_lines)[:1024],
                 "inline": False,
             }
         )
@@ -543,9 +629,10 @@ def run_and_report(
     report = has_findings(result) or always_report
     if dry_run:
         log.info(
-            "[DRY_RUN] A-18 結果: violations=%d mismatches=%d declarations=%d "
+            "[DRY_RUN] A-18 結果: violations=%d acknowledged=%d mismatches=%d declarations=%d "
             "direct_pushes=%d(enqueue %s)",
-            len(result["violations"]), len(result["mismatches"]), len(result["declarations"]),
+            len(result["violations"]), len(result.get("acknowledged") or []),
+            len(result["mismatches"]), len(result["declarations"]),
             len(result["direct_pushes"]),
             "対象" if report else "不要",
         )
@@ -592,10 +679,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
     for m in result["mismatches"]:
         print(f"[不整合] {m['doc']} v{m['doc_version']} ⇔ {m['config']} v{m['config_version']}",
               file=sys.stderr)
+    for a in result.get("acknowledged") or []:
+        print(f"[受容済み] {a['commit']} {a['subject']}: {a['files']}", file=sys.stderr)
     for d in result["direct_pushes"]:
         print(f"[直push] {d['commit']} {d['subject']}: {d['files']}", file=sys.stderr)
     print(
         f"A-18 完了(検査 {result['checked_commits']} コミット, 違反 {len(result['violations'])}, "
+        f"受容済み {len(result.get('acknowledged') or [])}, "
         f"不整合 {len(result['mismatches'])}, 宣言 {len(result['declarations'])}, "
         f"直push {len(result['direct_pushes'])})",
         file=sys.stderr,

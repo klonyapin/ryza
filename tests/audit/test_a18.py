@@ -15,6 +15,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from ryza.audit import a18
 
@@ -194,6 +195,165 @@ def test_evil_merge_with_trailer_is_ok(repo):
     )
     violations, _ = _run_a181(r, since)
     assert violations == []
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# A-18-1 既知違反の受容(acknowledged_findings — 独立役員審査 C-3)
+# ────────────────────────────────────────────────────────────────────────────
+def _acknowledge(r: Path, commit: str, paths: list[str]) -> None:
+    """一時リポジトリの governance.yaml に受容エントリを1件書き込む(コミットはしない)。"""
+    gov = yaml.safe_load(GOV_YAML)
+    gov["acknowledged_findings"] = [
+        {
+            "commit": commit,
+            "paths": paths,
+            "reason": "是正不能な歴史的 evil merge(テスト)",
+            "approval_ref": "https://github.com/x/y/pull/1",
+            "acknowledged_on": "2026-08-03",
+        }
+    ]
+    (r / "config" / "governance.yaml").write_text(
+        yaml.safe_dump(gov, allow_unicode=True), encoding="utf-8"
+    )
+
+
+def test_acknowledged_finding_is_reported_separately_not_counted(repo):
+    """受容済みは violations から外れるが、acknowledged として必ず残る(黙って消さない)。"""
+    r, since = repo
+    sha = _commit(r, "docs/protected.md", "v2\n", "docs: 是正不能な無承認変更")
+    _acknowledge(r, sha, ["docs/protected.md"])
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert result["violations"] == []
+    assert [a["commit"] for a in result["acknowledged"]] == [sha[:12]]
+    assert result["acknowledged"][0]["approval_ref"] == "https://github.com/x/y/pull/1"
+    # 別枠フィールドに件数と SHA が必ず載る。
+    embed = a18.build_alert_embed(result)
+    field = next(f for f in embed["fields"] if f["name"].startswith("受容済み既知違反"))
+    assert "1 件" in field["name"] and sha[:12] in field["value"]
+    # A-18-1 の警告フィールドは出ない(受容済みだけでは要対応にしない)。
+    assert not any("A-18-1 保護領域の無承認変更" in f["name"] for f in embed["fields"])
+
+
+def test_unacknowledged_finding_still_violation(repo):
+    """受容リストに載っていない違反は従来どおり違反として出る。"""
+    r, since = repo
+    acked = _commit(r, "docs/protected.md", "v2\n", "docs: 受容する変更")
+    other = _commit(r, "src/prot/ks.py", "x = 1\n", "feat: 受容しない変更")
+    _acknowledge(r, acked, ["docs/protected.md"])
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [v["commit"] for v in result["violations"]] == [other[:12]]
+    assert [a["commit"] for a in result["acknowledged"]] == [acked[:12]]
+
+
+def test_acknowledgement_with_wrong_sha_has_no_effect(repo):
+    """SHA が一致しない受容エントリは効かない(違反のまま)+ 陳腐化を notes で開示する。"""
+    r, since = repo
+    sha = _commit(r, "docs/protected.md", "v2\n", "docs: 無承認変更")
+    _acknowledge(r, "0" * 40, ["docs/protected.md"])
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [v["commit"] for v in result["violations"]] == [sha[:12]]
+    assert result["acknowledged"] == []
+    assert any("acknowledged_findings のエントリが一致する違反を持たない" in n
+               for n in result["notes"])
+
+
+def test_acknowledgement_with_wrong_paths_has_no_effect(repo):
+    """SHA が合っていてもパス集合が違えば効かない(将来の別の違反を巻き込まない)。"""
+    r, since = repo
+    sha = _commit(r, "docs/protected.md", "v2\n", "docs: 無承認変更")
+    _acknowledge(r, sha, ["src/prot/ks.py"])
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [v["commit"] for v in result["violations"]] == [sha[:12]]
+    assert result["acknowledged"] == []
+
+
+def test_acknowledgement_requires_full_path_set(repo):
+    """複数の保護パスに触れた違反は、その全パスを列挙した受容エントリでのみ受容される。"""
+    r, since = repo
+    (r / "docs").mkdir(exist_ok=True)
+    (r / "docs" / "protected.md").write_text("v2\n", encoding="utf-8")
+    sha = _commit(r, "src/prot/ks.py", "x = 1\n", "chore: 2つの保護パスに触れる無承認変更")
+    _acknowledge(r, sha, ["docs/protected.md"])  # 片方だけ → 効かない
+    partial = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [v["commit"] for v in partial["violations"]] == [sha[:12]]
+    _acknowledge(r, sha, ["src/prot/ks.py", "docs/protected.md"])  # 全部(順序は不問)
+    full = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert full["violations"] == []
+    assert len(full["acknowledged"]) == 1
+
+
+def test_incomplete_acknowledgement_entry_is_ignored(repo):
+    """commit か paths を欠くエントリは受容として効かせない(fail-safe = 違反のまま)。"""
+    r, since = repo
+    sha = _commit(r, "docs/protected.md", "v2\n", "docs: 無承認変更")
+    gov = yaml.safe_load(GOV_YAML)
+    gov["acknowledged_findings"] = [{"commit": sha}, {"paths": ["docs/protected.md"]}]
+    (r / "config" / "governance.yaml").write_text(
+        yaml.safe_dump(gov, allow_unicode=True), encoding="utf-8"
+    )
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [v["commit"] for v in result["violations"]] == [sha[:12]]
+
+
+def test_acknowledged_only_result_is_not_alerting():
+    """受容済みだけなら has_findings は False(週次の恒久的な赤を作らない)。"""
+    result = _result([], [])
+    result["acknowledged"] = [
+        {"commit": "abc123def456", "subject": "s", "files": ["CLAUDE.md"],
+         "reason": "r", "approval_ref": "https://x/1"}
+    ]
+    assert not a18.has_findings(result)
+    embed = a18.build_alert_embed(result)
+    assert "所見なし" in embed["title"]
+    # 所見なしでも受容の存在は隠さない。
+    assert any(f["name"].startswith("受容済み既知違反") for f in embed["fields"])
+
+
+def test_partition_acknowledged_is_pure(repo):
+    """分割関数は単体でも使える(commit_full が無い場合は短縮 SHA で突合する)。"""
+    gov = {"acknowledged_findings": [{"commit": "abc123def456", "paths": ["CLAUDE.md"]}]}
+    v = {"commit": "abc123def456", "subject": "s", "files": ["CLAUDE.md"], "reason": "r"}
+    unack, ack, notes = a18.partition_acknowledged([v], gov)
+    assert unack == [] and len(ack) == 1 and notes == []
+
+
+# ── 実リポジトリの受容記録(承認手続の固定)────────────────────────────────────
+def _real_governance() -> dict:
+    root = Path(__file__).resolve().parents[2]
+    return a18.load_governance(root)
+
+
+def test_real_acknowledged_findings_are_well_formed():
+    """受容エントリは commit(完全 SHA)・paths・理由・承認記録の参照・受容日を必ず持つ。"""
+    entries = _real_governance().get("acknowledged_findings") or []
+    assert entries, "既知違反の受容記録が空(機構の導線が消えていないか確認すること)"
+    for e in entries:
+        assert len(str(e["commit"])) == 40, f"完全 SHA でない受容エントリ: {e['commit']}"
+        assert e["paths"], f"paths が空: {e['commit']}"
+        assert str(e.get("reason", "")).strip(), f"受容理由が無い: {e['commit']}"
+        assert str(e.get("approval_ref", "")).strip(), f"承認記録の参照が無い: {e['commit']}"
+        assert str(e.get("acknowledged_on", "")).strip(), f"受容日が無い: {e['commit']}"
+
+
+def test_acknowledgement_registration_requires_approval():
+    """受容エントリの追加自体が承認手続を要する = 置き場所が保護領域であることの固定。
+
+    acknowledged_findings は config/governance.yaml にのみ置く。同ファイルが protected_areas に
+    登録されている限り、エントリ追加のコミットは A-18-1 の突合対象となり承認記録を要求される。
+    """
+    gov = _real_governance()
+    paths = [str(e["path"]) for e in gov["protected_areas"]]
+    assert a18.GOVERNANCE_PATH in paths
+    assert "src/ryza/audit/**" in paths  # 受容を実装する側のコードも保護領域
+
+
+def test_real_repo_acknowledged_findings_are_matched():
+    """実リポジトリの受容エントリが実在の違反に一致している(陳腐化していない)。"""
+    root = Path(__file__).resolve().parents[2]
+    result = a18.run_a18(root)
+    assert len(result["acknowledged"]) == len(_real_governance()["acknowledged_findings"])
+    assert not any("acknowledged_findings のエントリが一致する違反を持たない" in n
+                   for n in result["notes"])
 
 
 # ────────────────────────────────────────────────────────────────────────────

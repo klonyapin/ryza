@@ -464,8 +464,8 @@ reminders:
       type: issue_create
       title: "A-18-1 に acknowledged_findings(既知違反の受容記録)を実装する"
       labels: [governance]
-      body: "A-18-1(保護領域突合)は批准コミット以降の全履歴を毎回再検査するため、是正不能な過去の違反が毎週の警告に載り続ける。ops/deploy-dashboard.sh を保護領域へ登録した時点で顕在化した既知違反は2件ある: (1) `2191285`「merge: origin/main(T-015 リスク・T-016 デモ執行・キャラクター適用)を統合」— evil merge のコンフリクト解消差分が ops/deploy-dashboard.sh に触れ Approved トレーラ無し、(2) `7a56c98`「merge: origin/main(T-015 リスクエンジン)を統合 (T-016)」— 同じく evil merge で migrations/0016_nav_daily.sql に触れ Approved トレーラ無し。いずれも登録前・改番前の履歴であり git 履歴の書き換えなしには是正できない。恒久的な警告は『毎週赤いが誰も見ない』という形骸化(05-governance §6-5)を招くため、機構で受容を明示する。実装内容: ①config/governance.yaml に acknowledged_findings(commit・触れた保護パス・受容理由・受容日・承認記録の参照)を追加する、②A-18-1 は一致した違反を violations から除外し、報告 embed の別フィールド『受容済み既知違反: N 件』として必ず可視化する(黙って消さない — 沈黙を作らない原則)、③受容エントリは commit SHA とパスの両方が一致する場合のみ有効とし、将来の別の違反を巻き込まないこと、④受容エントリ自体の追加が承認手続を要することをテストで固定する。**src/ryza/audit/** と config/governance.yaml はいずれも保護領域のため、本件は改番 PR とは別 PR とし、独立役員審査 → #承認 通知 → みなし承認の L1 手続を経ること。** 出典: 改番 PR の独立審査 C-3。"
-    status: pending
+      body: "(完了済み)A-18-1(保護領域突合)は批准コミット以降の全履歴を毎回再検査するため、是正不能な過去の違反が毎週の警告に載り続ける。ops/deploy-dashboard.sh を保護領域へ登録した時点で顕在化した既知違反は2件ある: (1) `2191285`「merge: origin/main(T-015 リスク・T-016 デモ執行・キャラクター適用)を統合」— evil merge のコンフリクト解消差分が ops/deploy-dashboard.sh に触れ Approved トレーラ無し、(2) `7a56c98`「merge: origin/main(T-015 リスクエンジン)を統合 (T-016)」— 同じく evil merge で migrations/0016_nav_daily.sql に触れ Approved トレーラ無し。いずれも登録前・改番前の履歴であり git 履歴の書き換えなしには是正できない。恒久的な警告は『毎週赤いが誰も見ない』という形骸化(05-governance §6-5)を招くため、機構で受容を明示する。実装内容: ①config/governance.yaml に acknowledged_findings(commit・触れた保護パス・受容理由・受容日・承認記録の参照)を追加する、②A-18-1 は一致した違反を violations から除外し、報告 embed の別フィールド『受容済み既知違反: N 件』として必ず可視化する(黙って消さない — 沈黙を作らない原則)、③受容エントリは commit SHA とパスの両方が一致する場合のみ有効とし、将来の別の違反を巻き込まないこと、④受容エントリ自体の追加が承認手続を要することをテストで固定する。**src/ryza/audit/** と config/governance.yaml はいずれも保護領域のため、本件は改番 PR とは別 PR とし、独立役員審査 → #承認 通知 → みなし承認の L1 手続を経ること。** 出典: 改番 PR の独立審査 C-3。"
+    status: done # 2026-08-03 実装: governance.yaml の acknowledged_findings 節(追記オンリー)+ a18.partition_acknowledged。既知2件(2191285・7a56c98)を登録し、報告 embed に「受容済み既知違反: N 件」を別枠表示
 
   - id: protected-areas-path-existence-test
     what: "protected_areas の非 glob パスが実在することの不変条件テスト(改名・削除で保護が静かに外れるのを防ぐ。独立審査 C-5)"
@@ -476,8 +476,8 @@ reminders:
       type: issue_create
       title: "protected_areas の非 glob パス実在を tests/test_ips.py の不変条件テストで固定する"
       labels: [impl]
-      body: "config/governance.yaml の protected_areas に列挙されたパスが実在するかは、現状どこでも検証されていない。ファイルを改名・削除すると保護領域の登録は残るが実体を指さなくなり、A-18-1 は『そのパスに触れたコミット』を永久に見つけられないまま静かに無力化する(Issue #48 の改番で ops/deploy-a13.sh → ops/deploy-a18.sh、src/ryza/audit/a13.py → a18.py を改名した際に現実の危険として顕在化した。今回は同一 PR 内で登録も更新したが、機械的な検知は無い)。実装内容: ①tests/test_ips.py に、protected_areas のうち **glob メタ文字(`*`・`?`)を含まないパス**がリポジトリに実在することを検査するテストを追加する、②glob を含むパスは少なくとも1件にマッチすることを検査する(`ops/lib/**` のように並行ラインで新設されるパスは、実体が入るまで既知の未充足として明示的に許容リストへ入れるか、実体の追加後にテストを有効化するかを判断して記録すること)、③失敗メッセージには『保護領域の登録が実体を失っている』ことと governance.yaml の該当行を出す。**tests/test_ips.py は protected_areas に area: invariant_tests として登録済みの保護領域であり、変更には独立役員審査+承認手続を要する。** 出典: 改番 PR の独立審査 C-5。"
-    status: pending
+      body: "(完了済み)config/governance.yaml の protected_areas に列挙されたパスが実在するかは、現状どこでも検証されていない。ファイルを改名・削除すると保護領域の登録は残るが実体を指さなくなり、A-18-1 は『そのパスに触れたコミット』を永久に見つけられないまま静かに無力化する(Issue #48 の改番で ops/deploy-a13.sh → ops/deploy-a18.sh、src/ryza/audit/a13.py → a18.py を改名した際に現実の危険として顕在化した。今回は同一 PR 内で登録も更新したが、機械的な検知は無い)。実装内容: ①tests/test_ips.py に、protected_areas のうち **glob メタ文字(`*`・`?`)を含まないパス**がリポジトリに実在することを検査するテストを追加する、②glob を含むパスは少なくとも1件にマッチすることを検査する(`ops/lib/**` のように並行ラインで新設されるパスは、実体が入るまで既知の未充足として明示的に許容リストへ入れるか、実体の追加後にテストを有効化するかを判断して記録すること)、③失敗メッセージには『保護領域の登録が実体を失っている』ことと governance.yaml の該当行を出す。**tests/test_ips.py は protected_areas に area: invariant_tests として登録済みの保護領域であり、変更には独立役員審査+承認手続を要する。** 出典: 改番 PR の独立審査 C-5。"
+    status: done # 2026-08-03 実装: tests/test_ips.py TestProtectedAreaPathsExist(非 glob パスの実在+glob の 1 件以上マッチ+失敗時に governance.yaml の該当行を出力)
 
   - id: a18-review-opinion-file-check
     what: "A-18 の審査なし統合検出(07-development §3-1 の執行点)に docs/reviews の意見書ファイル実在検査を含める(PR #66 意見書喪失の再発防止)"
@@ -635,8 +635,8 @@ reminders:
       type: issue_create
       title: "governance: dashboard/Dockerfile・.streamlit/config.toml を protected_areas へ登録(L1)"
       labels: [impl, governance]
-      body: "CLAUDE.md 不変原則6は『デプロイ経路』を保護領域に挙げるが、config/governance.yaml の protected_areas には `dashboard/Dockerfile` と(2026-08-03 新規の)`.streamlit/config.toml` が入っておらず、A-18-1 の検出対象外になっている(独立役員審査 dads-design 中-4)。両ファイルとも稼働イメージの中身を直接決める: Dockerfile は COPY 対象と CMD を、config.toml は `server.enableStaticServing=true`(本番で静的配信を開く設定)を持つ。是正: `area: deploy_path` に2パスを追加し、A-18-1 が git 履歴と突合できるようにする。**config/governance.yaml 自体が保護領域のため、独立役員審査+みなし承認の手続を経ること。** 他に同じ理由で漏れているパス(ops/fetch-fonts.sh は生成物がリポジトリに入るが稼働経路ではない = 対象外、等)がないか同時に棚卸しする。出典: docs/reviews/dads-design-independent-review.md 中-4・設計リード裁定。"
-    status: pending
+      body: "(完了済み)CLAUDE.md 不変原則6は『デプロイ経路』を保護領域に挙げるが、config/governance.yaml の protected_areas には `dashboard/Dockerfile` と(2026-08-03 新規の)`.streamlit/config.toml` が入っておらず、A-18-1 の検出対象外になっている(独立役員審査 dads-design 中-4)。両ファイルとも稼働イメージの中身を直接決める: Dockerfile は COPY 対象と CMD を、config.toml は `server.enableStaticServing=true`(本番で静的配信を開く設定)を持つ。是正: `area: deploy_path` に2パスを追加し、A-18-1 が git 履歴と突合できるようにする。**config/governance.yaml 自体が保護領域のため、独立役員審査+みなし承認の手続を経ること。** 他に同じ理由で漏れているパス(ops/fetch-fonts.sh は生成物がリポジトリに入るが稼働経路ではない = 対象外、等)がないか同時に棚卸しする。出典: docs/reviews/dads-design-independent-review.md 中-4・設計リード裁定。"
+    status: done # 2026-08-03 実装: protected_areas に dashboard/Dockerfile・docker/**・.streamlit/config.toml(area: deploy_path)を追加。棚卸しの結果 ops/fetch-fonts.sh は稼働経路でないため対象外
 
   - id: dashboard-framework-evaluation
     what: "ダッシュボードのフレームワーク移行を比較調査する(Streamlit 継続 vs Next.js 系等。Phase 5 判断)"
