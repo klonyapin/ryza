@@ -1,28 +1,44 @@
 """銘柄マスタ由来の決定論分類(T-015 — T-014 引き継ぎ: G-2 配線と「空 vs 未取得」)。
 
-後半は **point-in-time 履歴化**(0026・独立役員審査 T-017 C-4 の是正)の回帰:
+中盤は **point-in-time 履歴化**(0026・独立役員審査 T-017 C-4 の是正)の回帰:
 分類の変更が過去に漏れないこと(look-ahead 排除)・履歴が追記オンリーであること・
 履歴がカバーしていない as_of には E6 未達の但し書きが付くこと。
+
+後半は **IPS §8.1 資産クラス列**(0028)と **curated ユニバース**の回帰。前者は
+「分類の正を1箇所にする」ための列であり、語彙が config/ips.yaml・classify.py・DB の
+CHECK の三者で一致していることを固定する(規約ではなくテストで決着 — 議論規約4)。
 """
 
 from __future__ import annotations
 
+import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import psycopg
 import pytest
+import yaml
 
 from ryza.risk.classify import (
+    IPS_ASSET_CLASSES,
     Classification,
+    CuratedUniverseError,
+    apply_curated_universe,
     classification_pit_status,
     classify_current_instruments,
     classify_instrument,
     history_coverage_since,
     load_classification,
     load_classification_at,
+    load_curated_universe,
     upsert_classification,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_MIGRATION_0028 = _REPO_ROOT / "migrations" / "0028_classification_asset_class.sql"
+_HISTORY_TABLE = "market.instrument_classification_history"
 
 
 # ── ルール分類(純ロジック)────────────────────────────────────────────────────
@@ -34,6 +50,7 @@ def test_tse_equity_classification():
         is_single_name=True,
         product="listed_equity_cash",
         unit_size=Decimal(100),
+        asset_class="equity_jp",
     )
 
 
@@ -42,6 +59,7 @@ def test_us_equity_classification():
     assert c is not None
     assert c.universe_tags == ("us_equity_cash",)
     assert c.is_single_name is True and c.unit_size is None
+    assert c.asset_class == "equity_us"
 
 
 def test_fx_classification():
@@ -49,6 +67,7 @@ def test_fx_classification():
     assert c is not None
     assert c.universe_tags == ("fx",) and c.product == "exchange_fx"
     assert c.is_single_name is False
+    assert c.asset_class == "fx"
 
 
 def test_etf_and_futures_not_rule_classified():
@@ -135,6 +154,7 @@ def _tagged(*tags: str) -> Classification:
         is_single_name=True,
         product="listed_equity_cash",
         unit_size=Decimal(100),
+        asset_class="equity_jp",
     )
 
 
@@ -357,3 +377,256 @@ def test_pit_status_uncovered_before_history_starts(conn, run_id):
     uncovered = classification_pit_status(conn, as_of=since - timedelta(days=1))
     assert uncovered["covered"] is False
     assert "E6" in uncovered["note"] and since.isoformat() in uncovered["note"]
+
+
+# ── IPS §8.1 資産クラス列(0028)─────────────────────────────────────────────
+def _constraint_vocabulary(conn, name: str) -> set[str]:
+    """CHECK 制約の定義から許可リテラルを抜き出す(DB 側の語彙の実測)。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = %s",
+            (name,),
+        )
+        row = cur.fetchone()
+    assert row is not None, f"CHECK 制約 {name} が無い(0028 が未適用の可能性)"
+    return set(re.findall(r"'([a-z_]+)'::text", row[0]))
+
+
+def test_asset_class_vocabulary_is_the_same_in_config_code_and_db(conn, ips):
+    """語彙の正は IPS §8.1。config・コード・DB の三者一致をテストで固定する。
+
+    3箇所に書かれている以上、ずれは「いつか起きる」。ずれた瞬間に落ちる場所を作る
+    (curated 供給の typo はゲート実行時まで露見しないため、書込時に落としたい)。
+    """
+    assert set(ips.asset_classes) == set(IPS_ASSET_CLASSES)
+    for name in (
+        "instrument_classification_asset_class_vocab",
+        "classification_history_asset_class_vocab",
+    ):
+        assert _constraint_vocabulary(conn, name) == set(IPS_ASSET_CLASSES)
+
+
+def test_asset_class_round_trips_through_current_and_history(conn, run_id):
+    """書いた資産クラスが現在値・履歴の両方から読み出せる(ゲート入力の正)。"""
+    inst = _insert_instrument(conn, symbol="AC1.T", asset_class="equity", venue="TSE")
+    t1 = datetime.now(UTC) - timedelta(days=3)
+    upsert_classification(conn, inst, _tagged("jp_equity_cash"), run_id=run_id, as_of=t1)
+    current = load_classification(conn, inst)
+    assert current is not None and current.asset_class == "equity_jp"
+    at = load_classification_at(conn, inst, as_of=datetime.now(UTC))
+    assert at is not None and at.asset_class == "equity_jp"
+
+
+def test_asset_class_change_appends_history(conn, run_id):
+    """資産クラスだけが変わった場合も履歴に追記される(圧縮の比較対象に入っている)。"""
+    inst = _insert_instrument(conn, symbol="AC2.T", asset_class="equity", venue="TSE")
+    t1 = datetime.now(UTC) - timedelta(days=5)
+    base = _tagged("jp_equity_cash")
+    upsert_classification(conn, inst, base, run_id=run_id, as_of=t1)
+    upsert_classification(
+        conn, inst, replace(base, asset_class="equity_other"),
+        run_id=run_id, as_of=t1 + timedelta(days=1),
+    )
+    assert len(_history(conn, inst)) == 2
+
+
+def test_unknown_asset_class_is_rejected_before_the_db(conn, run_id):
+    """語彙外は書込時に拒否する(DB の CHECK と二重の防御 — curated の typo 対策)。"""
+    inst = _insert_instrument(conn, symbol="AC3.T", asset_class="equity", venue="TSE")
+    with pytest.raises(ValueError, match="タクソノミー"):
+        upsert_classification(
+            conn, inst, replace(_tagged("jp_equity_cash"), asset_class="equity_JP"),
+            run_id=run_id,
+        )
+
+
+def test_null_asset_class_is_allowed_and_means_unclassified(conn, run_id):
+    """NULL は語彙違反ではなく「分類不能」— 読出し側が候補から落とす(fail-closed)。"""
+    inst = _insert_instrument(conn, symbol="AC4.T", asset_class="etf", venue="TSE")
+    upsert_classification(
+        conn, inst, replace(_tagged("etf"), asset_class=None),
+        run_id=run_id, source="curated",
+    )
+    loaded = load_classification(conn, inst)
+    assert loaded is not None and loaded.asset_class is None
+
+
+def _backfill_statements() -> list[str]:
+    """0028 のバックフィル UPDATE 文(migration ファイルから実物を取り出す)。"""
+    sql = _MIGRATION_0028.read_text(encoding="utf-8")
+    body = "\n".join(
+        line for line in sql.splitlines() if not line.strip().startswith("--")
+    )
+    statements = [
+        f"{s.strip()};" for s in body.split(";") if s.strip().upper().startswith("UPDATE")
+    ]
+    assert len(statements) == 2, "0028 の UPDATE 文は現在値表と履歴表の2文"
+    return statements
+
+
+def test_backfill_derives_asset_class_from_the_instrument_master(conn, run_id):
+    """**0028 のバックフィル**: 既存行を現行の導出ロジックで埋める(migration の実物を実行)。
+
+    テスト DB は新規作成のため、migration 適用時には埋める対象が無い。導出ロジック自体を
+    回帰にするため、asset_class が NULL の行を作ってから **migration ファイルの UPDATE 文を
+    そのまま**流す。履歴表は追記オンリーのため、migration と同じくトリガを一時的に外す。
+    """
+    tse = _insert_instrument(conn, symbol="BF1.T", asset_class="equity", venue="TSE")
+    us = _insert_instrument(conn, symbol="BF2", asset_class="equity", venue="NASDAQ")
+    lse = _insert_instrument(conn, symbol="BF3", asset_class="equity", venue="LSE")
+    for inst in (tse, us, lse):
+        upsert_classification(
+            conn, inst, replace(_tagged("jp_equity_cash"), asset_class=None),
+            run_id=run_id, source="curated",
+        )
+        assert load_classification(conn, inst).asset_class is None
+
+    current_sql, history_sql = _backfill_statements()
+    with conn.cursor() as cur:
+        cur.execute(current_sql)
+        cur.execute(f"ALTER TABLE {_HISTORY_TABLE} DISABLE TRIGGER USER")
+        cur.execute(history_sql)
+        cur.execute(f"ALTER TABLE {_HISTORY_TABLE} ENABLE TRIGGER USER")
+
+    assert load_classification(conn, tse).asset_class == "equity_jp"
+    assert load_classification(conn, us).asset_class == "equity_us"
+    assert load_classification(conn, lse).asset_class is None  # 分類不能は NULL のまま
+    at = load_classification_at(conn, tse, as_of=datetime.now(UTC))
+    assert at is not None and at.asset_class == "equity_jp"
+
+
+# ── curated ユニバース(流動性タグの供給)─────────────────────────────────────
+def _write_universe(tmp_path, entries, **overrides) -> Path:
+    """テスト用の curated ユニバース YAML を書き出す(同一パスを上書きする)。"""
+    doc = {
+        "name": "test-liquid",
+        "version": "1",
+        "criterion": "テスト用の基準",
+        "manages_tags": ["liquid_equity"],
+        "approved_at": "2026-08-04",
+        "approved_by": "test",
+        "entries": entries,
+    }
+    doc.update(overrides)
+    path = tmp_path / "universe.yaml"
+    path.write_text(yaml.safe_dump(doc, allow_unicode=True), encoding="utf-8")
+    return path
+
+
+def _entry(symbol: str, tags=("liquid_equity",), rationale="日経225 構成") -> dict:
+    return {"symbol": symbol, "tags": list(tags), "rationale": rationale}
+
+
+def test_loader_requires_rationale(tmp_path):
+    """根拠の無い銘柄は読み込み時に拒否する(1行足すだけで売買母集団が広がらない)。"""
+    path = _write_universe(tmp_path, [{"symbol": "7203.T", "tags": ["liquid_equity"]}])
+    with pytest.raises(CuratedUniverseError, match="rationale"):
+        load_curated_universe(path)
+
+
+def test_loader_requires_approval(tmp_path):
+    """未承認(approved_at 空)のリストは反映経路に入れない。"""
+    path = _write_universe(tmp_path, [_entry("7203.T")], approved_at=None)
+    with pytest.raises(CuratedUniverseError, match="未承認"):
+        load_curated_universe(path)
+
+
+def test_loader_rejects_tags_outside_manages(tmp_path):
+    """manages_tags の外のタグは付与しない(撤回できないタグを作らない)。"""
+    path = _write_universe(tmp_path, [_entry("7203.T", tags=("etf",))])
+    with pytest.raises(CuratedUniverseError, match="manages_tags"):
+        load_curated_universe(path)
+
+
+def test_loader_rejects_duplicate_symbols(tmp_path):
+    path = _write_universe(tmp_path, [_entry("7203.T"), _entry("7203.T")])
+    with pytest.raises(CuratedUniverseError, match="重複"):
+        load_curated_universe(path)
+
+
+def test_shipped_jim_universe_is_wellformed_but_unapproved():
+    """同梱の jim-curated.yaml は**未承認**なので読み込みが拒否される(fail-closed)。
+
+    承認前に反映されないことがこのファイルの安全性の要であるため、状態そのものを固定する。
+    承認時にはこのテストを「読み込めること + 全エントリに rationale があること」へ
+    書き換える(承認がコード変更として残る)。
+    """
+    path = _REPO_ROOT / "config" / "universe" / "jim-curated.yaml"
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert raw["manages_tags"] == ["liquid_equity"]
+    assert all(e.get("rationale") for e in raw["entries"])
+    assert all(e["tags"] == ["liquid_equity"] for e in raw["entries"])
+    assert len({e["symbol"] for e in raw["entries"]}) == len(raw["entries"])
+    with pytest.raises(CuratedUniverseError, match="未承認"):
+        load_curated_universe(path)
+
+
+def test_curated_tag_is_granted_and_recorded_in_history(conn, run_id, tmp_path):
+    """タグ付与は現在値と履歴の両方に載る(PIT — いつから liquid_equity かが再現できる)。"""
+    inst = _insert_instrument(conn, symbol="CU1.T", asset_class="equity", venue="TSE")
+    # 土台のルール分類は1時間前に確定していたことにする(curated 付与はその後)。
+    upsert_classification(
+        conn, inst, _tagged("jp_equity_cash"),
+        run_id=run_id, as_of=datetime.now(UTC) - timedelta(hours=1),
+    )
+    before = datetime.now(UTC) - timedelta(minutes=30)
+
+    universe = load_curated_universe(_write_universe(tmp_path, [_entry("CU1.T")]))
+    result = apply_curated_universe(conn, universe, run_id=run_id)
+    assert result["granted"] == 1 and result["unresolved"] == []
+
+    current = load_classification(conn, inst)
+    assert current is not None
+    assert set(current.universe_tags) == {"jp_equity_cash", "liquid_equity"}
+    assert current.asset_class == "equity_jp"  # 土台の分類は失われない
+
+    # 付与前の as_of では付いていない(今日のタグが過去に漏れない — 不変原則4)。
+    past = load_classification_at(conn, inst, as_of=before)
+    assert past is not None and "liquid_equity" not in past.universe_tags
+    assert any(
+        "liquid_equity" in row[0] and row[2].startswith("curated:test-liquid")
+        for row in _history(conn, inst)
+    )
+
+
+def test_curated_apply_is_idempotent(conn, run_id, tmp_path):
+    """再実行で履歴を膨らませない(タグ集合が変わらなければ unchanged)。"""
+    inst = _insert_instrument(conn, symbol="CU2.T", asset_class="equity", venue="TSE")
+    classify_current_instruments(conn, run_id=run_id)
+    universe = load_curated_universe(_write_universe(tmp_path, [_entry("CU2.T")]))
+    apply_curated_universe(conn, universe, run_id=run_id)
+    n = len(_history(conn, inst))
+    second = apply_curated_universe(conn, universe, run_id=run_id)
+    assert second["granted"] == 0 and second["unchanged"] == 1
+    assert len(_history(conn, inst)) == n
+
+
+def test_curated_tag_is_revoked_when_dropped_from_config(conn, run_id, tmp_path):
+    """config から外れた銘柄はタグを失う(付与だけでは「config が正」にならない)。"""
+    inst = _insert_instrument(conn, symbol="CU3.T", asset_class="equity", venue="TSE")
+    classify_current_instruments(conn, run_id=run_id)
+    granted = load_curated_universe(_write_universe(tmp_path, [_entry("CU3.T")]))
+    apply_curated_universe(conn, granted, run_id=run_id)
+    assert "liquid_equity" in load_classification(conn, inst).universe_tags
+
+    dropped = load_curated_universe(_write_universe(tmp_path, [_entry("CU9.T")]))
+    result = apply_curated_universe(conn, dropped, run_id=run_id)
+    assert result["revoked"] == 1
+    remaining = load_classification(conn, inst)
+    assert "liquid_equity" not in remaining.universe_tags
+    assert "jp_equity_cash" in remaining.universe_tags  # 土台は残る
+
+
+def test_curated_unresolved_symbols_are_reported_not_raised(conn, run_id, tmp_path):
+    """銘柄マスタに無い symbol はエラーにせず件数で返す(綴り間違いを黙って飲まない)。"""
+    universe = load_curated_universe(_write_universe(tmp_path, [_entry("NOPE.T")]))
+    result = apply_curated_universe(conn, universe, run_id=run_id)
+    assert result["unresolved"] == ["NOPE.T"] and result["granted"] == 0
+
+
+def test_curated_skips_instruments_without_a_base_classification(conn, run_id, tmp_path):
+    """ルール分類も既存分類も無い銘柄はタグだけの行を作らない(fail-closed)。"""
+    _insert_instrument(conn, symbol="CU4", asset_class="etf", venue="TSE")
+    universe = load_curated_universe(_write_universe(tmp_path, [_entry("CU4")]))
+    result = apply_curated_universe(conn, universe, run_id=run_id)
+    assert result["unclassifiable"] == ["CU4"] and result["granted"] == 0

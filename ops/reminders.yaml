@@ -269,7 +269,7 @@ reminders:
       title: "Jim のユニバース分類(liquid_equity 等)を供給する"
       labels: [impl]
       body: "T-017 の Jim は config/mandates/jim.yaml の universe(liquid_equity/etf/index_futures)に属する銘柄だけを走査するが、決定論ルール(src/ryza/risk/classify.py)は流動性・時価総額系タグを付けない(母集団データが要るため)。結果として curated 分類が供給されるまで Jim の本番ユニバースは空=発注ゼロになる(fail-closed の設計どおりの挙動。タグを緩めて埋めてはならない)。①流動性の決定論基準(売買代金の分位等)の定義、②market.instrument_classification への curated/ルール供給ジョブ、③ETF のレバ/インバース判定(IPS §5 禁止フラグ)の情報源、を決めて実装する。"
-    status: pending
+    status: done # 2026-08-04 liquid_equity の供給経路を実装(config/universe/jim-curated.yaml + risk.classify.apply_curated_universe + docs/ops/fm-curated-universe.md)。③ETF/先物は fm-etf-futures-curated-classification へ分離、代理基準の置換は fm-liquid-equity-measured-turnover、リスト承認は jim-curated-universe-approval
 
   - id: fm-asset-class-taxonomy-column
     what: "IPS §8.1 資産クラスの分類列が market.instrument_classification に無い(T-017 は fm/base.py の対応表で代替)"
@@ -281,6 +281,42 @@ reminders:
       title: "market.instrument_classification に IPS 資産クラス列を追加する"
       labels: [impl]
       body: "ゲートが要求する asset_class(equity_jp / equity_us 等 — IPS §8.1)は 0015 の分類表に列が無いため、T-017 は src/ryza/fm/base.py の ips_asset_class(銘柄マスタの asset_class×venue の対応表)で導出している。分類の正が2箇所に分かれるのは望ましくないので、0015 に列を足して src/ryza/risk/classify.py が決定論で埋め、FM は読むだけにする(スキーマ変更のため保護領域手続=独立役員審査+みなし承認)。移行時は fm/base.py の対応表を削除する。"
+    status: done # 2026-08-04 migrations/0028 で現在値表・履歴表(0026)に asset_class 列を追加、classify.py が決定論で埋め、fm/base.ips_asset_class を削除。語彙は config/ips.yaml・classify.py・DB CHECK の三者一致をテストで固定
+
+  - id: jim-curated-universe-approval
+    what: "config/universe/jim-curated.yaml(Jim の liquid_equity 初期リスト)が未承認のまま — 承認まで Jim のユニバースは空"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "Jim の curated ユニバース(liquid_equity 35銘柄)の承認"
+      labels: [approval]
+      body: "config/universe/jim-curated.yaml は approved_at / approved_by が null であり、ローダ(src/ryza/risk/classify.load_curated_universe)が読み込みを拒否する。したがって反映されず、Jim のユニバースは空=発注ゼロのままである(fail-closed の設計どおり)。承認にあたって確認すべきこと: ①選定基準(日経225 構成かつ東証プライム上場の内国普通株式 — 売買代金の実測が整うまでの代理基準)が妥当か、②列挙 35 銘柄が**承認時点の**日経225 構成銘柄であること(本ファイルは指数の正ではなく写しであり、構成は定期見直しで変わる)、③タグを付与することは Jim が売買できる母集団を広げる操作であること。承認後は approved_at / approved_by を記入し、tests/risk/test_classify.py の test_shipped_jim_universe_is_wellformed_but_unapproved を『読み込めること』の検証へ書き換える(承認をコード変更として残す)。手順は docs/ops/fm-curated-universe.md。"
+    status: pending
+
+  - id: fm-liquid-equity-measured-turnover
+    what: "liquid_equity の選定が代理基準(日経225 構成)のまま — 売買代金の実測へ置き換える"
+    conditions:
+      - type: date_after
+        date: "2026-10-01"
+    action:
+      type: issue_create
+      title: "liquid_equity を売買代金の実測基準へ移行する"
+      labels: [impl]
+      body: "config/universe/jim-curated.yaml の初版は『日経225 構成かつ東証プライム上場』を流動性の代理基準にしている(日経225 は日本経済新聞社が市場流動性を選定基準に含める指数であるため)。代理基準の弱点は、構成銘柄の入替が年1回の定期見直しに従うため流動性の劣化への追随が遅いこと、および『指数に採用されたか』と『いま流動的か』が別物であることである。market.bars の日足が十分に貯まった時点で、決定論の実測基準(例: 直近60営業日の売買代金 close×volume の中央値 ≥ 閾値)に置き換える。実測ならルール側(classify_current_instruments)で付与できるため curated の維持コストも消える。移行時は閾値の根拠(執行コストとスリッページの見積 — E4)を docs/research に残す。"
+    status: pending
+
+  - id: fm-etf-futures-curated-classification
+    what: "Jim の universe のうち etf / index_futures タグが未供給(レバ/インバース判定と先物の原資産クラスの情報源が無い)"
+    conditions:
+      - type: date_after
+        date: "2026-09-15"
+    action:
+      type: issue_create
+      title: "ETF・株価指数先物の curated 分類を供給する"
+      labels: [impl]
+      body: "config/mandates/jim.yaml の universe は [liquid_equity, etf, index_futures] だが、2026-08-04 の供給(config/universe/jim-curated.yaml)は liquid_equity のみである。残り2つが未供給なのは情報源が決まっていないため: ①ETF はレバレッジ/インバース該当(IPS §5 の禁止フラグ leveraged_etf)を銘柄マスタから決定論で否定できず、『フラグなし』を主張すると fail-open になる、②先物は指数/金利/商品の別が銘柄マスタに無く、IPS §8.1 の『デリバは原資産のクラスに分類』を機械判定できない。決めるべきこと: (a) レバ/インバース ETF の判定に使う情報源(JPX の ETF 一覧・目論見書の分類・J-Quants のマスタ属性のいずれか)、(b) 先物の原資産クラス対応表の出所、(c) 供給ファイル(config/universe/jim-etf.yaml 等)と instrument_flags の付与経路。供給までは Jim は現物株のみで走る(fail-closed)。"
     status: pending
 
   - id: fm-prompt-quarantine
@@ -387,7 +423,7 @@ reminders:
       title: "FM 提案の検疫 CLI と runbook(誤検疫時の再引受手順を含む)"
       labels: [impl]
       body: "migrations/0023 と src/ryza/fm/theses.quarantine_thesis は手動運用を前提とするが、docs/ ops/ に検疫の手順が存在しない。整備するもの: (1) 検疫 CLI(対象 thesis の内容表示 → 理由入力 → 登録 → 件数の再表示。誤爆防止に thesis 本文の確認を挟む)、(2) runbook『汚染が疑われたときの調査 → 検疫 → 影響確認(建玉根拠を失った保有の一覧)』、(3) **誤検疫時の再引受手順** — 0023 は『同内容を新しい thesis として記録』を救済としているが、record_thesis は as_of・model/rule_id を必須にするため、建玉時の判断を後日の判断・生成していないモデル名で記録することになり不変原則3・4 を汚す。再引受は『今日の as_of で、今日の証憑に基づき、改めて評価した新規 thesis』として行い、旧 thesis を参照する形(thesis_md 中に元 thesis_id と検疫の事実を明記)に統一する。手順が固まるまで検疫の実施は設計リード・監査の二者確認とする。"
-    status: pending
+    status: done # 2026-08-04 docs/ops/fm-quarantine-runbook.md 新設(判断基準・調査・登録・影響確認・再引受・mass-quarantine 対応)+ CLI `python -m ryza.fm.theses --quarantine/--show/--stats`(全文表示・thesis_id 再入力・reason/by 必須)
 
   - id: fm-db-role-separation
     what: "DB ロール分離: trading.fm_theses / fm_theses_quarantine の INSERT 権限分離(独立役員 後続審査 T-017 C-10 の恒久対策・実弾移行前提)"

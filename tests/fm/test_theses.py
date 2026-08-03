@@ -1,4 +1,10 @@
-"""fm.theses のテスト(T-017): 証憑必須・反証条件必須・point-in-time・追記オンリー。"""
+"""fm.theses のテスト(T-017): 証憑必須・反証条件必須・point-in-time・追記オンリー。
+
+末尾は**検疫 CLI**(reminder fm-quarantine-runbook)の回帰。CLI の入口としての価値は
+「対象の全文を出す・実施者と理由を強制する・誤爆を止める」ことにあるので、その3点を
+固定する。``main`` 全体は自前の接続で commit するためテスト DB に残留を作る — 引数
+検証(DB に触れない経路)だけを直接呼び、DB を要する部分は構成要素を呼んで検証する。
+"""
 
 from __future__ import annotations
 
@@ -7,10 +13,12 @@ from datetime import UTC, datetime, timedelta
 import psycopg
 import pytest
 
+from ryza.fm import theses as theses_mod
 from ryza.fm.theses import (
     EvidenceError,
     ThesisError,
     is_quarantined,
+    load_thesis,
     open_theses_by_instrument,
     quarantine_stats,
     quarantine_thesis,
@@ -326,3 +334,70 @@ def test_quarantine_truncate_is_blocked(conn):
         with conn.transaction():
             with conn.cursor() as cur:
                 cur.execute("TRUNCATE trading.fm_theses_quarantine CASCADE")
+
+
+# ── 検疫 CLI(reminder fm-quarantine-runbook)──────────────────────────────────
+def test_load_thesis_returns_quarantined_theses(conn, run, insert_document):
+    """CLI の確認表示は**検疫済みも読める**(再注入経路と用途が違う)。"""
+    doc_id = insert_document()
+    refs = [{"kind": "document", "doc_id": doc_id}]
+    thesis_id = _record(conn, run, evidence_refs=refs, instrument_id=41)
+    assert load_thesis(conn, thesis_id) is not None
+    quarantine_thesis(conn, thesis_id, reason="注入", quarantined_by="dev-lead")
+
+    record = load_thesis(conn, thesis_id)
+    assert record is not None and record.thesis_id == thesis_id
+    assert recent_theses(conn, "ben") == [] or all(
+        r.thesis_id != thesis_id for r in recent_theses(conn, "ben")
+    )
+    assert load_thesis(conn, 999_999_999) is None
+
+
+def test_render_thesis_shows_full_text_and_quarantine_state(conn, run, insert_document):
+    """表示は**要約しない**(誤爆防止が目的)。検疫済みかどうかも出す。"""
+    doc_id = insert_document()
+    thesis_id = _record(
+        conn, run,
+        evidence_refs=[{"kind": "document", "doc_id": doc_id}],
+        instrument_id=42,
+        thesis_md="全文が出ることを確認する本文。",
+        invalidation_md="この条件が崩れたら降りる。",
+    )
+    record = load_thesis(conn, thesis_id)
+    rendered = theses_mod._render_thesis(record, quarantined=False)
+    assert "全文が出ることを確認する本文。" in rendered
+    assert "この条件が崩れたら降りる。" in rendered
+    assert "検疫済み  : いいえ" in rendered
+    assert "検疫済み  : はい" in theses_mod._render_thesis(record, quarantined=True)
+
+
+def test_open_instruments_lists_positions_of_the_fm(conn, run):
+    """検疫後の影響確認(根拠を失った保有)の入力になる保有一覧。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO trading.positions
+                (book_id, fm, instrument_id, asset_class, qty, avg_cost, run_id)
+            VALUES (%s, 'ben', 51, 'equity_jp', 100, 1000, %s),
+                   (%s, 'ben', 52, 'equity_jp', 0, 1000, %s),
+                   (%s, 'jim', 53, 'equity_jp', 100, 1000, %s)
+            """,
+            (BOOK, run.run_id, BOOK, run.run_id, BOOK, run.run_id),
+        )
+    assert theses_mod._open_instruments(conn, "ben") == [51]  # qty=0 は含まない
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--quarantine", "1"],                       # --reason 欠落
+        ["--quarantine", "1", "--reason", "x"],      # --by 欠落
+        ["--quarantine", "1", "--show", "1"],        # モードの同時指定
+        [],                                          # モードの指定なし
+    ],
+)
+def test_cli_rejects_incomplete_invocations(argv):
+    """理由・実施主体を欠いた検疫は CLI が受け付けない(手動 SQL との差はここ)。"""
+    with pytest.raises(SystemExit) as exc:
+        theses_mod.main(argv)
+    assert exc.value.code == 2  # argparse のエラー終了

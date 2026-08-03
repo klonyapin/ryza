@@ -327,6 +327,7 @@ def _seed_jim_universe(conn, run) -> int:
         Classification(
             universe_tags=("liquid_equity",), instrument_flags=(),
             is_single_name=True, product="listed_equity_cash", unit_size=Decimal(100),
+            asset_class="equity_jp",
         ),
         run_id=run.run_id,
         source="curated",

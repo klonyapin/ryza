@@ -180,6 +180,7 @@ def classify(conn, run, record_classification_history):
         is_single_name: bool | None = True,
         product: str = "listed_equity_cash",
         unit_size: Decimal | None = Decimal(100),
+        asset_class: str | None = "equity_jp",
         as_of: datetime | None = None,
         recorded_at: datetime | None = None,
     ) -> None:
@@ -190,6 +191,7 @@ def classify(conn, run, record_classification_history):
             is_single_name=is_single_name,
             product=product,
             unit_size=unit_size,
+            asset_class=asset_class,
         )
         # 既定は「当時に記録された」= as_of と同時刻。本番の書込経路は created_at を
         # 申告できないため、テスト専用フィクスチャで先に履歴行を置く。
