@@ -40,9 +40,9 @@ def test_daily_end_to_end(conn, run, llm_config, make_daily_llms, insert_enriche
     _seed(insert_enriched_doc)
     result, _ = _run(conn, run, llm_config, make_daily_llms)
 
-    # ステップ実行順(取込→前処理→分析→朝刊→サマリ)。
+    # ステップ実行順(取込→前処理→分析→朝刊→リスク→サマリ)。
     assert [s.name for s in result.stages] == [
-        "ingest", "preprocess", "analysis", "morning", "ops_summary"
+        "ingest", "preprocess", "analysis", "morning", "risk", "ops_summary"
     ]
     assert result.ok
     assert all(s.ok for s in result.stages)
@@ -57,6 +57,25 @@ def test_daily_end_to_end(conn, run, llm_config, make_daily_llms, insert_enriche
     with conn.cursor() as cur:
         cur.execute("SELECT channel FROM press.outbox WHERE id = %s", (result.ops_outbox_id,))
         assert cur.fetchone()[0] == "ops"
+
+
+# ── リスク段(T-015)の配線: risk ステージが走り ops へレポートが届く ─────────────
+def test_daily_risk_stage_reports_to_ops(
+    conn, run, llm_config, make_daily_llms, insert_enriched_doc
+):
+    _seed(insert_enriched_doc)
+    result, _ = _run(conn, run, llm_config, make_daily_llms)
+    risk_stage = result.stage("risk")
+    assert risk_stage is not None and risk_stage.ok
+    assert "DEMO_FUND" in risk_stage.detail
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) FROM press.outbox
+            WHERE channel = 'ops' AND embed_json->>'title' LIKE 'リスクレポート%'
+            """
+        )
+        assert cur.fetchone()[0] >= 1
 
 
 # ── 冪等(同日再実行で二重投稿しない)──────────────────────────────────────────

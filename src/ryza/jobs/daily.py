@@ -2,7 +2,8 @@
 
 設計 30-press-discord §2・00-system-design §2/§10。1 日 1 回、以下を順に走らせる:
 
-  取込 → 前処理(縮退) → 分析エージェント → 市場観更新 → 朝刊生成 → outbox → 実行サマリ
+  取込 → 前処理(縮退) → 分析エージェント → 市場観更新 → 朝刊生成 → outbox
+  → リスク(T-015: limits_state 更新+リスクレポート) → 実行サマリ
 
 **各段は独立に失敗許容**: 各段を savepoint(``conn.transaction()``)で囲み、失敗しても
 後続段は走る(前段失敗時は前日データで動く)。実行サマリを ``#運営``(ops)へ投入する。
@@ -54,6 +55,7 @@ from ryza.research import market_view
 from ryza.research.agents import editor, macro, micro, sentiment
 from ryza.research.llm import StructuredLLM
 from ryza.research.providers import AnthropicProvider, DryRunProvider, LLMConfig
+from ryza.risk.daily import run_risk_daily
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -362,7 +364,15 @@ def run_daily(
 
     stages.append(_run_stage(conn, "morning", _morning))
 
-    # ── 5. 実行サマリを #運営 へ ──────────────────────────────────────────────
+    # ── 5. リスクエンジン(T-015)──────────────────────────────────────────────
+    # 00 §9 の順序では会計締め(記帳→NAV→照合→NAV 確定)の直後・リスクレポートの
+    # 位置。会計締めの daily 配線が入った際は、この risk 段はその後に置くこと。
+    # 決定論・LLM 不関与のため dry-run でもそのまま実行する。
+    stages.append(
+        _run_stage(conn, "risk", lambda: run_risk_daily(conn, run, as_of=as_of))
+    )
+
+    # ── 6. 実行サマリを #運営 へ ──────────────────────────────────────────────
     def _ops_summary() -> dict[str, Any]:
         embed = _build_ops_embed(
             stages, kill_switch=state["kill_switch"], posted=state["posted"],
