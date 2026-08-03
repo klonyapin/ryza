@@ -1,6 +1,8 @@
-"""TDnet RSS 取込テスト（HTTP 全モック）。正常・重複・異常。"""
+"""TDnet RSS 取込テスト（HTTP 全モック）。正常・重複・異常・URL 構築。"""
 
 from __future__ import annotations
+
+from datetime import date
 
 import pytest
 
@@ -58,3 +60,32 @@ def test_evidence_saved_for_entry(conn, run, store, fetcher):
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM ledger.evidence WHERE kind='tdnet_rss'")
         assert cur.fetchone()[0] == 2
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# フィード URL 構築（日付範囲指定。決算集中日 1000 件超/日の取りこぼし対策）
+# ────────────────────────────────────────────────────────────────────────────
+def test_feed_url_for_range():
+    url = tdnet.feed_url_for(date(2026, 5, 12))
+    assert url == "https://webapi.yanoshin.jp/webapi/tdnet/list/20260511-20260512.rss?limit=3000"
+
+
+def test_feed_url_for_single_day():
+    url = tdnet.feed_url_for(date(2026, 5, 12), lookback_days=0, limit=500)
+    assert url == "https://webapi.yanoshin.jp/webapi/tdnet/list/20260512.rss?limit=500"
+
+
+def test_resolve_feed_url_explicit_wins(monkeypatch):
+    monkeypatch.setenv("RYZA_TDNET_FEED_URL", "http://env/feed.rss")
+    assert tdnet.resolve_feed_url(feed_url="http://cli/feed.rss") == "http://cli/feed.rss"
+
+
+def test_resolve_feed_url_env_over_default(monkeypatch):
+    monkeypatch.setenv("RYZA_TDNET_FEED_URL", "http://env/feed.rss")
+    assert tdnet.resolve_feed_url(date_str="2026-05-12") == "http://env/feed.rss"
+
+
+def test_resolve_feed_url_default_is_date_range(monkeypatch):
+    monkeypatch.delenv("RYZA_TDNET_FEED_URL", raising=False)
+    url = tdnet.resolve_feed_url(date_str="2026-05-12")
+    assert url == tdnet.feed_url_for(date(2026, 5, 12))
