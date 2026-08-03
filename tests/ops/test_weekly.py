@@ -351,31 +351,31 @@ def test_dry_run_real_client_makes_no_write_requests():
     assert all(r["method"] == "GET" for r in opener.records)
 
 
-# ── A-13 実行状態行(独立役員審査条件: 沈黙を多義的にしない)──────────────────
-def test_digest_always_contains_a13_status_line():
-    """a13_status を渡さなくてもダイジェストに必ず A-13 行(未配線)が載る。"""
+# ── A-18 実行状態行(独立役員審査条件: 沈黙を多義的にしない)──────────────────
+def test_digest_always_contains_a18_status_line():
+    """a18_status を渡さなくてもダイジェストに必ず A-18 行(未配線)が載る。"""
     digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
     client = StubClient(issues=[digest_issue])
     assert weekly.post_digest(client, NOW, fired=[]) is True
     body = client.comments_posted[0][1]
-    assert f"### A-13 監査: {weekly.A13_STATUS_UNWIRED}" in body
+    assert f"### A-18 監査: {weekly.A18_STATUS_UNWIRED}" in body
 
 
-def test_digest_carries_custom_a13_status():
+def test_digest_carries_custom_a18_status():
     digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
     client = StubClient(issues=[digest_issue])
     status = "実行(違反 0 / 不整合 0 / 宣言 3)"
-    assert weekly.post_digest(client, NOW, fired=[], a13_status=status) is True
-    assert f"### A-13 監査: {status}" in client.comments_posted[0][1]
+    assert weekly.post_digest(client, NOW, fired=[], a18_status=status) is True
+    assert f"### A-18 監査: {status}" in client.comments_posted[0][1]
 
 
-def test_run_a13_if_configured_unwired(monkeypatch):
-    monkeypatch.delenv("A13_REPO_PATH", raising=False)
-    assert weekly.run_a13_if_configured(dry_run=True) == weekly.A13_STATUS_UNWIRED
+def test_run_a18_if_configured_unwired(monkeypatch):
+    monkeypatch.delenv("A18_REPO_PATH", raising=False)
+    assert weekly.run_a18_if_configured(dry_run=True) == weekly.A18_STATUS_UNWIRED
 
 
-def test_run_a13_if_configured_failure_is_reported(monkeypatch, tmp_path):
-    """A-13 の失敗は握るが、状態行に「失敗」として必ず現れる(週次ジョブは継続)。"""
-    monkeypatch.setenv("A13_REPO_PATH", str(tmp_path))  # git リポジトリでない → 失敗
-    status = weekly.run_a13_if_configured(dry_run=True)
+def test_run_a18_if_configured_failure_is_reported(monkeypatch, tmp_path):
+    """A-18 の失敗は握るが、状態行に「失敗」として必ず現れる(週次ジョブは継続)。"""
+    monkeypatch.setenv("A18_REPO_PATH", str(tmp_path))  # git リポジトリでない → 失敗
+    status = weekly.run_a18_if_configured(dry_run=True)
     assert status.startswith("失敗:")

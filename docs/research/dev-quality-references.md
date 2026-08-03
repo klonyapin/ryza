@@ -17,7 +17,7 @@
 
 - PR 説明文+Issue=変更依頼の文書化、人間レビュー=影響評価、マージ=承認権限、CI=実装検証、PR タイムライン=監査証跡([GitHub 公式](https://github.blog/enterprise-software/governance-and-compliance/demonstrating-end-to-end-traceability-with-pull-requests/)、[IEC 62304 実務](https://intuitionlabs.ai/articles/git-workflows-fda-compliance))
 - 実例: Tidepool(OSS のまま FDA Class II+ISO 13485 認証。ただし record of truth は Issue トラッカー側で Git は証跡層)。[事例](https://elisa.tech/blog/2026/07/15/from-pull-request-to-patient-safety-how-tidepool-built-an-open-source-quality-management-system/)
-- **重要な前提**: 「PR 承認=レビュー記録」は**規程で明文定義して初めて監査証拠になる**([OpenRegulatory](https://openregulatory.com/articles/quality-management-system-qms-in-github-gitlab))。また PR 単体を唯一の記録とせず上位の機械可読記録(Ryza では governance.decisions・A-13)から参照する
+- **重要な前提**: 「PR 承認=レビュー記録」は**規程で明文定義して初めて監査証拠になる**([OpenRegulatory](https://openregulatory.com/articles/quality-management-system-qms-in-github-gitlab))。また PR 単体を唯一の記録とせず上位の機械可読記録(Ryza では governance.decisions・A-18)から参照する
 - CI=verification は PR 単位のユニット/統合検証であり、リリース検証(validation)は別途定義が必要
 
 ## 3. ISO/IEC 29110(VSE)— テーラリングの骨格
@@ -29,7 +29,7 @@
 
 - 25010:2023 は9特性(Safety 新設)。Ryza の品質目標語彙は**信頼性(Faultlessness/回復性)・保守性(解析性/試験性)・セキュリティ・Safety(fail-safe)** を重点とする。[一覧](https://iso25000.com/index.php/en/iso-25000-standards/iso-25010)
 - 42001(AIMS): A.6.2.4 V&V の方法定義、**A.6.2.8 イベントログ記録**、A.9.2 責任ある利用プロセス(human oversight は B 実装ガイダンス)。[管理策一覧](https://www.isms.online/iso-42001/annex-a-controls/)。Ryza のリネージ・審査意見書保存・承認フローが先行実装に相当
-- 5338: AI ライフサイクルに**継続的検証(デプロイ後の継続テスト)**を追加 — Ryza では A-13・freshness 監視・E 系評価が対応。[解説](https://www.softwareimprovementgroup.com/blog/iso-5338-get-to-know-the-global-standard-on-ai-systems/)
+- 5338: AI ライフサイクルに**継続的検証(デプロイ後の継続テスト)**を追加 — Ryza では A-18・freshness 監視・E 系評価が対応。[解説](https://www.softwareimprovementgroup.com/blog/iso-5338-get-to-know-the-global-standard-on-ai-systems/)
 - 注意: 5338 は「AI システムを開発する組織」向けであり「AI が開発主体」の規格ではない — AI 開発主体への統制は 42001 A.9(利用プロセス)+本規程の独自条項で埋める
 
 ## 5. SQuBOK Guide V3 — 技法カタログ

@@ -27,7 +27,7 @@ deemed_approval:
   effective: on_notice # v0.4: 通知と同時に発効(期限待ちなし)。PR リンク必須
   veto: anytime # 代表はいつでも否認可。否認 → 遅滞なく取消(revert)+派生効果を #運営 へ報告
   audit_metric: deemed_ratio # 否認ゼロの長期継続は形骸化アラート(監査部門)
-  unnotified_change: violation # 通知なき発効は A-13 の無承認変更扱い
+  unnotified_change: violation # 通知なき発効は A-18 の無承認変更扱い
   live_escalation: リスク上限を緩める方向の IPS・マンデート改訂は実弾移行後は事前明示承認に格上げ
 
 # 定款第4条: 変更対象4層と改訂権限。
@@ -78,7 +78,7 @@ document_layers:
     review_by: [design_lead]
     approve_by: [design_lead] # ただし protected_areas は独立役員審査+みなし承認 48h(承認トレーラ必須)
 
-# 定款第5条: 保護領域(変更に代表の承認記録が必須。A-13 が git 履歴と突合)
+# 定款第5条: 保護領域(変更に代表の承認記録が必須。A-18 が git 履歴と突合)
 protected_areas:
   - path: docs/design/06-constitution.md
     area: constitution
@@ -116,49 +116,59 @@ protected_areas:
     area: deploy_path
   - path: ops/deploy-ops-weekly.sh
     area: deploy_path
+  # 独立役員審査 2026-08-03(アイコン上書き 0020 の審査・C-4)が指摘した登録漏れ。
+  # 本スクリプトは DB ロールの権限定義・IAP 許可リスト・稼働コードの git 検証を持つ
+  # 実質的なデプロイ経路であり、未登録のままでは A-18-1 が権限定義の無承認変更を検出しない。
+  # 出典: docs/reviews/0020-org-icon-overrides-independent-review.md C-4
+  - path: ops/deploy-dashboard.sh
+    area: deploy_path
+  # デプロイゲート関数の実体(並行ラインで新設)。deploy-*.sh が呼ぶ検証ロジックが
+  # ここに移るため、スクリプト本体だけを保護しても統制はゲート関数側から外せてしまう。
+  - path: ops/lib/**
+    area: deploy_path
   - path: CLAUDE.md # 不変原則・議論規約の写し(C-1)
     area: constitution
-  - path: src/ryza/audit/** # 監査部門コード(A-13/A-16 系。自己申告 notes の「未登録」警告を解消)
+  - path: src/ryza/audit/** # 監査部門コード(A-18 系。自己申告 notes の「未登録」警告を解消)
     area: audit
-  - path: ops/deploy-a13.sh # 監査ジョブのデプロイ経路(PR #40)
+  - path: ops/deploy-a18.sh # 監査ジョブのデプロイ経路(PR #40)
     area: deploy_path
   # risk_limits: リスクエンジン実装時に src パスを追記すること(C-2。それまで機械可読側は config/ips.yaml の
   #   hard_limits が実体であり、その保護は area: ips でカバー済み)
-  # audit: 監査部門コードは実装時にパスを追記すること(A-13 が「宣言のみ」として警告する)
+  # audit: 監査部門コードは実装時にパスを追記すること(A-18 が「宣言のみ」として警告する)
 
 # 承認記録の様式(定款第5条・C-5): 保護領域の変更コミットは本文末尾に
 #   Approved: <GitHub Issue URL または governance.decisions の ID>
-# トレーラを必須とする。A-13-1 はこのトレーラと承認記録を突合する。
+# トレーラを必須とする。A-18-1 はこのトレーラと承認記録を突合する。
 approval_trailer: "Approved:"
 
-# 定款第6条: 統制テーブル(J-SOX RCM 様式の応用)。A-13 監査ジョブが verification を実行する。
+# 定款第6条: 統制テーブル(J-SOX RCM 様式の応用)。A-18 監査ジョブが verification を実行する。
 # enforcement: schema(DB 制約)| gate(実行時ゲート)| ci(テスト・lint)| audit(監査ジョブ)| declaration(宣言のみ)
 controls:
   - rule: 定款第5条(保護領域の無承認変更禁止)
     risk: 保護コード・文書が承認なく書き換えられる
     enforcement: audit # 実弾移行前に ci(ブランチ保護+トレーラ検査)へ昇格すること(第5条前提条件)
     kind: 発見
-    verification: 保護パスの変更コミットの Approved トレーラと承認記録(Issue 決議 / governance.decisions)の突合(A-13-1)
+    verification: 保護パスの変更コミットの Approved トレーラと承認記録(Issue 決議 / governance.decisions)の突合(A-18-1)
   - rule: 定款第5条(不変条件テストによる振る舞い保護)
     risk: 保護パスに触れない新規ファイル(migration 追加・配線変更)で保護対象の振る舞いが無効化される
     enforcement: ci
     kind: 予防
-    verification: 帳簿間参照禁止・Kill Switch 経路存在・マンデート整合の不変条件テスト(tests/test_ips.py ほか。拡充は A-13 実装タスクに含める)
+    verification: 帳簿間参照禁止・Kill Switch 経路存在・マンデート整合の不変条件テスト(tests/test_ips.py ほか。拡充は A-18 実装タスクに含める)
   - rule: 定款第5条(稼働コード=承認済みコードの一致)
     risk: デプロイスクリプト改変や未承認ブランチからのデプロイで承認履歴と稼働実体が乖離する
     enforcement: declaration # deploy スクリプトへの main-SHA 検証実装まで宣言
     kind: 予防
-    verification: deploy-* が main の HEAD SHA を記録し A-13 が VM 上の稼働 SHA と突合(未実装)
+    verification: deploy-* が main の HEAD SHA を記録し A-18 が VM 上の稼働 SHA と突合(未実装)
   - rule: 定款第6条2項(発効文書と config の整合)
     risk: 文書は改訂されたがエンジン参照値が旧いまま乖離する
     enforcement: audit
     kind: 発見
-    verification: 80-ips.md の版・値と config/ips.yaml の一致検査(A-13-2)。tests/test_ips.py が CI で先行検知
+    verification: 80-ips.md の版・値と config/ips.yaml の一致検査(A-18-2)。tests/test_ips.py が CI で先行検知
   - rule: 定款第2条2項(判断と執行の分離)
     risk: LLM 出力が発注・サイジングに直結する
     enforcement: ci
     kind: 予防
-    verification: killswitch・執行経路モジュールが research/llm を import しないことの静的検査(A-13-3。未実装 — 執行層実装時に追加)
+    verification: killswitch・執行経路モジュールが research/llm を import しないことの静的検査(A-18-3。未実装 — 執行層実装時に追加)
   - rule: 第4条(下層文書は上層を緩められない)
     risk: マンデートが IPS より緩い上限を持つ
     enforcement: gate
@@ -178,7 +188,7 @@ controls:
     risk: 執行側が批判経路を無効化する
     enforcement: declaration # 執行点未実装(役員室・監査ジョブ実装時に protected_areas へ昇格)
     kind: 予防
-    verification: A-13 が「宣言のみ」条文として四半期棚卸しに載せる
+    verification: A-18 が「宣言のみ」条文として四半期棚卸しに載せる
   - rule: 議論規約2(決議への反対意見書添付)
     risk: 追従による無批判な決議
     enforcement: declaration # 役員室実装時に決議フローで強制
@@ -188,7 +198,7 @@ controls:
     risk: レビューを経ない直 push・非 PR マージで main が変更される
     enforcement: gate # 予防=GitHub ブランチ保護(PR 必須・CI 必須・force push 禁止・管理者含む。2026-08-03 設定)
     kind: 予防
-    verification: 発見の二重底は A-13-4 — 基準コミット(PR_RULE_BASELINE_COMMIT=4c7f6e9)以降の main first-parent で、直 push と PR マージ件名を持たないマージを列挙。例外なし(Approved トレーラ付きでも違反)
+    verification: 発見の二重底は A-18-4 — 基準コミット(PR_RULE_BASELINE_COMMIT=4c7f6e9)以降の main first-parent で、直 push と PR マージ件名を持たないマージを列挙。例外なし(Approved トレーラ付きでも違反)
   - rule: 開発管理 §2-3(検証 — CI による全テスト・lint・YAML 検証)
     risk: 検証されないコードが main に入る
     enforcement: ci # required status check 'test'
@@ -196,7 +206,7 @@ controls:
     verification: GitHub Actions ci.yml(pytest 全件+ruff+YAML パース)。required check のため未通過はマージ不能
   - rule: 開発管理 §3-1(保護領域・新規モジュールの独立審査と意見書保存)
     risk: 起草者のみの判断で保護領域が変更される
-    enforcement: declaration # 審査なし統合の機械検出は未実装(A-13 拡張候補)。現状は手続+docs/reviews の保存実績で監査
+    enforcement: declaration # 審査なし統合の機械検出は未実装(A-18 拡張候補)。現状は手続+docs/reviews の保存実績で監査
     kind: 予防
     verification: docs/reviews の意見書と保護領域 PR の対応を四半期棚卸しで確認
   - rule: 開発管理 §4-2(エージェントによる GitHub 設定変更の禁止)

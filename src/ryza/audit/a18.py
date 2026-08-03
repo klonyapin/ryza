@@ -1,15 +1,15 @@
-"""A-13 規則⇔実装トレーサビリティ監査(定款第6条・config/governance.yaml controls)。
+"""A-18 規則⇔実装トレーサビリティ監査(定款第6条・config/governance.yaml controls)。
 
 4つの検査を実行し、構造化 dict を返す:
 
-  A-13-1 保護領域突合   … `protected_areas` の glob に触れた発効日以後のコミットを列挙し、
+  A-18-1 保護領域突合   … `protected_areas` の glob に触れた発効日以後のコミットを列挙し、
                           (a) ``Approved:`` トレーラ (b) GitHub マージ PR 経由(Merge pull request
                           マージコミットの配下)のいずれも無いものを違反として列挙する
-  A-13-2 文書⇔config    … 80-ips.md ⇔ config/ips.yaml、06-constitution.md ⇔ config/governance.yaml
+  A-18-2 文書⇔config    … 80-ips.md ⇔ config/ips.yaml、06-constitution.md ⇔ config/governance.yaml
                           のバージョン文字列一致を検査する
-  A-13-3 宣言棚卸し     … controls のうち ``enforcement: declaration`` を列挙する(検査ではなく
+  A-18-3 宣言棚卸し     … controls のうち ``enforcement: declaration`` を列挙する(検査ではなく
                           可視化 — 四半期ごとの執行点実装可否の再評価対象)
-  A-13-4 全変更 PR 化   … 基準コミット(``PR_RULE_BASELINE_COMMIT``)以降の first-parent 履歴で、
+  A-18-4 全変更 PR 化   … 基準コミット(``PR_RULE_BASELINE_COMMIT``)以降の first-parent 履歴で、
                           (a) マージコミットでないコミット(= main への直 push)
                           (b) 件名が PR マージ形式(``Merge pull request``)でないマージコミット
                           を保護領域か否かにかかわらず違反として列挙する。例外なし
@@ -57,16 +57,16 @@ from ryza import org
 from ryza.bot import COLOR_FLASH, COLOR_NORMAL, DISCLAIMER
 from ryza.bot.outbox import enqueue
 
-log = logging.getLogger("ryza.audit.a13")
+log = logging.getLogger("ryza.audit.a18")
 
 # 定款批准コミット(2026-08-03 発効・Merge pull request #32)。これ以前は監査対象外。
 RATIFICATION_COMMIT = "c7af81ef85cc9f45bb7881ffc45769abfbc771dc"
 
 # 全変更 PR 化ルール(2026-08-03 代表指示: 保護領域に限らずリポジトリへの全変更を PR 経由と
-# する)の基準コミット = ルール採用日(A-13-4 実装時点)の origin/main HEAD。
+# する)の基準コミット = ルール採用日(A-18-4 実装時点)の origin/main HEAD。
 #   4c7f6e9 "docs(tasks): T-017 FM エージェント第一陣(Ben・Jim)の実装指示書"
 # これ以前の直 push は対象外(遡及しない)。GitHub 無料プラン(私有リポ)ではブランチ保護が
-# 使えないため、本監査(A-13-4)がこのルールの執行点になる。
+# 使えないため、本監査(A-18-4)がこのルールの執行点になる。
 PR_RULE_BASELINE_COMMIT = "4c7f6e9daded18a3e9e903a80c87feba3576b52c"
 
 GOVERNANCE_PATH = "config/governance.yaml"
@@ -77,11 +77,11 @@ STANDARD_DISCLOSURES: tuple[str, ...] = (
     "Approved トレーラの参照先(Issue / governance.decisions)の実在は未照合",
     "マージのコンフリクト解消差分(evil merge)は --cc で検査し、保護パスに触れる場合は"
     "マージ自身の Approved トレーラを要求",
-    "A-13-4 のマージ判定は親数+PR 件名(A-13-1 と同一の検査)— 件名は自己申告で"
+    "A-18-4 のマージ判定は親数+PR 件名(A-18-1 と同一の検査)— 件名は自己申告で"
     "GitHub API 未照合の限界を共有する",
 )
 
-# 文書⇔config のバージョン突合ペア(A-13-2)。(文書, config, config 内の version キー)
+# 文書⇔config のバージョン突合ペア(A-18-2)。(文書, config, config 内の version キー)
 VERSION_PAIRS: tuple[tuple[str, str], ...] = (
     ("docs/design/80-ips.md", "config/ips.yaml"),
     ("docs/design/06-constitution.md", "config/governance.yaml"),
@@ -162,7 +162,7 @@ def match_protected(files: list[str], patterns: list[re.Pattern[str]]) -> list[s
 def load_governance(
     repo_path: str | Path, governance_path: str = GOVERNANCE_PATH
 ) -> dict[str, Any]:
-    """governance.yaml を読み込む(A-13 の検査仕様はこのファイルが定義する)。"""
+    """governance.yaml を読み込む(A-18 の検査仕様はこのファイルが定義する)。"""
     text = (Path(repo_path) / governance_path).read_text(encoding="utf-8")
     return yaml.safe_load(text) or {}
 
@@ -172,7 +172,7 @@ def protected_patterns(gov: dict[str, Any]) -> list[re.Pattern[str]]:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# A-13-1 保護領域突合
+# A-18-1 保護領域突合
 # ────────────────────────────────────────────────────────────────────────────
 def has_approval_trailer(message: str, trailer: str = "Approved:") -> bool:
     """コミット本文に ``Approved: <参照>`` トレーラ行があるか(定款第5条 C-5 様式)。"""
@@ -196,7 +196,7 @@ def check_protected_commits(
     *,
     since_commit: str | None = RATIFICATION_COMMIT,
 ) -> tuple[list[dict[str, Any]], int]:
-    """A-13-1: 保護領域に触れた無承認コミットの一覧と、検査したコミット数を返す。
+    """A-18-1: 保護領域に触れた無承認コミットの一覧と、検査したコミット数を返す。
 
     承認とみなす条件(定款附則):
       (a) コミット本文の ``Approved:`` トレーラ
@@ -254,7 +254,7 @@ def check_protected_commits(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# A-13-2 文書⇔config 整合
+# A-18-2 文書⇔config 整合
 # ────────────────────────────────────────────────────────────────────────────
 def doc_version(path: Path) -> str | None:
     """文書先頭の見出し行から ``vX.Y`` を抽出する(無ければ None)。"""
@@ -283,7 +283,7 @@ def check_versions(
     repo_path: str | Path,
     pairs: tuple[tuple[str, str], ...] = VERSION_PAIRS,
 ) -> list[dict[str, Any]]:
-    """A-13-2: 発効文書と機械可読 config のバージョン不一致を列挙する。"""
+    """A-18-2: 発効文書と機械可読 config のバージョン不一致を列挙する。"""
     root = Path(repo_path)
     mismatches: list[dict[str, Any]] = []
     for doc_rel, cfg_rel in pairs:
@@ -304,7 +304,7 @@ def check_versions(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# A-13-3 宣言棚卸し
+# A-18-3 宣言棚卸し
 # ────────────────────────────────────────────────────────────────────────────
 def list_declarations(gov: dict[str, Any]) -> list[dict[str, Any]]:
     """controls のうち enforcement: declaration の項目(執行点なし)を列挙する。"""
@@ -344,18 +344,18 @@ def _staleness_note(repo_path: str | Path) -> list[str]:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# A-13-4 全変更 PR 化(直 push 検査)
+# A-18-4 全変更 PR 化(直 push 検査)
 # ────────────────────────────────────────────────────────────────────────────
 def check_direct_pushes(
     repo_path: str | Path,
     *,
     since_commit: str | None = PR_RULE_BASELINE_COMMIT,
 ) -> tuple[list[dict[str, Any]], int]:
-    """A-13-4: main への直 push・非 PR マージの一覧と、検査した first-parent コミット数を返す。
+    """A-18-4: main への直 push・非 PR マージの一覧と、検査した first-parent コミット数を返す。
 
     基準コミット(全変更 PR 化ルール採用日の main HEAD)以降の first-parent 履歴で、
     (a) マージコミットでないコミット = 直 push、(b) 件名が PR マージ形式
-    (``_PR_MERGE_RE``、A-13-1 と同一の検査)でないマージコミット = 非 PR マージ、
+    (``_PR_MERGE_RE``、A-18-1 と同一の検査)でないマージコミット = 非 PR マージ、
     を違反とする。保護領域か否かは問わず、例外も設けない(``Approved:`` トレーラ付き
     直 push も違反 — 全 PR 化ルールに例外なし)。基準コミット以前は
     ``rev-list since..HEAD`` により対象外。
@@ -394,7 +394,7 @@ def check_direct_pushes(
 # ────────────────────────────────────────────────────────────────────────────
 # 本体・報告
 # ────────────────────────────────────────────────────────────────────────────
-def run_a13(
+def run_a18(
     repo_path: str | Path,
     *,
     governance_path: str = GOVERNANCE_PATH,
@@ -402,7 +402,7 @@ def run_a13(
     pr_since_commit: str | None = PR_RULE_BASELINE_COMMIT,
     version_pairs: tuple[tuple[str, str], ...] = VERSION_PAIRS,
 ) -> dict[str, Any]:
-    """A-13 の4検査を実行して構造化 dict を返す(DB・Discord に依存しない純検査)。"""
+    """A-18 の4検査を実行して構造化 dict を返す(DB・Discord に依存しない純検査)。"""
     gov = load_governance(repo_path, governance_path)
     violations, checked = check_protected_commits(repo_path, gov, since_commit=since_commit)
     direct_pushes, fp_checked = check_direct_pushes(repo_path, since_commit=pr_since_commit)
@@ -441,7 +441,7 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
         ]
         fields.append(
             {
-                "name": "⚠️ A-13-1 保護領域の無承認変更",
+                "name": "⚠️ A-18-1 保護領域の無承認変更",
                 "value": "\n".join(lines)[:1024],
                 "inline": False,
             }
@@ -449,7 +449,7 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
     else:
         fields.append(
             {
-                "name": "A-13-1 保護領域突合",
+                "name": "A-18-1 保護領域突合",
                 "value": f"✅ 違反なし(検査 {result['checked_commits']} コミット)",
                 "inline": False,
             }
@@ -463,19 +463,19 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
         ]
         fields.append(
             {
-                "name": "⚠️ A-13-2 文書⇔config 不整合",
+                "name": "⚠️ A-18-2 文書⇔config 不整合",
                 "value": "\n".join(lines)[:1024],
                 "inline": False,
             }
         )
     else:
-        fields.append({"name": "A-13-2 文書⇔config 整合", "value": "✅ 一致", "inline": False})
+        fields.append({"name": "A-18-2 文書⇔config 整合", "value": "✅ 一致", "inline": False})
 
     decls = result["declarations"]
     decl_lines = [f"- {d['rule']}" for d in decls] or ["なし"]
     fields.append(
         {
-            "name": f"A-13-3 宣言のみ条文(執行点なし): {len(decls)} 件",
+            "name": f"A-18-3 宣言のみ条文(執行点なし): {len(decls)} 件",
             "value": "\n".join(decl_lines)[:1024],
             "inline": False,
         }
@@ -488,7 +488,7 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
         ]
         fields.append(
             {
-                "name": "⚠️ A-13-4 全変更 PR 化違反(直 push・非 PR マージ)",
+                "name": "⚠️ A-18-4 全変更 PR 化違反(直 push・非 PR マージ)",
                 "value": "\n".join(lines)[:1024],
                 "inline": False,
             }
@@ -496,7 +496,7 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
     else:
         fields.append(
             {
-                "name": "A-13-4 全変更 PR 化",
+                "name": "A-18-4 全変更 PR 化",
                 "value": (
                     f"✅ 直 push・非 PR マージなし(検査 {result['checked_first_parent']} コミット)"
                 ),
@@ -509,7 +509,7 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
 
     alert = has_findings(result)
     return {
-        "title": ("⚠️ A-13 監査: 要対応の所見あり" if alert else "A-13 監査: 所見なし"),
+        "title": ("⚠️ A-18 監査: 要対応の所見あり" if alert else "A-18 監査: 所見なし"),
         "description": (
             "規則⇔実装トレーサビリティ監査(定款第6条)。監査は read-only であり修正は行わない。"
         ),
@@ -535,15 +535,15 @@ def run_and_report(
     since_commit: str | None = RATIFICATION_COMMIT,
     pr_since_commit: str | None = PR_RULE_BASELINE_COMMIT,
 ) -> dict[str, Any]:
-    """A-13 を実行し、所見があれば(または ``always_report``)#運営 へ enqueue する。
+    """A-18 を実行し、所見があれば(または ``always_report``)#運営 へ enqueue する。
 
     ops-weekly など他ジョブからの呼び出し口。``dry_run`` では DB に接続せずログのみ。
     """
-    result = run_a13(repo_path, since_commit=since_commit, pr_since_commit=pr_since_commit)
+    result = run_a18(repo_path, since_commit=since_commit, pr_since_commit=pr_since_commit)
     report = has_findings(result) or always_report
     if dry_run:
         log.info(
-            "[DRY_RUN] A-13 結果: violations=%d mismatches=%d declarations=%d "
+            "[DRY_RUN] A-18 結果: violations=%d mismatches=%d declarations=%d "
             "direct_pushes=%d(enqueue %s)",
             len(result["violations"]), len(result["mismatches"]), len(result["declarations"]),
             len(result["direct_pushes"]),
@@ -551,19 +551,19 @@ def run_and_report(
         )
         return result
     if not report:
-        log.info("A-13: 所見なし(enqueue しない)")
+        log.info("A-18: 所見なし(enqueue しない)")
         return result
 
     from ryza.db.conn import connect
     from ryza.provenance import start_run
 
-    run = start_run("audit.a13", {"repo": str(repo_path)})
+    run = start_run("audit.a18", {"repo": str(repo_path)})
     conn = connect()
     try:
         oid = enqueue_alert(conn, result, run.run_id)
         conn.commit()
         run.finish("success")
-        log.info("A-13 警告を enqueue: outbox_id=%s", oid)
+        log.info("A-18 警告を enqueue: outbox_id=%s", oid)
     except Exception:
         conn.rollback()
         run.finish("failed")
@@ -574,9 +574,9 @@ def run_and_report(
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行パス
-    """CLI: ``python -m ryza.audit.a13 [--repo PATH] [--dry-run] [--always-report]``"""
+    """CLI: ``python -m ryza.audit.a18 [--repo PATH] [--dry-run] [--always-report]``"""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    parser = argparse.ArgumentParser(description="A-13 規則⇔実装トレーサビリティ監査")
+    parser = argparse.ArgumentParser(description="A-18 規則⇔実装トレーサビリティ監査")
     parser.add_argument("--repo", default=".", help="監査対象の git リポジトリパス")
     parser.add_argument("--dry-run", action="store_true", help="DB へ書き込まずログのみ")
     parser.add_argument(
@@ -595,7 +595,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
     for d in result["direct_pushes"]:
         print(f"[直push] {d['commit']} {d['subject']}: {d['files']}", file=sys.stderr)
     print(
-        f"A-13 完了(検査 {result['checked_commits']} コミット, 違反 {len(result['violations'])}, "
+        f"A-18 完了(検査 {result['checked_commits']} コミット, 違反 {len(result['violations'])}, "
         f"不整合 {len(result['mismatches'])}, 宣言 {len(result['declarations'])}, "
         f"直push {len(result['direct_pushes'])})",
         file=sys.stderr,
