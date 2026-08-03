@@ -34,9 +34,15 @@ def migrated_db():
 
 
 @pytest.fixture
-def conn(migrated_db):
-    """関数スコープの接続。テストは commit せず rollback して隔離する。"""
+def conn(migrated_db, clear_residual):
+    """関数スコープの接続。テストは commit せず rollback して隔離する。
+
+    接続直後にトランザクション内で残留データを不可視化する(Issue #23)。
+    共有 DB に commit 済みの docs.documents 等が残っていると、パイプラインが
+    残留分を処理して件数 assert が壊れるため。rollback で削除ごと巻き戻る。
+    """
     c = connect()
+    clear_residual(c)
     try:
         yield c
     finally:
