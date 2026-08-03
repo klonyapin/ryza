@@ -241,8 +241,9 @@ def test_seed_trial_balance(conn):
             """
         )
         balances = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
-    assert balances["cash"] == (1000000, 0)
-    assert balances["capital"] == (0, 1000000)
+    # 0006 初期出資 ¥1,000,000 + 0011 追加出資 ¥9,000,000(2026-08-03 増額決定)
+    assert balances["cash"] == (10000000, 0)
+    assert balances["capital"] == (0, 10000000)
 
 
 def test_seed_books_and_accounts(conn):
