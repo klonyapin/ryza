@@ -596,6 +596,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
         record = load_thesis(conn, thesis_id)
         if record is None:
             print(f"thesis_id={thesis_id} は存在しません", file=sys.stderr)
+            conn.close()
             return 1
         already = is_quarantined(conn, thesis_id)
         print(_render_thesis(record, quarantined=already))
@@ -604,6 +605,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
             answer = input("\n上記を検疫します。thesis_id を再入力してください: ").strip()
             if answer != str(thesis_id):
                 print("入力が一致しないため中止しました", file=sys.stderr)
+                conn.close()
                 return 1
     except Exception:
         conn.close()
