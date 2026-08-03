@@ -1,6 +1,6 @@
 window.RYZA_DATA = {
- "generated_at": "2026-08-03 11:29 JST",
- "phase": "実装フェーズ(T-010 階層0前処理・T-011 分析エージェント+市場観 進行中)",
+ "generated_at": "2026-08-03 11:51 JST",
+ "phase": "実装フェーズ(T-010 階層0前処理・T-007/T-008 朝刊・速報 進行中)",
  "milestones": [
   {
    "name": "全体設計 v3.2",
@@ -50,12 +50,12 @@ window.RYZA_DATA = {
   {
    "name": "T-011 分析エージェント+市場観",
    "detail": "macro/micro/sentiment/editor・慣性ルール・反証拠テスト",
-   "status": "doing"
+   "status": "todo"
   },
   {
    "name": "T-007/T-008 朝刊・速報",
    "detail": "毎朝10:00 玲音の朝刊・文体リンター・速報と的中率追跡",
-   "status": "todo"
+   "status": "doing"
   },
   {
    "name": "T-012 取込ソース一括拡張",
@@ -282,10 +282,9 @@ window.RYZA_DATA = {
   {
    "number": 22,
    "title": "T-011: 分析エージェント+市場観ステート",
-   "state": "OPEN",
+   "state": "CLOSED",
    "labels": [
-    "impl",
-    "in-progress"
+    "impl"
    ],
    "milestone": "T-011 分析エージェント+市場観"
   },
@@ -298,9 +297,58 @@ window.RYZA_DATA = {
     "in-progress"
    ],
    "milestone": "T-010 階層0前処理"
+  },
+  {
+   "number": 24,
+   "title": "Kill Switch 多段化: /kill(凍結)・/winddown(計画的現金化)・/flatten(緊急清算)",
+   "state": "OPEN",
+   "labels": [
+    "impl"
+   ],
+   "milestone": "戦略・リスク・執行 実装"
+  },
+  {
+   "number": 25,
+   "title": "T-007/T-008: 朝刊パイプライン+速報エンジン",
+   "state": "OPEN",
+   "labels": [
+    "impl",
+    "in-progress"
+   ],
+   "milestone": "T-007/T-008 朝刊・速報"
   }
  ],
  "commits": [
+  {
+   "hash": "de3b658",
+   "date": "08/03 11:51",
+   "subject": "docs(tasks): T-007/T-008 実装指示書(朝刊+速報)"
+  },
+  {
+   "hash": "32ca0ea",
+   "date": "08/03 11:50",
+   "subject": "docs(design): IPS v1.2 — 目標リターンの導出規約・政策ミックス廃止・頻度規制撤廃・Kill Switch 多段化"
+  },
+  {
+   "hash": "8b69e64",
+   "date": "08/03 11:46",
+   "subject": "feat(ledger): デモ出資金を ¥1,000万 に増額(追加出資仕訳 0011)"
+  },
+  {
+   "hash": "b5ccf7a",
+   "date": "08/03 11:41",
+   "subject": "feat(research): 分析エージェントと市場観ステート (T-011)"
+  },
+  {
+   "hash": "0fd1749",
+   "date": "08/03 11:38",
+   "subject": "docs(design): IPS を二層化 — ファンドレベル IPS(唯一)+FM マンデート(81 新設)"
+  },
+  {
+   "hash": "c4c088e",
+   "date": "08/03 11:29",
+   "subject": "chore(site): IPS マイルストーン名の是正を反映"
+  },
   {
    "hash": "b526a0c",
    "date": "08/03 11:24",
@@ -320,36 +368,6 @@ window.RYZA_DATA = {
    "hash": "f95d94d",
    "date": "08/03 11:17",
    "subject": "chore(site): ロードマップを現状に更新・進行中判定を in-progress ラベル連動に"
-  },
-  {
-   "hash": "63af2bd",
-   "date": "08/03 11:16",
-   "subject": "wip(preprocess): 階層0前処理モジュール群+migration 0009 (T-010)"
-  },
-  {
-   "hash": "6f1bee7",
-   "date": "08/03 03:19",
-   "subject": "chore(site): 進捗更新(T-006 完了・Bot 常駐稼働)"
-  },
-  {
-   "hash": "5f1a076",
-   "date": "08/03 03:18",
-   "subject": "fix(bot): 配送処理をワーカースレッドへ — イベントループ自己デッドロック(heartbeat blocked)の解消"
-  },
-  {
-   "hash": "1f2ecd2",
-   "date": "08/03 03:11",
-   "subject": "fix(ops): 重複 RestartSec を整理(30秒に統一)"
-  },
-  {
-   "hash": "88c1888",
-   "date": "08/03 03:11",
-   "subject": "fix(ops): Bot の再起動間隔を30秒に(クラッシュループ時のゲートウェイ・ハンマリング防止)"
-  },
-  {
-   "hash": "232f4c5",
-   "date": "08/03 03:07",
-   "subject": "fix(bot): daily ループの Run API 誤用も修正"
   }
  ]
 };
