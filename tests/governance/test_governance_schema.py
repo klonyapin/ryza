@@ -247,6 +247,72 @@ def test_retraction_requires_target_and_same_role(conn, run_id):
     conn.rollback()
 
 
+# ── stances の出所種別と盲検着任(0022・議論規約3)─────────────────────────
+def test_stance_source_defaults_to_direct(conn, run_id):
+    """既定は 'direct' — 従来の書込経路は挙動を変えない(既存行も同値で据え置き)。"""
+    sid = record_stance(conn, role="cio", kind="claim", summary="単独記録", run_id=run_id)
+    with conn.cursor() as cur:
+        cur.execute("SELECT source FROM governance.stances WHERE stance_id = %s", (sid,))
+        assert cur.fetchone()[0] == "direct"
+    assert recent_stances(conn, "cio")[0].source == "direct"
+    conn.rollback()
+
+
+def test_unknown_source_rejected(conn, run_id):
+    """語彙外の出所は CHECK で拒否(出所不明の行を作らせない)。"""
+    with pytest.raises(psycopg.errors.CheckViolation):
+        record_stance(
+            conn, role="cio", kind="claim", summary="出所不明",
+            run_id=run_id, source="hallway",
+        )
+    conn.rollback()
+
+
+def test_blind_assume_role_excludes_meeting_sources(conn, run_id):
+    """盲検着任は会議由来を読まない(代表の選好が盲検レビューへ透過しない)。"""
+    for source in ("office_chat", "committee"):
+        record_stance(
+            conn, role="independent_officer", kind="claim",
+            summary=f"{source} 由来の主張", run_id=run_id, source=source,
+        )
+    record_stance(
+        conn, role="independent_officer", kind="concern",
+        summary="個別レビュー由来の懸念", run_id=run_id,
+    )
+    blind = assume_role(conn, "independent_officer", limit=50, blind=True)
+    assert "個別レビュー由来の懸念" in blind
+    assert "office_chat 由来の主張" not in blind
+    assert "committee 由来の主張" not in blind
+    conn.rollback()
+
+
+def test_assume_role_default_reads_all_sources(conn, run_id):
+    """既定(blind=False)は従来どおり全出所を読む — 既存経路の挙動不変。"""
+    record_stance(
+        conn, role="independent_officer", kind="claim",
+        summary="会議で述べた主張", run_id=run_id, source="office_chat",
+    )
+    prompt = assume_role(conn, "independent_officer", limit=50)
+    assert "会議で述べた主張" in prompt
+    conn.rollback()
+
+
+def test_blind_mode_does_not_resurrect_retracted_stances(conn, run_id):
+    """撤回判定は出所除外の影響を受けない(会議で撤回した主張は盲検でも復活しない)。"""
+    sid = record_stance(
+        conn, role="cio", kind="claim", summary="誤った主張", run_id=run_id
+    )
+    record_stance(
+        conn, role="cio", kind="retraction", summary="会議で撤回",
+        run_id=run_id, retracts=sid, source="office_chat",
+    )
+    got = recent_stances(
+        conn, "cio", limit=50, exclude_sources=("office_chat", "committee")
+    )
+    assert [s.stance_id for s in got] == []
+    conn.rollback()
+
+
 # ── decisions の決定語彙(0019・定款 v0.4 第3条)──────────────────────────
 # 定款第3条の3専決事項(config/governance.yaml の representative_reserved)と
 # decisions.kind の対応。**governance.yaml に専決事項を足したらここも足す** —
