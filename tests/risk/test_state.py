@@ -8,7 +8,7 @@ from decimal import Decimal
 import pytest
 from psycopg import errors
 
-from ryza.risk.engine import ESResult, RiskState
+from ryza.risk.engine import Deferral, ESResult, Exclusion, RiskState
 from ryza.risk.state import release_dd_hard, upsert_limits_state
 
 _AS_OF = datetime(2030, 1, 10, tzinfo=UTC)
@@ -201,6 +201,57 @@ def test_release_guc_does_not_leak(conn, run_id):
                 cur.execute(
                     "UPDATE risk.limits_state SET dd_hard = false WHERE book_id = 'DEMO_FUND'"
                 )
+
+
+# ── metrics の機械可読化(独立役員審査 T-018 重大-3 の恒久対応)────────────────
+def _last_metrics(conn, book="DEMO_FUND") -> dict:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT metrics FROM risk.limits_state_events
+            WHERE book_id = %s ORDER BY id DESC LIMIT 1
+            """,
+            (book,),
+        )
+        return cur.fetchone()[0]
+
+
+def test_state_metrics_records_deferred_and_excluded(conn, run_id):
+    """保留理由と除外銘柄が metrics に構造化されて残る(読み手が理由を復元できる)。"""
+    state = make_state(
+        deferred=(
+            Deferral("realized_vol", "insufficient_returns", 3, 20),
+            Deferral("es95", "no_observations", 0, 20),
+        ),
+        excluded=(
+            Exclusion(7, "valuation", "missing_price"),
+            Exclusion(9, "es95", "short_series", 5, 20),
+        ),
+    )
+    upsert_limits_state(conn, "DEMO_FUND", state, as_of=_AS_OF, run_id=run_id)
+    metrics = _last_metrics(conn)
+    assert metrics["deferred"] == [
+        {"metric": "realized_vol", "reason": "insufficient_returns",
+         "observed": 3, "required": 20},
+        {"metric": "es95", "reason": "no_observations", "observed": 0, "required": 20},
+    ]
+    assert metrics["excluded_instruments"] == [
+        {"instrument_id": 7, "measure": "valuation", "reason": "missing_price",
+         "observed": None, "required": None},
+        {"instrument_id": 9, "measure": "es95", "reason": "short_series",
+         "observed": 5, "required": 20},
+    ]
+
+
+def test_state_metrics_keeps_legacy_keys(conn, run_id):
+    """既存キー(sufficient / n_returns / es95_*)は残す — 過去行と同じ読み方を壊さない。"""
+    upsert_limits_state(conn, "DEMO_FUND", make_state(), as_of=_AS_OF, run_id=run_id)
+    metrics = _last_metrics(conn)
+    assert metrics["sufficient"] is True and metrics["n_returns"] == 30
+    assert metrics["es95_adopted"] == 0.012 and metrics["es95_n_obs"] == 40
+    assert metrics["es95_deferred"] is False
+    # 保留・除外が無い日も**キー自体は必ず入る**(読み手はキーの有無で新旧を判別する)。
+    assert metrics["deferred"] == [] and metrics["excluded_instruments"] == []
 
 
 def test_events_append_only(conn, run_id):

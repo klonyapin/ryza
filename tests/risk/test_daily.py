@@ -5,12 +5,16 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from ryza.bot import COLOR_FLASH
 from ryza.gate.orders import gate_and_record
 from ryza.ips import IPSConfig
 from ryza.risk.daily import (
+    CLOSE_FAILED_NOTE,
+    CLOSE_MISSING_NOTE,
     build_risk_embed,
     load_instrument_returns,
     load_nav_series,
@@ -20,6 +24,7 @@ from ryza.risk.daily import (
 from ryza.risk.engine import book_returns
 
 _AS_OF = datetime(2030, 2, 1, 0, 0, tzinfo=UTC)
+_JST = ZoneInfo("Asia/Tokyo")
 
 
 def _clear_nav(conn, book="DEMO_FUND"):
@@ -120,6 +125,20 @@ def _reports(conn, channel="ops"):
             (channel,),
         )
         return cur.fetchall()
+
+
+def _last_metrics(conn, book="DEMO_FUND") -> dict:
+    """直近の engine_update イベントの metrics(測定値スナップショット)。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT metrics FROM risk.limits_state_events
+            WHERE book_id = %s AND event = 'engine_update'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (book,),
+        )
+        return cur.fetchone()[0]
 
 
 def _run(run_id):
@@ -242,7 +261,9 @@ def test_run_risk_daily_pending_same_day_immaterial_is_not_urgent(conn, run_id):
     _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_000_000})
     _seed_capital_flow(conn, run_id, amount=1_000, entry_date=date(2030, 1, 6))  # 0.1%
     as_of = datetime(2030, 1, 6, 12, 0, tzinfo=UTC)  # JST でも 1/6(締め前)
-    detail = run_risk_daily(conn, _run(run_id), as_of=as_of)
+    # close_ok を明示するのは、この試験の主題が未反映フローの材料性判定だから
+    # (省略すると締めの自己検証が働き、当日スナップショット無しで urgent になる)。
+    detail = run_risk_daily(conn, _run(run_id), as_of=as_of, close_ok=True)
     assert detail["DEMO_FUND"]["pending_flows"] == 1
     assert detail["DEMO_FUND"]["pending_urgent"] is False
     embed, urgent = _reports(conn)[0]
@@ -302,7 +323,7 @@ def test_run_risk_daily_does_not_re_alert_known_recon_invalidation(conn, run_id)
     _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_000_000})
     _flag_recon_invalidated(conn, date(2030, 1, 2), run_id - 1)  # 前日の締めが立てた
 
-    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF)
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF, close_ok=True)
     assert detail["DEMO_FUND"]["recon_invalidated_new"] == 0
     assert detail["DEMO_FUND"]["recon_invalidated_total"] == 1  # 記録は消えない
     embed, urgent = _reports(conn)[0]
@@ -336,7 +357,7 @@ def test_run_risk_daily_without_recon_invalidation_is_quiet(conn, run_id):
     """通常の系列では照合無効フィールドを出さない(毎日赤にしない)。"""
     _clear_nav(conn)
     _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_000_000})
-    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF)
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF, close_ok=True)
     assert detail["DEMO_FUND"]["recon_invalidated_new"] == 0
     assert detail["DEMO_FUND"]["recon_invalidated_total"] == 0
     embed, urgent = _reports(conn)[0]
@@ -372,11 +393,179 @@ def test_build_risk_embed_pending_note_survives_note_truncation():
     assert "2030-01-06 出資 ¥500,000" in pend["value"]  # 独立フィールドには残る
 
 
+# ── 締め失敗日の可視化(独立審査 再々審査 起草者の留意点 (a))────────────────────
+def test_run_risk_daily_warns_when_close_failed(conn, run_id):
+    """締めが落ちた日は測定より先に警告を出し、必ず urgent にする(黙って測らない)。"""
+    _clear_nav(conn)
+    _seed_nav(conn, [10_000_000, 9_990_000])
+    detail = run_risk_daily(
+        conn, _run(run_id), as_of=_AS_OF,
+        close_ok=False, close_error="RuntimeError: close boom",
+    )
+    assert detail["DEMO_FUND"]["close_ok"] is False
+    embed, urgent = _reports(conn)[0]
+    assert urgent is True  # フラグは 1 つも立っていないが urgent(前提が崩れている)
+    assert embed["fields"][0]["name"] == "本日の締め"  # 先頭表示
+    assert embed["fields"][0]["value"].startswith(CLOSE_FAILED_NOTE)
+    assert "close boom" in embed["fields"][0]["value"]
+    assert embed["description"].startswith(f"【要確認】{CLOSE_FAILED_NOTE}")
+    assert embed["color"] == COLOR_FLASH
+    notes = [f for f in embed["fields"] if f["name"] == "注記"][0]["value"]
+    assert notes.startswith(f"【要確認】{CLOSE_FAILED_NOTE}")  # 注記でも最先頭
+
+
+def test_run_risk_daily_records_close_failure_in_state_metrics(conn, run_id):
+    """締めの成否は測定の前提として metrics に残る(不変原則3 — 事後監査)。"""
+    _clear_nav(conn)
+    _seed_nav(conn, [10_000_000, 9_990_000])
+    run_risk_daily(
+        conn, _run(run_id), as_of=_AS_OF, close_ok=False, close_error="Boom: x"
+    )
+    assert _last_metrics(conn)["close_ok"] is False
+    assert _last_metrics(conn)["close_error"] == "Boom: x"
+
+
+def test_run_risk_daily_quiet_when_close_succeeded(conn, run_id):
+    """締め成功時は従来どおり — 締めフィールドを出さず urgent にもしない。"""
+    _clear_nav(conn)
+    _seed_nav(conn, [10_000_000, 9_990_000])
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF, close_ok=True)
+    assert detail["DEMO_FUND"]["close_ok"] is True
+    embed, urgent = _reports(conn)[0]
+    assert urgent is False
+    assert not [f for f in embed["fields"] if f["name"] == "本日の締め"]
+    assert not embed["description"].startswith("【要確認】")
+    assert _last_metrics(conn)["close_ok"] is True
+
+
+def test_cli_rerun_does_not_erase_the_close_warning(conn, run_id):
+    """締めが落ちた朝の CLI 手動再実行で警告が消えない(独立審査 2026-08-04 重大-2)。
+
+    旧既定(close_ok=True)は「知らない」を「成功した」と台帳に断定していたため、
+    `python -m ryza.risk.daily` を 1 回叩くだけで最新イベントが close_ok=true に
+    化け、ダッシュボード(最新行を読む)とレポートから警告が消えていた。
+    """
+    _clear_nav(conn)
+    # 締めが落ちた日 = 当日(as_of)のスナップショットが無い系列。
+    _seed_nav_days(conn, {date(2030, 1, 30): 1_000_000, date(2030, 1, 31): 1_000_000})
+    # 1) 日次サイクル: 締め失敗を明示的に知らされた実行。
+    run_risk_daily(
+        conn, _run(run_id), as_of=_AS_OF, close_ok=False, close_error="RuntimeError: boom"
+    )
+    assert _last_metrics(conn)["close_ok"] is False
+
+    # 2) 運用者が CLI を手動再実行(close_ok を渡さない = 既定 None)。
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF)
+    assert detail["DEMO_FUND"]["close_ok"] is False
+    assert detail["DEMO_FUND"]["close_self_checked"] is True
+    metrics = _last_metrics(conn)
+    assert metrics["close_ok"] is False and metrics["close_self_checked"] is True
+    embed, urgent = _reports(conn)[-1]
+    assert urgent is True
+    assert embed["fields"][0]["name"] == "本日の締め"
+    assert embed["fields"][0]["value"] == CLOSE_MISSING_NOTE
+
+
+def test_self_check_treats_same_day_snapshot_as_closed(conn, run_id):
+    """当日スナップショットがあれば締めは反映済み — 自己検証は静かに通す。"""
+    _clear_nav(conn)
+    _seed_nav_days(
+        conn,
+        {date(2030, 1, 31): 1_000_000, _AS_OF.astimezone(_JST).date(): 1_010_000},
+    )
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF)  # close_ok 未指定
+    assert detail["DEMO_FUND"]["close_ok"] is True
+    assert detail["DEMO_FUND"]["close_self_checked"] is True
+    metrics = _last_metrics(conn)
+    assert metrics["close_ok"] is True and metrics["close_self_checked"] is True
+    embed, urgent = _reports(conn)[0]
+    assert urgent is False
+    assert not [f for f in embed["fields"] if f["name"] == "本日の締め"]
+
+
+def test_explicit_close_ok_skips_self_check(conn, run_id):
+    """成否を知らされた実行は自己検証しない(execution 段の StageResult が正)。"""
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 30): 1_000_000, date(2030, 1, 31): 1_000_000})
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF, close_ok=True)
+    assert detail["DEMO_FUND"]["close_self_checked"] is False
+    assert _last_metrics(conn)["close_ok"] is True
+    _, urgent = _reports(conn)[0]
+    assert urgent is False
+
+
+def test_run_risk_daily_no_nav_still_reports_close_failure(conn, run_id):
+    """NAV 系列すら無い日でも締め失敗は明記する(no_nav の説明と混ぜて消さない)。"""
+    _clear_nav(conn)
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF, close_ok=False)
+    assert detail["DEMO_FUND"]["close_ok"] is False
+    embed, urgent = _reports(conn)[0]
+    assert urgent is True
+    assert embed["description"].startswith(f"【要確認】{CLOSE_FAILED_NOTE}")
+
+
+# ── 除外の機械可読化(独立審査 T-018 重大-3 の恒久対応)────────────────────────
+def test_missing_price_exclusion_reaches_state_metrics(conn, run_id):
+    """時価欠測で評価から外れた銘柄が metrics に構造化されて残る。
+
+    ES の採用値が「観測不足以外の理由」でも動くことを、読み手が notes の日本語文
+    ではなくキーで読めるようにする(重大-3 の恒久対応)。
+    """
+    _clear_nav(conn)
+    _seed_nav(conn, [10_000_000, 9_990_000])
+    with conn.cursor() as cur:  # バーの無い銘柄を保有させる(時価が取れない)
+        cur.execute(
+            """
+            INSERT INTO market.instruments (symbol, asset_class, venue, currency, valid_from)
+            VALUES ('NOPRICE.T', 'equity', 'TSE', 'JPY', now())
+            RETURNING instrument_id
+            """
+        )
+        inst = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO trading.positions
+                (book_id, fm, instrument_id, asset_class, qty, avg_cost, run_id)
+            VALUES ('DEMO_FUND', 'ben', %s, 'equity_jp', 100, 1000, %s)
+            """,
+            (inst, run_id),
+        )
+    positions, notes, exclusions = load_positions(conn, "DEMO_FUND", as_of=_AS_OF)
+    assert [p.instrument_id for p in positions] == []  # 評価できず除外
+    assert notes and [(e.instrument_id, e.measure, e.reason) for e in exclusions] == [
+        (inst, "valuation", "missing_price")
+    ]
+
+    run_risk_daily(conn, _run(run_id), as_of=_AS_OF)
+    metrics = _last_metrics(conn)
+    assert {
+        "instrument_id": inst, "measure": "valuation", "reason": "missing_price",
+        "observed": None, "required": None,
+    } in metrics["excluded_instruments"]
+
+
+def test_state_metrics_carries_deferred_reasons(conn, run_id):
+    """帳簿リターン不足の日は、どの指標がなぜ保留かが metrics から読める。"""
+    _clear_nav(conn)
+    _seed_nav(conn, [10_000_000, 9_950_000, 9_960_000])  # リターン 2 件 < 20
+    run_risk_daily(conn, _run(run_id), as_of=_AS_OF)
+    metrics = _last_metrics(conn)
+    seen = {
+        (d["metric"], d["reason"], d["observed"], d["required"])
+        for d in metrics["deferred"]
+    }
+    assert seen == {
+        ("realized_vol", "insufficient_returns", 2, 20),
+        ("es95", "insufficient_returns", 2, 20),
+    }
+    assert metrics["sufficient"] is False  # 旧キーも従来どおり
+
+
 # ── 日次サイクル ──────────────────────────────────────────────────────────────
 def test_run_risk_daily_measures_and_reports(conn, run_id, ips):
     _clear_nav(conn)
     _seed_nav(conn, [10_000_000, 9_000_000, 8_400_000])  # DD 16% → dd_soft のみ
-    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF)
+    detail = run_risk_daily(conn, _run(run_id), as_of=_AS_OF, close_ok=True)
     assert detail["DEMO_FUND"]["status"] == "measured"
     row = _limits_row(conn)
     assert row == (True, False, False, False)
@@ -461,10 +650,11 @@ def test_load_positions_ignores_future_bars(conn, run_id):
             datetime(2030, 2, 5, 6, tzinfo=UTC): 9999,  # as_of より未来
         },
     )
-    positions, notes = load_positions(conn, "DEMO_FUND", as_of=_AS_OF)
+    positions, notes, exclusions = load_positions(conn, "DEMO_FUND", as_of=_AS_OF)
     pos = next(p for p in positions if p.instrument_id == inst)
     assert pos.value == Decimal(100) * Decimal(1000)  # 未来バー(9999)を使わない
     assert notes == []
+    assert exclusions == []
 
 
 def test_load_instrument_returns_ignores_future_bars(conn, run_id):
