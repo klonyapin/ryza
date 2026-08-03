@@ -107,3 +107,27 @@ def test_fetch_closed_issues_requires_closed_at_and_not_pr(monkeypatch):
 def test_fetch_ci_state_aggregation(monkeypatch, check_runs, expected):
     _patch(monkeypatch, {"check_runs": check_runs})
     assert github_api.fetch_ci_state("deadbeef", "o/r") == expected
+
+
+# ── literal_md(第三者タイトルのリテラル化 — 独立役員審査 2026-08-03 低-9)──────
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("ふつうの Issue", "`ふつうの Issue`"),
+        # リンク偽装(表示は正規サイト・遷移先は攻撃者)がリテラル化で無効になる
+        ("[GitHub](https://evil.test)", "`[GitHub](https://evil.test)`"),
+        # コードスパンからの脱出を狙うバッククォート → 区切りを1本長くする
+        ("`code`", "`` `code` ``"),
+        ("a`b", "``a`b``"),
+        ("``x``", "``` ``x`` ```"),
+        # 改行・連続空白は1行に潰す(リスト項目を壊さない)
+        ("題名\n- 偽の箇条書き", "`題名 - 偽の箇条書き`"),
+        ("", ""),
+    ],
+)
+def test_literal_md_neutralizes_markdown(raw, expected):
+    assert github_api.literal_md(raw) == expected
+
+
+def test_literal_md_accepts_non_str():
+    assert github_api.literal_md(123) == "`123`"

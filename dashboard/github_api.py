@@ -11,6 +11,7 @@ gh CLI ではなく REST API を requests で直接叩く(VM に gh を入れな
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 import requests
@@ -22,6 +23,27 @@ _HEADERS = {
     "X-GitHub-Api-Version": "2022-11-28",
 }
 _TIMEOUT = 10.0
+
+
+def literal_md(text: object) -> str:
+    """第三者が書いた文字列を Markdown の**リテラル**として描画できる形に包む。
+
+    public repo の Issue タイトルは誰でも作成でき、そのまま ``st.markdown`` に渡すと
+    ``[表示テキスト](別 URL)`` のリンク偽装が成立する(独立役員審査 2026-08-03 低-9。
+    ``unsafe_allow_html`` は使っていないので XSS には至らないが、フィッシングの面は残る)。
+    CommonMark のコードスパンに包み、記法を無効化する。
+
+    区切りは内容中の最長バッククォート列より1本長いものを使い、内容の先頭・末尾が
+    バッククォートのときは空白を1つ足す(CommonMark §6.1 の剥がし規則に対応)。
+    改行・連続空白は1つの空白に潰す(1行のリスト項目として描画するため)。
+    """
+    s = " ".join(str(text).split())
+    if not s:
+        return ""
+    longest = max((len(run) for run in re.findall(r"`+", s)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if s.startswith("`") or s.endswith("`") else ""
+    return f"{fence}{pad}{s}{pad}{fence}"
 
 
 def _get_json(url: str, params: dict[str, Any] | None = None) -> Any:

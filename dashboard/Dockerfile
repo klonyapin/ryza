@@ -7,10 +7,22 @@
 #
 # 認証は持たない(IAP に全面委譲)。PORT は Cloud Run が注入(既定 8080)。
 # ヘルスチェック: Streamlit は /_stcore/health を返す(Cloud Run 既定の TCP probe でも可)。
-FROM python:3.12-slim
+#
+# ベースイメージは**ダイジェスト固定**(独立役員審査 2026-08-03 低-10)。タグは可変で、
+# 同じコミットから作ったイメージが別物になりうる — code_version(コミット SHA)と
+# 稼働イメージの対応が崩れるため(不変原則3)。タグも併記して意図を残す。
+# 更新手順(タグを上げるときは digest も取り直す):
+#   TOK=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/python:pull" | jq -r .token)
+#   curl -sI -H "Authorization: Bearer $TOK" \
+#        -H "Accept: application/vnd.oci.image.index.v1+json" \
+#        https://registry-1.docker.io/v2/library/python/manifests/3.12-slim | grep -i docker-content-digest
+#   (ghcr.io は https://ghcr.io/token?scope=repository:astral-sh/uv:pull で同様。
+#    docker があれば `docker manifest inspect <image> -v | jq -r .Descriptor.digest` でも可)
+# 取得日: 2026-08-03
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
 
 # uv(公式静的バイナリ)。依存は uv.lock で固定同期する(CI と同流儀)。
-COPY --from=ghcr.io/astral-sh/uv:0.7 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.7@sha256:629240833dd25d03949509fc01ceff56ae74f5e5f0fd264da634dd2f70e9cc70 /uv /uvx /bin/
 
 WORKDIR /app
 

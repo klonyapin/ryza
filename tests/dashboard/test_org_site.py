@@ -10,7 +10,33 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
 import queries
+
+# ── 接続の分離(独立役員審査 2026-08-03 重大-2)────────────────────────────────
+# 読取ページと役員室は**別 DB ロール**で接続する。権限の実体は DB 側
+# (ops/deploy-dashboard.sh)だが、アプリが正しい DSN を選ぶことをここで固定する。
+
+
+def test_connect_boardroom_uses_dedicated_dsn(monkeypatch):
+    seen: dict[str, object] = {}
+    monkeypatch.setenv(queries.BOARDROOM_URL_ENV, "postgresql://ryza_boardroom:pw@h/ryza")
+    monkeypatch.setattr(
+        queries.psycopg, "connect", lambda dsn, **kw: seen.update(dsn=dsn, kw=kw)
+    )
+    monkeypatch.setattr(queries, "connect", lambda **kw: pytest.fail("既定 DSN を使った"))
+    queries.connect_boardroom()
+    assert seen["dsn"] == "postgresql://ryza_boardroom:pw@h/ryza"
+    assert seen["kw"] == {"autocommit": True}
+
+
+def test_connect_boardroom_falls_back_to_default_dsn(monkeypatch):
+    seen: dict[str, object] = {}
+    monkeypatch.delenv(queries.BOARDROOM_URL_ENV, raising=False)
+    monkeypatch.setattr(queries, "connect", lambda **kw: seen.update(kw=kw))
+    queries.connect_boardroom()
+    assert seen["kw"] == {"autocommit": True}
+
 
 # ── DB 層 ─────────────────────────────────────────────────────────────────────
 

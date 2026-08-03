@@ -151,3 +151,15 @@ reminders:
       labels: [impl]
       body: "A-13(src/ryza/audit/a13.py)は git 履歴とデータベース(press.outbox)の両方を必要とするため、Cloud Run 版 ops-weekly では走らずスキップされる(週次ダイジェストに「スキップ(A13_REPO_PATH 未配線)」と表示)。GCE VM 上(daily と同居)で A13_REPO_PATH を設定した週次実行(systemd timer 等)を配線し、ダイジェストの A-13 行が「実行」になることを確認する。checkout の定期更新(git fetch/pull)も運用側で用意する(A-13 自身は read-only で fetch しない)。"
     status: pending
+
+  - id: dashboard-cloudbuild-trigger
+    what: "ダッシュボードのデプロイを GitHub main 連携の Cloud Build トリガーへ移行(Phase 5 目標)"
+    conditions:
+      - type: date_after
+        date: "2026-10-01"
+    action:
+      type: issue_create
+      title: "ダッシュボードのデプロイを Cloud Build トリガー化(ローカルビルドの廃止)"
+      labels: [impl]
+      body: "独立役員審査 2026-08-03(docs/reviews/dashboard-deploy-independent-review.md 重大-1)への恒久策。現行の ops/deploy-dashboard.sh は操作者の端末で Cloud Build にコンテキストを送るローカルビルドで、統制は同スクリプト内の git 検証(作業ツリー clean かつ HEAD == origin/main、イメージタグ = コミット SHA、Cloud Run へ code_version 記録)に依存している。検証はスクリプト自体を書き換えれば無効化できるため、GitHub の main への push を起点とする Cloud Build トリガーに移し、ビルド元を人間の端末から切り離す。設計リード裁定(反対意見書1の代替案)により Phase 5 に繰延した項目。config/roadmap.yaml の Phase 5 マイルストーンと対応。"
+    status: pending

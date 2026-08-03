@@ -5,7 +5,7 @@
 # 更新は設計リードの責務: フェーズ・マイルストーンの状態が変わったらこのファイルを PR で更新する。
 # status: done(完了)| doing(進行中)| todo(未着手)| future(将来・前提条件待ち)
 version: "1"
-updated: "2026-08-03"
+updated: "2026-08-03"  # ダッシュボード公開マイルストーンを追記(独立役員審査 低-10)
 
 phases:
   - id: p1
@@ -33,14 +33,20 @@ phases:
 
   - id: p3
     name: "Phase 3 ガバナンス"
-    status: done
-    note: "運用中(週次定款監査・全変更 PR 化)"
-    summary: "定款 v0.4・権限マトリクス・定款監査・役職資産・役員室・開発管理規程・CI"
+    status: doing
+    note: "統治の骨格は稼働中(週次定款監査・全変更 PR 化)。残りはダッシュボードの公開"
+    summary: "定款 v0.4・権限マトリクス・定款監査・役職資産・役員室・開発管理規程・CI・組織サイト"
     milestones:
       - { name: "定款 v0.4+governance.yaml(批准済み)", status: done }
       - { name: "週次定款監査ジョブ(A-13 系)", status: done }
       - { name: "役職資産(personas)+役員室", status: done }
       - { name: "開発管理規程+ブランチ保護+CI required", status: done }
+      - { name: "運用ダッシュボード(組織サイト・役員室 UI)", status: done }
+      - {
+          name: "ダッシュボード公開(Cloud Run + IAP・2ロール DB)",
+          status: doing,
+          note: "独立役員審査の差し戻しを是正済み。デプロイは設計リードが実行(ops/deploy-dashboard.sh)",
+        }
 
   - id: p4
     name: "Phase 4 デモ売買"
@@ -62,6 +68,11 @@ phases:
       - { name: "point-in-time バックテスト", status: todo }
       - { name: "ストラテジー動物園(手法ライフサイクル)", status: todo }
       - { name: "研究論文パイプライン", status: todo }
+      - {
+          name: "デプロイ経路の Cloud Build トリガー化(ローカルビルド廃止)",
+          status: todo,
+          note: "独立役員審査 重大-1 の恒久策。ops/reminders.yaml dashboard-cloudbuild-trigger",
+        }
 
   - id: p6
     name: "Phase 6 実弾移行"

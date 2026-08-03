@@ -9,12 +9,15 @@ Kill Switch 等の操作系 UI は置かない(Discord Bot の管轄)。唯一�
 (発注・設定変更の経路は持たない)。
 
 起動: ``.venv/bin/streamlit run dashboard/app.py``(README 参照)。
-接続先: env ``RYZA_DATABASE_URL``(既定 postgresql://ryza:ryza@localhost:5432/ryza)。
+接続先は用途で2本に分かれる(独立役員審査 2026-08-03 重大-2 の是正):
+読取は env ``RYZA_DATABASE_URL``(読取専用ロール ``ryza_dashboard``)、役員室の書込は
+env ``RYZA_BOARDROOM_DATABASE_URL``(最小権限ロール ``ryza_boardroom``)。ローカルでは
+後者を省略でき、その場合は前者にフォールバックする(``queries.connect_boardroom``)。
 役員室の LLM 呼び出しは Anthropic API キーが必要(env RYZA_ANTHROPIC_API_KEY /
 ANTHROPIC_API_KEY、または Secret Manager — providers.load_api_key の既定に任せる)。
 
-DB アクセスは ``queries.py``(読取)と ``ryza.governance.boardroom``(役員室の書込・
-テスト対象)に分離し、本ファイルは表示だけを担う。
+DB アクセスは ``queries.py``(接続と読取)と ``ryza.governance.boardroom``(役員室の
+書込・テスト対象)に分離し、本ファイルは表示だけを担う。
 """
 
 from __future__ import annotations
@@ -36,7 +39,6 @@ if str(_HERE) not in sys.path:
 import github_api  # noqa: E402
 import queries  # noqa: E402
 
-from ryza.db.conn import connect  # noqa: E402
 from ryza.governance import boardroom, personas  # noqa: E402
 from ryza.provenance.runs import run as run_ctx  # noqa: E402
 from ryza.research.llm import StructuredLLM  # noqa: E402
@@ -622,8 +624,10 @@ def _render_roadmap() -> None:
 
 
 def _issue_lines(issues: list[dict[str, Any]]) -> str:
+    # タイトルは第三者(public repo の Issue 作成者)が書いた文字列なので、リンク
+    # テキストにせずリテラル化する(github_api.literal_md — 独立役員審査 低-9)。
     return "\n".join(
-        f"- [#{i['number']} {i['title']}]({i['url']})"
+        f"- [#{i['number']}]({i['url']}) {github_api.literal_md(i['title'])}"
         + (f" `{', '.join(i['labels'])}`" if i["labels"] else "")
         for i in issues
     )
@@ -691,7 +695,10 @@ def page_plan(conn) -> None:
             state = _github_ci_state(p["head_sha"]) if p["head_sha"] else "none"
             ci = _CI_LABELS.get(state, "CI —")
             draft = "(draft)" if p["draft"] else ""
-            st.markdown(f"- [#{p['number']} {p['title']}]({p['url']}) {draft} — {ci}")
+            st.markdown(
+                f"- [#{p['number']}]({p['url']}) {github_api.literal_md(p['title'])}"
+                f" {draft} — {ci}"
+            )
     except Exception as exc:  # noqa: BLE001
         st.warning(f"GitHub API から取得できない: {exc}")
 
@@ -704,7 +711,8 @@ def page_plan(conn) -> None:
             merged = [p for p in _github_merged_pulls() if _within_days(p["merged_at"], 14)]
             st.markdown(
                 "\n".join(
-                    f"- [#{p['number']} {p['title']}]({p['url']})({p['merged_at'][:10]})"
+                    f"- [#{p['number']}]({p['url']}) "
+                    f"{github_api.literal_md(p['title'])}({p['merged_at'][:10]})"
                     for p in merged
                 )
                 if merged
@@ -718,7 +726,8 @@ def page_plan(conn) -> None:
             closed = [i for i in _github_closed_issues() if _within_days(i["closed_at"], 14)]
             st.markdown(
                 "\n".join(
-                    f"- [#{i['number']} {i['title']}]({i['url']})({i['closed_at'][:10]})"
+                    f"- [#{i['number']}]({i['url']}) "
+                    f"{github_api.literal_md(i['title'])}({i['closed_at'][:10]})"
                     for i in closed
                 )
                 if closed
@@ -738,7 +747,9 @@ def page_plan(conn) -> None:
             if i.get("state") == "CLOSED" and str(i.get("title", "")).startswith("T-")
         ]
         st.markdown(
-            "\n".join(f"- ✅ #{i['number']} {i['title']}" for i in t_done)
+            "\n".join(
+                f"- ✅ #{i['number']} {github_api.literal_md(i['title'])}" for i in t_done
+            )
             if t_done
             else "なし"
         )
@@ -748,16 +759,14 @@ def page_plan(conn) -> None:
 # ── 役員室(Issue #9・05-governance §5)────────────────────────────────────────
 @st.cache_resource
 def _boardroom_conn():
-    """役員室専用の**書込可**接続(autocommit)。
+    """役員室専用の**書込可**接続(``queries.connect_boardroom``)。
 
-    設計判断: ``queries.connect_readonly()`` は流用しない。既存ページの READ ONLY
-    原則はセッションを read-only に固定する防御の第二層であり(queries.py)、それを
-    緩めると全ページが書込可能になってしまう。書込はこの別接続だけに閉じることで、
-    読取ページに誤って書込コードが紛れても従来どおり DB 側で拒否される。
-    autocommit なのは実ジョブの Run と同じ流儀(即時永続化)。書込先(minutes /
-    minute_resolutions / stances)は追記オンリーのため、途中失敗しても改竄は起きない。
+    設計判断: 読取ページの接続は流用しない。分離の実体は**別 DB ロール**であり
+    (読取 = ``ryza_dashboard`` / 役員室 = ``ryza_boardroom``。詳細は queries.py と
+    ops/deploy-dashboard.sh)、役員室が侵害されても書込先は追記オンリーの
+    governance 3テーブルと meta.runs に限られる。
     """
-    return connect(autocommit=True)
+    return queries.connect_boardroom()
 
 
 @st.cache_resource
@@ -879,8 +888,12 @@ def page_boardroom() -> None:
     minute_id = st.session_state.get("br_minute_id")
     if minute_id:
         st.subheader(f"決議マーク(議事録 #{minute_id})")
-        # 決議ボタンは代表のみ押せる建前(05 §5)。本ダッシュボードはローカル専用で
-        # 公開ホスティングを持たない(冒頭 docstring)ため、操作者=代表とみなす。
+        # 決議ボタンは代表のみ押せる建前(05 §5)。本ダッシュボードは Cloud Run + IAP で
+        # 公開されており、操作者=代表とみなせる根拠は**IAP 許可リストが代表1名のみ**で
+        # あること(ops/deploy-dashboard.sh が set-iam-policy で DASHBOARD_USER 1名へ
+        # 宣言的に収束させる — 独立役員審査 2026-08-03 中-5)。許可リストを増やすと
+        # この前提は崩れ、増えた人物が代表名義で決議をマークできる。増やす場合は
+        # 操作者の識別(IAP の X-Goog-Authenticated-User-Email)を先に実装すること。
         # resolved_by='representative' は 0013 の CHECK でも DB 側から強制される。
         with st.form("resolution_form", clear_on_submit=True):
             title = st.text_input("決議タイトル")
