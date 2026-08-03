@@ -27,6 +27,9 @@ T-018 重要-5・重要-1)。まだスナップショットの無いフローは
 reclose_stale``)も走らないため、ここで測るのは**遅延仕訳が入ったままの・前日までの
 系列**になる。その日は測定値の前に ``CLOSE_FAILED_NOTE`` を出し、必ず urgent にする
 (黙って古い系列を測らない — 独立審査 再々審査 起草者の留意点 (a))。
+成否を知らされない実行(CLI 手動再実行)は ``close_ok=None`` のまま当日スナップ
+ショットの有無を**自己検証**し、無ければ ``CLOSE_MISSING_NOTE`` で同じ扱いにする
+(独立審査 2026-08-04 重大-2 — 呼び出し側の作法に fail-safe を依存させない)。
 
 CLI: ``python -m ryza.risk.daily``(冪等 — 同日再実行は limits_state を同値上書きし、
 イベント台帳とレポートが 1 件ずつ増えるのみ)。
@@ -37,7 +40,7 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -68,6 +71,13 @@ _JST = ZoneInfo("Asia/Tokyo")
 #: 起草者の留意点 (a))。締めが落ちた日は当日スナップショットも再締めも走らないため、
 #: リスク日次は**前日までの・未再締めの系列**を測る。黙って古い系列を測らない。
 CLOSE_FAILED_NOTE = "⚠ 本日の締めが失敗 — 測定は前日までの系列に基づく"
+
+#: 締めの成否を知らされずに実行したとき(CLI 手動再実行など)、当日の NAV
+#: スナップショットが無いことを自己検証で見つけた場合の警告(独立役員審査
+#: 2026-08-04 重大-2)。「知らない」を「成功した」と書かないための第二の文言。
+CLOSE_MISSING_NOTE = (
+    "⚠ 本日の締めが未完了(当日の NAV スナップショットが無い)— 測定は前日までの系列に基づく"
+)
 
 # 銘柄リターン系列の遡り日数(暦日)。ES のヒストリカル法「直近1年の日次リターン」
 # (指示書)を営業日で確保するための読出し窓。判定値ではなく読出し規約。
@@ -226,6 +236,24 @@ def load_instrument_returns(
     return returns
 
 
+def has_close_for_day(conn: psycopg.Connection, book_id: str, day: date) -> bool:
+    """その日(JST)の NAV スナップショットが帳簿にあるか(締めの自己検証)。
+
+    締めの成否を呼び出し側から知らされないとき、この 1 クエリで「当日の締めが系列に
+    反映されているか」を自分で確かめる。呼び出し側の作法(引数を渡し忘れない)に
+    fail-safe を依存させないため — 独立役員審査 2026-08-04 重大-2。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM ledger.nav_snapshots
+            WHERE book_id = %s AND snap_date = %s LIMIT 1
+            """,
+            (book_id, day),
+        )
+        return cur.fetchone() is not None
+
+
 def _load_cash(conn: psycopg.Connection, book_id: str) -> Decimal | None:
     """現金残高(cash 勘定の借方残)。ガードレール消費率レポート用。"""
     with conn.cursor() as cur:
@@ -351,7 +379,7 @@ def run_risk_daily(
     ips: IPSConfig | None = None,
     as_of: datetime | None = None,
     channel_ops: str = "ops",
-    close_ok: bool = True,
+    close_ok: bool | None = None,
     close_error: str | None = None,
 ) -> dict[str, Any]:
     """リスクエンジンの日次サイクルを 1 回実行する(帳簿は ``ips.books`` 全件)。
@@ -368,9 +396,14 @@ def run_risk_daily(
     当日のスナップショットも再締め(``ledger.closing.reclose_stale``)も走らないため、
     ここで測るのは遅延仕訳を含んだままの・前日までの系列になる。その事実をレポート
     先頭に出し、必ず urgent にする(黙って古い系列を測らない — 再々審査 (a))。
-    既定 ``True`` は「締めの失敗を知らされていない」= 単独 CLI 実行の意味であり、
-    締めの成否を知る呼び出し側(``ryza.jobs.daily``)は必ず実測値を渡す。
     ``close_error`` は失敗時の例外要約(あれば注記に添える)。
+
+    **既定は ``None``(不明)で、そのときは自己検証する**(独立役員審査 2026-08-04
+    重大-2): 当日の ``ledger.nav_snapshots`` 行があれば締めは系列に反映されている
+    (成功扱い)、無ければ ``CLOSE_MISSING_NOTE`` を出して urgent にし、
+    ``metrics.close_ok=false`` / ``close_self_checked=true`` を残す。旧既定の ``True``
+    は「知らない」を「成功した」と台帳に**断定**するため、締めが落ちた朝に CLI を
+    手動再実行するだけで警告が消える経路になっていた(障害直後に警告が消える)。
     """
     ips = ips or IPSConfig.load()
     as_of = as_of or datetime.now(UTC)
@@ -378,11 +411,22 @@ def run_risk_daily(
         "classification": classify_current_instruments(conn, run_id=run.run_id)
     }
     as_of_day = as_of.astimezone(_JST).date()
-    close_note = (
-        None if close_ok
-        else CLOSE_FAILED_NOTE + (f"(execution 段: {close_error})" if close_error else "")
-    )
     for book_id in ips.books:
+        # 締めの成否: 知らされていれば(jobs.daily)それを使い、知らされていなければ
+        # 当日スナップショットの有無で自己検証する(重大-2)。帳簿ごとに確かめる —
+        # 締めは帳簿単位の操作で、片方だけ落ちることがある。
+        self_checked = close_ok is None
+        book_close_ok = (
+            has_close_for_day(conn, book_id, as_of_day) if self_checked else close_ok
+        )
+        close_note = None
+        if not book_close_ok:
+            close_note = (
+                CLOSE_MISSING_NOTE
+                if self_checked
+                else CLOSE_FAILED_NOTE
+                + (f"(execution 段: {close_error})" if close_error else "")
+            )
         loaded = load_nav_series(conn, book_id)
         series = loaded.points
         # 未反映フロー(スナップショット未生成)は測定に入らない。黙って落とさず注記する。
@@ -413,7 +457,8 @@ def run_risk_daily(
             detail[book_id] = {
                 "status": "no_nav",
                 "pending_flows": len(loaded.pending_flows),
-                "close_ok": close_ok,
+                "close_ok": book_close_ok,
+                "close_self_checked": self_checked,
                 "report_outbox_id": oid,
             }
             continue
@@ -452,9 +497,11 @@ def run_risk_daily(
                     window_days.intersection(all_recon)
                 ),
                 "recon_invalidated_days_total": len(all_recon),
-                # 測定の前提: 当日の締めが走ったか(走っていなければ系列は前日まで)。
-                "close_ok": close_ok,
-                **({} if close_ok else {"close_error": close_error}),
+                # 測定の前提: 当日の締めが走ったか(走っていなければ系列は前日まで)と、
+                # それを呼び出し側から知らされたのか自己検証したのか(重大-2)。
+                "close_ok": book_close_ok,
+                "close_self_checked": self_checked,
+                **({} if book_close_ok or self_checked else {"close_error": close_error}),
             },
         )
         usage = engine.guardrail_usage(
@@ -480,14 +527,15 @@ def run_risk_daily(
                 or state.es95.deferred
                 or pending_urgent
                 or bool(fresh_recon)
-                or not close_ok
+                or not book_close_ok
             ),
         )
         detail[book_id] = {
             "status": "measured",
             "pending_flows": len(loaded.pending_flows),
             "pending_urgent": pending_urgent,
-            "close_ok": close_ok,
+            "close_ok": book_close_ok,
+            "close_self_checked": self_checked,
             "recon_invalidated_new": len(fresh_recon),
             "recon_invalidated_total": len(all_recon),
             "drawdown": str(state.drawdown),

@@ -73,9 +73,10 @@ def state_metrics(state: RiskState, extra: dict | None = None) -> dict:
         "es95_parametric": state.es95.parametric,
         "es95_adopted": state.es95.adopted,
         "es95_n_obs": state.es95.n_obs,
-        # ES 単体の判定保留(観測空白・除外過半)。``deferred`` にも同じ事実が入るが、
-        # エンジンの生フラグとしても読めるようにしておく。
+        # ES 単体の判定保留。``deferred`` にも同じ事実が入るが、エンジンの生の返り値
+        # としても読めるようにしておく(理由は ``es95()`` が自ら返したもの — 重大-1)。
         "es95_deferred": state.es95.deferred,
+        "es95_deferral_reason": state.es95.deferral_reason,
         "deferred": [
             {
                 "metric": d.metric,

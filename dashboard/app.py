@@ -506,6 +506,7 @@ _DEFERRAL_REASONS = {
     "insufficient_obs": "ES 観測不足",
     "no_observations": "保有ありだが観測ゼロ",
     "majority_excluded": "除外銘柄が過半",
+    "no_common_days": "対象銘柄の共通観測日ゼロ",
 }
 
 #: 測定から銘柄を外した理由 → 画面文言。
@@ -630,12 +631,17 @@ def page_risk(conn) -> None:
                 f"測定 {event['as_of']:%Y-%m-%d %H:%M} / {event['actor']} / "
                 f"run {event['run_id']} / 事象 {event['event']}"
             )
-        # 当日の締めが落ちた日は測定値そのものの as_of がずれる(前日までの系列)。
-        # 使用率の前に出す(ryza.risk.daily の CLOSE_FAILED_NOTE と同じ事実)。
+        # 当日の締めが落ちた/走っていない日は測定値そのものの as_of がずれる
+        # (前日までの系列)。使用率の前に出す(risk.daily の同名の事実)。
         if metrics.get("close_ok") is False:
             st.warning(
-                "⚠ 直近の締めが失敗した日の測定 — 値は前日までの系列に基づく"
+                "⚠ 直近の締めが失敗/未完了の測定 — 値は前日までの系列に基づく"
                 "(遅延仕訳が未反映のまま DD・実現ボラ・ES を出している)"
+                + (
+                    "。締めの成否は risk 側の自己検証(当日 NAV スナップショットの有無)"
+                    if metrics.get("close_self_checked")
+                    else ""
+                )
             )
         st.markdown("**リミット使用率(高い順)**")
         viz.render_bullets(_risk_bullets(metrics, limits))

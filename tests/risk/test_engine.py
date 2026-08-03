@@ -322,6 +322,47 @@ def test_es_deferral_reason_distinguishes_majority_excluded(ips):
     assert d.reason == "majority_excluded"
     assert [(e.instrument_id, e.measure, e.reason, e.observed, e.required)
             for e in state.excluded] == [(1, "es95", "short_series", 10, 20)]
+    # 残部が無い日に「残部の測定値は参考値」と書かない(重大-1)。
+    assert any("すべて除外され測定対象なし" in n for n in state.notes)
+
+
+def test_es_deferral_reason_no_common_days(ips):
+    """共通観測日ゼロは独立の理由コードで、過半除外と取り違えない(重大-1 の再現)。
+
+    審査の再現ケース: 3 銘柄保有・#1 のみ短系列(10 観測)・#2/#3 は各 25 観測だが
+    共通日ゼロ。除外は 1/3 で**過半ではない**のに、旧実装は
+    ``majority_excluded`` と記録し「残部の測定値は参考値」と注記していた
+    (残部の測定値は存在しない)。
+    """
+    series = constant_growth_series(25, rate="1.001")
+    positions = [
+        RiskPosition(1, "equity_jp", Decimal(1_000_000)),
+        RiskPosition(2, "equity_jp", Decimal(1_000_000)),
+        RiskPosition(3, "equity_us", Decimal(1_000_000)),
+    ]
+    rets = _returns_map(1, [-0.9] * 10, start=date(2029, 1, 1))
+    rets.update(_returns_map(2, [0.0] * 25, start=date(2029, 1, 1)))
+    rets.update(_returns_map(3, [0.0] * 25, start=date(2029, 6, 1)))  # 期間が重ならない
+    state = evaluate(series, positions, rets, ips)
+
+    assert state.es95.n_obs == 0 and state.es95.excluded == (1,)
+    assert state.es95.deferral_reason == "no_common_days"
+    (d,) = state.deferred
+    assert (d.metric, d.reason, d.observed) == ("es95", "no_common_days", 0)
+    assert not state.es_exceeded
+    assert any("共通観測日がゼロ" in n and "残部は存在しない" in n for n in state.notes)
+    assert not any("残部の測定値は参考値" in n for n in state.notes)
+
+
+def test_es_deferral_reason_is_not_influenced_by_extra_exclusions(ips):
+    """理由は es95() が返したものだけで決まる(呼び出し側の入力で変わらない — 中(a))。"""
+    series = constant_growth_series(25, rate="1.001")
+    positions = [RiskPosition(1, "equity_jp", Decimal(1_000_000))]
+    forged = Exclusion(99, measure="es95", reason="short_series", observed=5, required=20)
+    plain = evaluate(series, positions, {}, ips)
+    with_forged = evaluate(series, positions, {}, ips, extra_exclusions=[forged])
+    assert plain.es95.deferral_reason == "no_observations"
+    assert [d.reason for d in with_forged.deferred] == [d.reason for d in plain.deferred]
 
 
 def test_partial_exclusion_is_recorded_without_deferring(ips):

@@ -121,6 +121,7 @@ def _metrics_v2(**overrides) -> dict:
              "observed": None, "required": None},
         ],
         close_ok=True,
+        close_self_checked=False,
     )
     metrics.update(overrides)
     return metrics
@@ -678,7 +679,21 @@ def test_risk_warns_when_last_close_failed(conn, run, monkeypatch):
     finally:
         st.cache_data.clear()
         st.cache_resource.clear()
-    assert any("直近の締めが失敗した日の測定" in w for w in warnings), warnings
+    assert any("直近の締めが失敗/未完了の測定" in w for w in warnings), warnings
+    # 成否を知らされた実行(execution 段の StageResult)なので自己検証の断りは出ない。
+    assert not any("自己検証" in w for w in warnings), warnings
+
+
+def test_risk_warning_names_the_self_check_source(conn, run, monkeypatch):
+    """自己検証で締め未完了を見つけた測定は、その出所も画面に書く(重大-2)。"""
+    _seed(conn, run, metrics=_metrics_v2(close_ok=False, close_self_checked=True))
+    try:
+        at = _app_factory(conn, monkeypatch)("risk")
+        warnings = [str(w.value) for w in at.warning]
+    finally:
+        st.cache_data.clear()
+        st.cache_resource.clear()
+    assert any("自己検証" in w and "NAV スナップショット" in w for w in warnings), warnings
 
 
 # ── コスト: 累計 vanity を出さず比率で見せる ────────────────────────────────────
