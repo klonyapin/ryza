@@ -201,3 +201,27 @@ reminders:
       labels: [impl]
       body: "A-13(src/ryza/audit/a13.py)は git 履歴とデータベース(press.outbox)の両方を必要とするため、Cloud Run 版 ops-weekly では走らずスキップされる(週次ダイジェストに「スキップ(A13_REPO_PATH 未配線)」と表示)。GCE VM 上(daily と同居)で A13_REPO_PATH を設定した週次実行(systemd timer 等)を配線し、ダイジェストの A-13 行が「実行」になることを確認する。checkout の定期更新(git fetch/pull)も運用側で用意する(A-13 自身は read-only で fetch しない)。"
     status: pending
+
+  - id: fm-jim-universe-curated-classification
+    what: "Jim のユニバースが空のまま(流動性系タグ liquid_equity/etf/index_futures の curated 分類が無い — T-017 引き継ぎ)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "Jim のユニバース分類(liquid_equity 等)を供給する"
+      labels: [impl]
+      body: "T-017 の Jim は config/mandates/jim.yaml の universe(liquid_equity/etf/index_futures)に属する銘柄だけを走査するが、決定論ルール(src/ryza/risk/classify.py)は流動性・時価総額系タグを付けない(母集団データが要るため)。結果として curated 分類が供給されるまで Jim の本番ユニバースは空=発注ゼロになる(fail-closed の設計どおりの挙動。タグを緩めて埋めてはならない)。①流動性の決定論基準(売買代金の分位等)の定義、②market.instrument_classification への curated/ルール供給ジョブ、③ETF のレバ/インバース判定(IPS §5 禁止フラグ)の情報源、を決めて実装する。"
+    status: pending
+
+  - id: fm-asset-class-taxonomy-column
+    what: "IPS §8.1 資産クラスの分類列が market.instrument_classification に無い(T-017 は fm/base.py の対応表で代替)"
+    conditions:
+      - type: date_after
+        date: "2026-08-24"
+    action:
+      type: issue_create
+      title: "market.instrument_classification に IPS 資産クラス列を追加する"
+      labels: [impl]
+      body: "ゲートが要求する asset_class(equity_jp / equity_us 等 — IPS §8.1)は 0015 の分類表に列が無いため、T-017 は src/ryza/fm/base.py の ips_asset_class(銘柄マスタの asset_class×venue の対応表)で導出している。分類の正が2箇所に分かれるのは望ましくないので、0015 に列を足して src/ryza/risk/classify.py が決定論で埋め、FM は読むだけにする(スキーマ変更のため保護領域手続=独立役員審査+みなし承認)。移行時は fm/base.py の対応表を削除する。"
+    status: pending
