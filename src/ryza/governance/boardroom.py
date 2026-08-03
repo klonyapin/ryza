@@ -61,7 +61,7 @@
 - 決定論ガードは議事録全体を見て独立役員を呼ぶが、呼ばれた独立役員が読むのは直近
   ``TRANSCRIPT_WINDOW`` 発言である。ガードの根拠になった代表発言が窓の外に落ちる場合は
   その発言を「過去の関連発言」として窓の前に**ピン留め**する(``pinned_decision_turns``)。
-  窓そのものは広げない(費用の上限を保つ)
+  窓そのものは広げず、上限で切り落とした件数はプロンプトに明示する(fail-loud)
 - 議事録の話者行は表示名ではなく**役職キー**(``**[cio]** CIO: …``)で書き、話者列の復元
   (``parse_speaker_sequence``)はキーだけで行う。表示ラベルの改称で過去の議事録の鮮度
   判定が反転する fail-open を塞ぐ。旧書式の本文は**凍結ラベル表**で復元し、どちらでも
@@ -234,8 +234,35 @@ _SPEAKER_LABELS = {
     **BOARDROOM_ROLES,
 }
 
+# ── 証憑の解釈に使う**凍結表**(追記オンリー。表示辞書・役職定義から派生させない)──────
+# 議事録(``minutes.body_md``)は追記オンリーで書き換えられない。その解釈が可変な定義に
+# 依存すると、定義を1行変えるだけで過去の証憑の意味が変わる(決議精緻化審査 懸念6)。
+# 以下2つの表は**削らない・書き換えない**。行の追加だけが許される。
+#
+# 旧書式(役職キーを併記する前)の話者行の表示ラベル → 役職キー。
+_LEGACY_LABEL_TO_SPEAKER: dict[str, str] = {
+    "代表": "representative",
+    "CIO": "cio",
+    "独立役員": "independent_officer",
+    "監査": "audit",
+    "進行役": "facilitator",
+}
+
+# 新書式の話者行で受け付ける役職キー。役職キーは DB(minutes.attendees・stances.role)にも
+# 書かれる構造識別子だが、「証憑の解釈を可変な定義から切り離す」原則は表示名と同じ。
+_MINUTE_SPEAKER_KEYS: frozenset[str] = frozenset(
+    {"representative", "cio", "independent_officer", "audit", "facilitator"}
+)
+
 # 議事録の話者行に書く**不変の役職キー**の集合(表示名と違い改称しない識別子)。
-_SPEAKER_KEYS: tuple[str, ...] = tuple(_SPEAKER_LABELS)
+# なりすまし無害化(``sanitize_speech``)が扱う集合は**凍結キー集合との和**にする
+# (残懸念審査 R-2): 復元が受け付けるキーを無害化が取りこぼすと、``BOARDROOM_ROLES``
+# から役職を1つ外しただけでその役職の詐称行が引用化されずに真正の話者行として
+# 話者列へ混入する(同審査の実測)。不変条件「parse が受け付けるキーは必ず sanitize が
+# 引用化する」はテストで固定する。
+_SPEAKER_KEYS: tuple[str, ...] = tuple(
+    sorted(_MINUTE_SPEAKER_KEYS | set(_SPEAKER_LABELS))
+)
 
 
 def mentions_important_decision(text: str) -> bool:
@@ -267,12 +294,25 @@ def guard_scope_text(turns: Sequence[ChatTurn]) -> str:
     return "\n".join(reversed(scope))
 
 
+class PinnedDecisions(NamedTuple):
+    """ピン留めの結果。
+
+    - ``turns``: プロンプトへ戻す窓外の代表発言(古い順・``MAX_PINNED_TURNS`` 件まで)
+    - ``omitted``: 上限で切り落とした件数。**0 でないなら必ずプロンプトに件数を出す**
+      (残懸念審査 懸念3: 省略を黙って行うと、独立役員は自分が読んでいるのが部分集合
+      だと気付けない — fail-loud にする)
+    """
+
+    turns: list[ChatTurn]
+    omitted: int = 0
+
+
 def pinned_decision_turns(
     turns: Sequence[ChatTurn],
     *,
     window: int = TRANSCRIPT_WINDOW,
     limit: int = MAX_PINNED_TURNS,
-) -> list[ChatTurn]:
+) -> PinnedDecisions:
     """入力窓の外へ落ちた「重要決定の兆候を含む代表発言」を古い順で返す(ピン留め対象)。
 
     **決議精緻化審査 2026-08-03 懸念3 の是正**: 決定論ガード(``guard_scope_text`` +
@@ -286,11 +326,15 @@ def pinned_decision_turns(
     毎ターン蒸し返さない)。個々の発言では検出されず連結してはじめて検出される分割議題
     (「明日から本番でいこう」+「あと100万ほど」)のために、区間全体が検出に当たる
     ときは区間内の窓外代表発言をまとめて戻す。件数は ``limit`` 件(新しい順に採用)で
-    頭打ちにする — ピン留めはプロンプトの費用であり、ガードの**検出**自体は全文に対して
-    行われるため上限を置いても素通りは生まれない。
+    頭打ちにし、**切り落とした件数を ``omitted`` で返す**。上限はガードの**検出**には
+    影響しない(検出は全文に対して行われるので召集は素通りしない)が、**批判の対象が
+    独立役員に届くか**は別問題であり、雑音で本命の決定発言が押し出されうる(残懸念審査
+    の実測)。したがって省略は黙って行わず、``speak`` が件数をプロンプトに明示する。
+    選択規則自体の精緻化(検出に最も寄与した発言を優先する等)は
+    ``ops/reminders.yaml`` の ``boardroom-pinning-selection`` で後続する。
     """
     if window <= 0 or len(turns) <= window:
-        return []
+        return PinnedDecisions([], 0)
     outside = list(turns[:-window])
     scope_start = 0
     for i in range(len(turns) - 1, -1, -1):
@@ -303,7 +347,9 @@ def pinned_decision_turns(
     hits = [t for t in candidates if mentions_important_decision(t.text)]
     if not hits and candidates and mentions_important_decision(guard_scope_text(turns)):
         hits = candidates
-    return hits[-limit:] if limit > 0 else []
+    if limit <= 0:
+        return PinnedDecisions([], len(hits))
+    return PinnedDecisions(hits[-limit:], max(0, len(hits) - limit))
 
 
 # ── 出力スキーマ(schemas.py の流儀: 狭い語彙のみで自前 validate に適合)────────
@@ -486,6 +532,12 @@ _SOURCE_LABELS = {
 }
 
 
+# 進行メタ節の見出し。``transcript_markdown`` が**常に**書く構造マーカーであり、
+# ``parse_speaker_sequence`` が「この本文は議事録として書かれたものか」を判定する印を
+# 兼ねる(残懸念審査 R-1)。両者が同じ定数を使うことで書式のドリフトを防ぐ。
+MINUTE_META_HEADING = "## 進行メタ(発言者の選定経路)"
+
+
 def _speech_line(speaker: str, body: str) -> str:
     """議事録の話者行(``**[役職キー]** 表示名: 本文``)。
 
@@ -517,7 +569,7 @@ def transcript_markdown(turns: Sequence[ChatTurn], *, held_at: datetime) -> str:
     for turn in turns:
         lines.append(_speech_line(turn.speaker, sanitize_speech(turn.text)))
         lines.append("")
-    lines += ["## 進行メタ(発言者の選定経路)", ""]
+    lines += [MINUTE_META_HEADING, ""]
     guard_fired = False
     for i, turn in enumerate(turns, start=1):
         if turn.speaker == "representative":
@@ -543,27 +595,9 @@ def transcript_markdown(turns: Sequence[ChatTurn], *, held_at: datetime) -> str:
 _MINUTE_KEY_LINE = re.compile(r"^\*\*\[(?P<key>[A-Za-z_]+)\]\*\*", re.MULTILINE)
 
 # 旧書式(2026-08-03 の懸念6 是正より前に保存された議事録)の話者行。
+# 復元表(``_LEGACY_LABEL_TO_SPEAKER`` / ``_MINUTE_SPEAKER_KEYS``)は凍結表として
+# ファイル冒頭で定義している。
 _MINUTE_SPEECH_LINE = re.compile(r"^\*\*(?P<label>[^*\n]+)\*\*:", re.MULTILINE)
-
-# **復元専用の凍結ラベル表(追記オンリー)**。表示用の ``_SPEAKER_LABELS`` から派生させる
-# と、表示名を改称しただけで過去の議事録本文の解釈が変わる(決議精緻化審査 懸念6 の実測:
-# 「代表」→「代表取締役」で同一本文の鮮度判定が「要確認」→「鮮度あり」へ反転)。過去に
-# 議事録へ書かれた表記だけを列挙し、**この表からは行を削らない・書き換えない**
-# (新しい表示名を追加する必要も無い — 新書式の話者行は役職キーで復元する)。
-_LEGACY_LABEL_TO_SPEAKER: dict[str, str] = {
-    "代表": "representative",
-    "CIO": "cio",
-    "独立役員": "independent_officer",
-    "監査": "audit",
-    "進行役": "facilitator",
-}
-
-# 復元で受け付ける役職キー(同じく追記オンリーの表)。役職キーは DB(minutes.attendees・
-# stances.role)にも書かれる構造識別子であり表示名のように改称しないが、「証憑の解釈を
-# 可変な定義から切り離す」原則は同じであるため、ここでも独立した表として凍結する。
-_MINUTE_SPEAKER_KEYS: frozenset[str] = frozenset(
-    {"representative", "cio", "independent_officer", "audit", "facilitator"}
-)
 
 
 def parse_speaker_sequence(body_md: str) -> list[str]:
@@ -575,32 +609,42 @@ def parse_speaker_sequence(body_md: str) -> list[str]:
     判定順:
 
     1. **新書式**(``**[cio]** CIO: …``)は行頭の**役職キー**だけで復元する。表示名は
-       読まないため、ラベルを改称しても過去本文の解釈は動かない(懸念6 の是正)
+       読まないため、ラベルを改称しても過去本文の解釈は動かない(懸念6 の是正)。
+       ただし新書式は ``transcript_markdown`` が書いた本文にしか現れないため、
+       **進行メタ節(``MINUTE_META_HEADING``)を伴わない本文は採用しない**
     2. 新書式の話者行が1件も無い本文は**旧書式**とみなし、凍結ラベル表
        (``_LEGACY_LABEL_TO_SPEAKER``)で復元する。この表は表示用辞書と独立で、
        追記オンリーの証憑と同じく書き換えない
     3. どちらでも復元できなければ空リスト。呼び出し側(``minute_critic_recency``)は
        これを**判定不能**として扱い、決議には明示確認を要求する(fail-closed)
 
-    未知のキー・ラベルの行は無視する(なりすまし行は ``sanitize_speech`` が引用化済み)。
+    **書式の混在は判定不能(残懸念審査 R-1 の是正)**: 新旧の話者行が同一本文に共存する
+    場合、および新書式の話者行が議事録の構造を伴わずに現れる場合は、先勝ちで一方を採らず
+    ``[]``(判定不能 → NULL → 明示確認)を返す。先勝ちは**攻撃者が触れる側の分岐を優先**
+    することになり、自由記述や旧書式の本文へ ``**[independent_officer]** …`` の1行を
+    混ぜるだけで、その1行だけが話者列になり「最後の代表発言より後に独立役員が発言した」
+    が成立してしまう(同審査の実測。旧 ``sanitize_speech`` はこの形を引用化しなかったため
+    既存本文にも実在しうる)。懸念1 で固めた fail-closed を後退させない。
 
-    **限界(正直な開示)**: 旧書式の本文に、当時は無害化対象でなかった ``**[役職キー]**``
-    行が偶然含まれていれば、その本文は新書式として解釈される。議事録は追記オンリー
-    (0013)で後から書式を混ぜられないため、実害は「旧本文に役職キー形の文字列を書いた
-    会議」に限られる。
+    未知のキー・ラベルの行は無視する(なりすまし行は ``sanitize_speech`` が引用化済み)。
     """
     keyed = [
         m.group("key")
         for m in _MINUTE_KEY_LINE.finditer(body_md)
         if m.group("key") in _MINUTE_SPEAKER_KEYS
     ]
-    if keyed:
-        return keyed
-    return [
+    legacy = [
         _LEGACY_LABEL_TO_SPEAKER[m.group("label")]
         for m in _MINUTE_SPEECH_LINE.finditer(body_md)
         if m.group("label") in _LEGACY_LABEL_TO_SPEAKER
     ]
+    if keyed and legacy:
+        return []  # 書式の混在 = どちらが真正か決められない(判定不能)
+    if keyed:
+        # 議事録の構造(進行メタ節)を伴わない新書式行は、自由記述本文へ混ぜられた
+        # 1行と区別できない。``transcript_markdown`` は常にメタ節を書く。
+        return keyed if MINUTE_META_HEADING in body_md else []
+    return legacy
 
 
 def _conversation_block(turns: Sequence[ChatTurn]) -> str:
@@ -757,20 +801,30 @@ def speak(
 
     **ガード検出発言のピン留め(決議精緻化審査 懸念3)**: 独立役員に限り、窓の外へ落ちた
     「重要決定の兆候を含む代表発言」(``pinned_decision_turns``)を窓の**前**に
-    「過去の関連発言」として付ける。窓は 30 発言のまま広げない。批判義務(05 §3)を負う
+    「過去の関連発言」として付け、上限で切り落とした件数があれば「他 N 件の窓外発言を
+    省略」と明示する(fail-loud)。窓は 30 発言のまま広げない。批判義務(05 §3)を負う
     のは独立役員であり、その義務の対象が入力に無い状態を作らないための最小の追加である
     (他役職に同じ付加をしないのは費用の問題 — ガードの検出自体は全文に対して行われる)。
     """
     if not turns:
         raise ValueError("会議のトランスクリプトが空(代表の発言が必要)")
     parts = []
-    pinned = pinned_decision_turns(turns) if role == CRITIC_ROLE else []
-    if pinned:
-        parts.append(
+    pinned = (
+        pinned_decision_turns(turns)
+        if role == CRITIC_ROLE
+        else PinnedDecisions([], 0)
+    )
+    if pinned.turns:
+        header = (
             "# 過去の関連発言(古い順・**入力窓の外**。決定論ガードが重要決定の兆候を"
-            "検出した代表発言のため、批判の対象として再掲する)\n\n"
-            + _conversation_block(pinned)
+            "検出した代表発言のため、批判の対象として再掲する)"
         )
+        if pinned.omitted:
+            # 省略を黙って行わない(残懸念審査 懸念3 — fail-loud)。
+            header += (
+                f"\n\n(他 {pinned.omitted} 件の窓外発言を省略 — 全文は議事録参照)"
+            )
+        parts.append(header + "\n\n" + _conversation_block(pinned.turns))
     parts += [
         f"# これまでの会議(古い順・直近 {TRANSCRIPT_WINDOW} 発言)\n\n"
         + _conversation_block(turns[-TRANSCRIPT_WINDOW:]),
@@ -1292,6 +1346,7 @@ __all__ = [
     "MAX_PINNED_TURNS",
     "MAX_SPEECHES_PER_TURN",
     "MEETING_ORDER",
+    "MINUTE_META_HEADING",
     "REPLY_SCHEMA",
     "SPEAKER_ROUTE_SCHEMA",
     "STANCE_DIGEST_SCHEMA",
@@ -1301,6 +1356,7 @@ __all__ = [
     "ConfirmationStats",
     "CriticAbsentError",
     "MeetingResult",
+    "PinnedDecisions",
     "SavedMinute",
     "attendees_of",
     "conduct_meeting",

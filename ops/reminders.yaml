@@ -967,6 +967,8 @@ reminders:
     # 独立役員発言以降)の代表発言のうち窓外に落ちたものを最大 MAX_PINNED_TURNS 件、
     # 「過去の関連発言」として独立役員のプロンプト先頭へ戻す。窓は 30 発言のまま。
     # 回帰: tests/governance/test_boardroom.py の 43 発言ケース(審査の実測長)。
+    # 2026-08-04 残懸念審査: 上限で本命が押し出されうる点を指摘され、省略件数の明示
+    # (fail-loud)を追加。選択規則の精緻化は boardroom-pinning-selection で後続。
     status: done
 
   - id: speaker-label-stability
@@ -986,7 +988,33 @@ reminders:
     # 保護領域の migration を要するため採らなかった(本文だけで解釈が閉じるなら列は不要)。
     # 回帰: 表示ラベルを改称したソースを別インスタンスとして読み込み、同一の過去本文の
     # 判定が反転しないことを実測で固定(審査の実測ケース)。
+    # 2026-08-04 残懸念審査 R-1/R-2 の是正を同ブランチで反映: 新旧書式の混在・構造を
+    # 伴わない新書式行は判定不能(fail-closed)、無害化のキー集合も凍結集合との和にした。
     status: done
+
+  - id: boardroom-pinning-selection
+    what: "ピン留めの選択規則を精緻化する(残懸念審査 懸念3 の恒久是正)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "boardroom: ピン留めの選択を『新しい順』から検出寄与順へ改める"
+      labels: [governance]
+      body: "boardroom.pinned_decision_turns は窓外の代表発言を **新しい順** に MAX_PINNED_TURNS=5 件まで採る。残懸念審査(2026-08-04)は、決定発言(`実弾…¥100万`)の後に単位付きの雑音(「あとN%上げたい」等)が5件続くと本命がピン留めから落ちることを実測した。連結検出フォールバックはさらに弱く、候補が区間内の窓外代表発言**全件**になるため分割議題も押し出される。暫定是正として省略件数をプロンプトに明示する fail-loud を入れた(独立役員が部分集合と気付ける)が、選択規則そのものは未是正である。案: (a) 検出語・金額表記に**個別に**一致した発言を優先し、連結でしか一致しない発言は後順位にする、(b) 一致した語の種類(3専決キーワード > 保護領域 > 金額)で重み付けする、(c) 件数でなく文字数予算で頭打ちにする。いずれもテストで固定すること。出典: docs/reviews/boardroom-meeting-independent-review.md 残懸念2件審査記録。"
+    status: pending
+
+  - id: boardroom-sanitize-fullwidth
+    what: "sanitize_speech の全角・NBSP 変種のすり抜けと digest 側のフェンス欠如(残懸念審査 R-3)"
+    conditions:
+      - type: date_after
+        date: "2026-08-17"
+    action:
+      type: issue_create
+      title: "boardroom: 全角括弧・NBSP・順序付きリストの詐称行を無害化し、要約入力にもフェンスを付ける"
+      labels: [governance]
+      body: "残懸念審査(2026-08-04)の実測: `**［cio］**`(全角括弧)・全角空白/NBSP インデント・順序付きリスト `1. ` で始まる話者行は sanitize_speech が引用化しない。parse_speaker_sequence は ASCII 厳密一致のため**話者列は汚染されない**(fail-closed)が、role_digest_input はフェンス無しの Markdown を要約 LLM に渡し、_DIGEST_SYSTEM は「`**[役職キー]** 表示名:` で始まる行だけが正」と教えるため、人と LLM の目には全角版が真正の発言に見える(再確認審査 懸念B と同型の残穴)。是正案: (a) 無害化の前に全角括弧・全角空白・NBSP を正規化する(NFKC 相当の限定的な写像。本文そのものは書き換えず判定用にだけ正規化するか、引用化して残すかを決めること)、(b) 行頭マーカーに順序付きリストを加える、(c) role_digest_input の出力も _conversation_block と同じフェンスで囲む。証憑(minutes.body_md)の見た目を変える変更を含むため、既存本文の解釈が変わらないことをテストで固定すること。出典: docs/reviews/boardroom-meeting-independent-review.md 残懸念2件審査記録 R-3。"
+    status: pending
 
   - id: mtm-bar-arrival-revisit
     what: "MTM 未再適用日(mtm_pending)のバー到着後の自動再訪"
