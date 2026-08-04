@@ -344,7 +344,7 @@ reminders:
       title: "Jim の curated ユニバース(liquid_equity 35銘柄)の承認"
       labels: [approval]
       body: "config/universe/jim-curated.yaml は approved_at / approved_by が null であり、ローダ(src/ryza/risk/classify.load_curated_universe)が読み込みを拒否する。したがって反映されず、Jim のユニバースは空=発注ゼロのままである(fail-closed の設計どおり)。承認にあたって確認すべきこと: ①選定基準(日経225 構成かつ東証プライム上場の内国普通株式 — 売買代金の実測が整うまでの代理基準)が妥当か、②列挙 35 銘柄が**承認時点の**日経225 構成銘柄であること(本ファイルは指数の正ではなく写しであり、構成は定期見直しで変わる)、③タグを付与することは Jim が売買できる母集団を広げる操作であること。承認後は approved_at / approved_by を記入し、tests/risk/test_classify.py の test_shipped_jim_universe_is_wellformed_but_unapproved を『読み込めること』の検証へ書き換える(承認をコード変更として残す)。手順は docs/ops/fm-curated-universe.md。"
-    status: pending
+    status: done # 2026-08-04 代表承認済み(Discord「売買候補は承認」)— approved_at/approved_by をコミット ae0fd8b454ff8a54b6fc26b1416e8b1dcd0d310e で記録、tests/risk/test_classify.py は test_shipped_jim_universe_is_wellformed_and_approved(読み込めることの検証)へ書き換え済み。発火日(2026-08-10)前に解消
 
   - id: fm-liquid-equity-measured-turnover
     what: "liquid_equity の選定が代理基準(日経225 構成)のまま — 売買代金の実測へ置き換える"
