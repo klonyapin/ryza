@@ -141,8 +141,10 @@ tar -xzf /tmp/ryza-src.tar.gz -C /opt/ryza
 # 3.4 uv(なければ導入)で lockfile 固定で .[bot] を同期(A-12 F-13)。
 #     `uv pip install -e '.[bot]'` は毎回 pyproject.toml の `>=` を最新解決するため、
 #     CI(`uv sync --locked`)との依存乖離を生む(Supply Chain の再現性劣化 —
-#     pass4 所見 9 相当)。CI と同じ `uv sync --locked --extra bot` に統一する。
-#     `--extra bot` は pyproject.toml の [project.optional-dependencies].bot と一致する。
+#     pass4 所見 9 相当)。CI と同じ lockfile 固定機構(`uv sync --locked`)に統一する。
+#     extras は用途別(CI は dev+dashboard、本 VM は bot)で、解決結果はいずれも
+#     同一 uv.lock 由来。--python 3.12 は旧 `uv venv --python 3.12` のピンの継承
+#     (CI も setup-uv で 3.12 固定 — 無指定だと新規 VM で uv が別系を拾い得る)。
 #     lockfile が古ければ uv は即座に非ゼロ終了(set -e で SSH ごと落ちる)。
 export HOME=/root
 if ! command -v uv >/dev/null 2>&1; then
@@ -154,7 +156,7 @@ if [ ! -f uv.lock ]; then
   echo "ERROR: /opt/ryza/uv.lock が無い。tar に含まれていない可能性あり(デプロイ資材の欠落)。" >&2
   exit 1
 fi
-uv sync --locked --extra bot
+uv sync --locked --extra bot --python 3.12
 
 # 3.5 マイグレーション適用(冪等: schema_migrations で未適用のみ実行)。
 RYZA_DATABASE_URL='${DATABASE_URL}' .venv/bin/python -m ryza.db.migrate
