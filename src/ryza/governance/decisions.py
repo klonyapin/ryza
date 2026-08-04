@@ -43,6 +43,19 @@ PR 番号だけで発効させる簡易形(参照・種別・文面を ``gh api`
     python -m ryza.governance.decisions --deemed-for-pr 99 \\
         --review docs/reviews/xxxx-independent-review.md
 
+意見書がマージ前の PR ブランチ(worktree)にしか無い場合は ``--repo-root`` を指定する
+(Issue #132)。CLI は ``__file__`` 起点で ``git rev-parse --show-toplevel`` するため、
+省略時は**メイン checkout**を意見書探索の起点にする。開発フローでは意見書はマージ前の PR
+ブランチにしか存在しないため、指定なしでは「参照が見つからない」となり ``reviewed_sha`` が
+PR head SHA へフォールバックする(A-18-8 の sha_conflict 恒久ノイズ)。``--repo-root`` は
+その worktree を明示するオプションで、指定時は ``PATH/config/governance.yaml`` の実在を
+確認して fail-closed で検証する。決定の ``note`` に ``repo_root=<絶対パス>`` を残すため、
+どの checkout の意見書を読んだかが事後に追える::
+
+    python -m ryza.governance.decisions --deemed-for-pr 99 \\
+        --review docs/reviews/xxxx-independent-review.md \\
+        --repo-root /path/to/pr-worktree
+
 ``--review``(独立役員審査の参照)は ``--deemed-for-pr`` と ``--kind pr`` で必須である。
 値は通知本文に残るだけでなく ``governance.decisions.review_ref`` に構造化して記録し、
 ``--deemed-for-pr`` では PR の head SHA を ``reviewed_sha`` として自動で埋める(0029)。
@@ -485,6 +498,12 @@ def require_existing_review(
     別ブランチにしか無い意見書を指す運用は ``--review-missing-ok`` で明示する。明示は
     ``meta.runs`` の params に残るため、「どの発効が実在検査を外したか」が事後に数えられる
     (黙って通すのとは統制上まったく違う)。
+
+    **worktree がローカルにあるなら ``--repo-root`` が正道**(Issue #132): PR ブランチが
+    ローカル worktree として checkout されている場合、``--review-missing-ok`` で実在検査を
+    外すよりも、CLI に ``--repo-root <その worktree>`` を渡すほうが安全である。実在検査を
+    外さないまま「マージ前の PR ブランチにしか無い意見書」を正しく読めるため、``sha_conflict``
+    の恒久ノイズも消える。``--review-missing-ok`` は「worktree すら無い遡及登録」の逃げ道。
 
     Raises:
         ReviewArtifactError: 参照がリポジトリ外へ出る・symlink・絶対パス
@@ -1067,6 +1086,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--repo-root", default=None, metavar="PATH",
+        help=(
+            "意見書(--review)を解決するリポジトリルート。マージ前の PR ブランチを"
+            "checkout した worktree を指す用途(Issue #132)。省略時は本 CLI の設置場所から"
+            "自動決定(メイン checkout を見るため、PR ブランチにしか無い意見書は解決できず"
+            "reviewed_sha が PR head へフォールバックする)。指定時は PATH/config/governance.yaml"
+            "の実在を確認して fail-closed で検証し、決定の note に repo_root=<絶対パス> を残す"
+        ),
+    )
+    parser.add_argument(
         "--gh-repo", default=None, metavar="OWNER/NAME",
         help="gh api の対象リポジトリ(既定はカレントのリポジトリ)",
     )
@@ -1143,7 +1172,35 @@ class DeemedTarget:
     reviewed_notes: tuple[str, ...] = ()
 
 
-def _resolve_deemed_args(args: argparse.Namespace) -> DeemedTarget:
+def _validated_repo_root(value: str | None) -> Path | None:
+    """``--repo-root`` を検証して絶対 ``Path`` にする(未指定なら ``None`` = 従来経路)。
+
+    **fail-closed** の理由(Issue #132): ``--repo-root`` が指す先が Ryza の checkout でなければ、
+    ``resolve_review_path`` は「リポジトリ外の審査参照」に落ち **全ての意見書解決が沈黙して
+    失敗する** —— 起票者は指定したつもりで通ってしまい、``reviewed_sha`` は PR head へ静かに
+    フォールバックする。指定を受け付けたら受け付けた分、指定先が正しいことを CLI 側で
+    実体化するのが本オプションの意味である。目印は ``_repo_root()`` のフォールバックと同じ
+    ``config/governance.yaml`` を使う(既存の「Ryza の checkout かどうか」の判定と揃える)。
+    """
+    if value is None:
+        return None
+    root = Path(value).expanduser()
+    if not root.is_dir():
+        raise ValueError(
+            f"--repo-root='{value}' はディレクトリとして存在しない"
+            "(意見書の探索ルートを指定できない)"
+        )
+    if not (root / "config" / "governance.yaml").is_file():
+        raise ValueError(
+            f"--repo-root='{value}' は Ryza リポジトリの checkout に見えない"
+            "(config/governance.yaml が無い — worktree のパスを確認すること)"
+        )
+    return root.resolve()
+
+
+def _resolve_deemed_args(
+    args: argparse.Namespace, *, repo_root: Path | None = None
+) -> DeemedTarget:
     """CLI 引数から発効対象(:class:`DeemedTarget`)を決める。
 
     ``--deemed-for-pr`` があれば ``gh`` の取得結果で欠けている引数を埋める。明示指定は
@@ -1184,9 +1241,12 @@ def _resolve_deemed_args(args: argparse.Namespace) -> DeemedTarget:
                 "保護領域 PR は審査を前置する手続であり、--notice では代替できない"
             )
         require_existing_review(
-            args.review, args.kind, missing_ok=args.review_missing_ok
+            args.review, args.kind, missing_ok=args.review_missing_ok,
+            repo_root=repo_root,
         )
-        choice = resolve_reviewed_sha(args.review, args.reviewed_sha)
+        choice = resolve_reviewed_sha(
+            args.review, args.reviewed_sha, repo_root=repo_root
+        )
         reviewed_sha = choice.sha
         notice = args.notice
         if reviewed_sha:
@@ -1212,7 +1272,8 @@ def _resolve_deemed_args(args: argparse.Namespace) -> DeemedTarget:
     # 実在検査は gh を呼ぶ前に済ませる(存在しない審査参照でネットワークを使わない)。
     # --deemed-for-pr の kind 既定は 'pr' なので、明示指定が無ければ pr として検査する。
     require_existing_review(
-        args.review, args.kind or "pr", missing_ok=args.review_missing_ok
+        args.review, args.kind or "pr", missing_ok=args.review_missing_ok,
+        repo_root=repo_root,
     )
     pr = fetch_pull_request(args.deemed_for_pr, repo=args.gh_repo)
     if not pr.url:
@@ -1221,7 +1282,9 @@ def _resolve_deemed_args(args: argparse.Namespace) -> DeemedTarget:
     # 審査が head より前のコミットを対象とした場合(審査後に無関係な追従コミットを積んだ等)に
     # **実際に見た SHA** を残せるようにするため。審査記録がある場合はそちらが正であり、
     # 明示指定との食い違いは :class:`ReviewedShaConflictError` で発効を止める。
-    choice = resolve_reviewed_sha(args.review, args.reviewed_sha, fallback=pr.head_sha)
+    choice = resolve_reviewed_sha(
+        args.review, args.reviewed_sha, fallback=pr.head_sha, repo_root=repo_root,
+    )
     reviewed_sha = choice.sha
     if args.notice:
         notice = args.notice
@@ -1244,6 +1307,11 @@ def _resolve_deemed_args(args: argparse.Namespace) -> DeemedTarget:
 #: 決定の ``note`` に残す審査参照警告の接頭辞(事後監査の検索キー)。
 REVIEW_WARNING_NOTE_PREFIX = "[審査参照の警告] "
 
+#: 決定の ``note`` に残す ``--repo-root`` 使用痕の接頭辞(Issue #132)。監査時に
+#: 「どの checkout の意見書を読んだか」を追える検索キーであり、``meta.runs`` の params だけに
+#: 残すと決定を直接読む監査(A-18)から届かない —— 二重に書くのが安全側。
+REPO_ROOT_NOTE_PREFIX = "[repo_root] "
+
 
 def _note_with_warning(note: str | None, warning: str | None) -> str | None:
     """``--note`` に審査参照の警告を追記する(警告が無ければそのまま)。
@@ -1256,6 +1324,18 @@ def _note_with_warning(note: str | None, warning: str | None) -> str | None:
     if not warning:
         return note
     line = f"{REVIEW_WARNING_NOTE_PREFIX}{warning}"
+    return line if not note else f"{note}\n{line}"
+
+
+def _note_with_repo_root(note: str | None, repo_root: Path | None) -> str | None:
+    """``--repo-root`` を使ったなら決定の ``note`` に絶対パスを残す(Issue #132)。
+
+    既存の note 追記(:func:`_note_with_warning`)と同じ書式に倣い、行頭に検索用の
+    接頭辞を付ける。未使用なら元の note をそのまま返す(未指定時の挙動を不変にする)。
+    """
+    if repo_root is None:
+        return note
+    line = f"{REPO_ROOT_NOTE_PREFIX}repo_root={repo_root}"
     return line if not note else f"{note}\n{line}"
 
 
@@ -1275,7 +1355,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     try:
-        target = _resolve_deemed_args(args)
+        repo_root = _validated_repo_root(args.repo_root)
+    except ValueError as exc:
+        print(f"みなし承認の対象を解決できませんでした: {exc}", file=sys.stderr)
+        return 1
+    try:
+        target = _resolve_deemed_args(args, repo_root=repo_root)
     except (PullRequestLookupError, ValueError) as exc:
         print(f"みなし承認の対象を解決できませんでした: {exc}", file=sys.stderr)
         return 1
@@ -1286,7 +1371,7 @@ def main(argv: list[str] | None = None) -> int:
     # 警告は stderr だけに出すと**痕跡が残らず**、事後監査から「警告が出たか」を判別できない
     # (独立役員審査 SHA-6)。Run の params と決定の note に載せて DB 側にも残す。
     try:
-        warning = missing_review_ref_warning(target.review_ref)
+        warning = missing_review_ref_warning(target.review_ref, repo_root=repo_root)
     except ValueError as exc:  # 脱出表記・symlink は解決時点で落ちているはずの保険
         print(f"みなし承認の対象を解決できませんでした: {exc}", file=sys.stderr)
         return 1
@@ -1333,13 +1418,17 @@ def main(argv: list[str] | None = None) -> int:
             "reviewed_notes": list(target.reviewed_notes),
             # 実在検査を明示的に外した実行を数えられるようにする(審査 C-2(c))。
             "review_missing_ok": bool(args.review_missing_ok),
+            # どの checkout の意見書を読んだかを meta.runs にも残す(Issue #132)。
+            # 未指定なら None(既定経路 = _repo_root() 委譲)であり、note と併記する。
+            "repo_root": str(repo_root) if repo_root is not None else None,
         },
     )
     conn = connect()
     try:
         result = notices.announce_deemed_approval(
             conn, target.proposal_ref, target.kind, target.notice, run.run_id,
-            source=args.source, note=_note_with_warning(args.note, warning),
+            source=args.source,
+            note=_note_with_repo_root(_note_with_warning(args.note, warning), repo_root),
             title=args.title, role=args.role,
             reviewed_sha=target.reviewed_sha, review_ref=target.review_ref,
         )
@@ -1369,6 +1458,7 @@ def main(argv: list[str] | None = None) -> int:
 
 __all__ = [
     "DEFAULT_DEEMED_SOURCE",
+    "REPO_ROOT_NOTE_PREFIX",
     "RESERVED_KINDS",
     "RESERVED_KIND_BY_MATTER",
     "REVIEWED_LINE_PREFIX",
