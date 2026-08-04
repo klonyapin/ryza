@@ -246,6 +246,18 @@ reminders:
       title: "G-10: risk.limits_state の鮮度検査(stale fail-closed)を実装する"
       labels: [impl]
       body: "現行ゲート(src/ryza/gate/)は risk.limits_state の行存在のみを見ており、リスクエンジン(src/ryza/risk/daily.py)が数日止まると古いフラグで判定し続ける。T-017(執行層)着手前に、①G-10 で as_of が2営業日超なら fail-closed で block、または②jobs/daily の risk 段失敗を urgent 通知に昇格、の少なくとも一方を実装する(保護領域 — 審査手続)。"
+    status: done # 2026-08-04 G-10 に鮮度検査を追加(b4f21b6)
+
+  - id: jp-holiday-table-extend
+    what: "JP 祝日カレンダー(src/ryza/risk/calendar.py:_JP_HOLIDAYS)を 2028 年ぶんへ延伸(G-10 鮮度検査の依存)"
+    conditions:
+      - type: date_after
+        date: "2027-06-01"
+    action:
+      type: issue_create
+      title: "祝日カレンダー延伸: 2028 年+東証休場(12/31, 1/2, 1/3)を追加"
+      labels: [impl, risk]
+      body: "内閣府「国民の祝日について」の 2028 年官報告示(2027-02-01 前後に確定)を反映し、東証の市場慣行(12/31・1/2・1/3 休場)を含めて追記する。同時に 2027-12-31 が現行テーブルから漏れている不一致も是正する(2026-12-31 は入っている)。テーブル外の日は営業日フォールバックで fail-closed 側(経過過大評価 → 早期 block)に倒れるためロジック上の危険は無いが、監査ログの理由文が実態と食い違う(=リスク engine 停止と誤認しうる)ので早期に潰す。"
     status: pending
 
   - id: risk-db-role-separation

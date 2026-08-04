@@ -119,10 +119,17 @@ def test_gate_and_record_pass(conn, run_id, limits_row):
     assert state_ref["trading_state"] == "normal"
     assert state_ref["nav"] == str(_NAV) and state_ref["cash"] == str(_CASH)
     assert state_ref["daily_turnover"] == "0"
-    assert state_ref["limits_state"] == {
+    # ``as_of`` は行の最終更新時刻(G-10 鮮度検査で使う — 監査時に「鮮度判定に何を
+    # 使ったか」を再現するため snapshot に含める)。値は now() 由来で確定しないので
+    # 存在確認のみ、フラグは厳密比較する。
+    limits_snap = dict(state_ref["limits_state"])
+    assert "as_of" in limits_snap and limits_snap.pop("as_of")
+    assert limits_snap == {
         "dd_soft": False, "dd_hard": False, "vol_exceeded": False, "es_exceeded": False,
     }
     assert "trade_date" in state_ref and "prices" in state_ref
+    # 判定時刻 ``now`` も snapshot に残る(鮮度判定の起点)。
+    assert state_ref["now"]
     assert ips_version  # 判定に使った IPS 版が残る
     assert len(mandates_hash) == 64
 

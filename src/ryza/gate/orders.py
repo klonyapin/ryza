@@ -109,11 +109,14 @@ def _load_positions(conn: psycopg.Connection, book_id: str) -> tuple[PositionSta
 
 
 def _load_limits(conn: psycopg.Connection, book_id: str) -> LimitsState | None:
-    """risk.limits_state の行。無ければ None(→ ゲートが fail-closed で block)。"""
+    """risk.limits_state の行。無ければ None(→ ゲートが fail-closed で block)。
+
+    ``as_of`` も返す(G-10 の鮮度検査に使う — 独立役員審査 2026-08-03 T-015 統合条件)。
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT dd_soft, dd_hard, vol_exceeded, es_exceeded
+            SELECT dd_soft, dd_hard, vol_exceeded, es_exceeded, as_of
             FROM risk.limits_state WHERE book_id = %s
             """,
             (book_id,),
@@ -121,7 +124,10 @@ def _load_limits(conn: psycopg.Connection, book_id: str) -> LimitsState | None:
         row = cur.fetchone()
     if row is None:
         return None
-    return LimitsState(dd_soft=row[0], dd_hard=row[1], vol_exceeded=row[2], es_exceeded=row[3])
+    return LimitsState(
+        dd_soft=row[0], dd_hard=row[1], vol_exceeded=row[2], es_exceeded=row[3],
+        as_of=row[4],
+    )
 
 
 def _daily_turnover(conn: psycopg.Connection, book_id: str, trade_date: date) -> Decimal:
@@ -163,17 +169,29 @@ def _proposal_snapshot(proposal: OrderProposal) -> dict:
 
 
 def _state_snapshot(state: PortfolioState, trade_date: date) -> dict:
-    """gate_log.state_ref 用の判定時状態スナップショット(監査再現性 — 審査条件6)。"""
+    """gate_log.state_ref 用の判定時状態スナップショット(監査再現性 — 審査条件6)。
+
+    ``limits_state`` の ``as_of`` と ``now`` は G-10 鮮度検査の判定材料。事後監査で
+    「経過何営業日で block したか」を再現できるよう、両方を isoformat で残す(独立
+    役員審査 2026-08-03 T-015 統合条件)。
+    """
 
     def _s(v):
         return None if v is None else str(v)
+
+    limits_dump: dict | None = None
+    if state.limits is not None:
+        limits_dump = asdict(state.limits)
+        # asdict は datetime を datetime のまま入れる — JSON へは isoformat 文字列で。
+        if limits_dump.get("as_of") is not None:
+            limits_dump["as_of"] = state.limits.as_of.isoformat()  # type: ignore[union-attr]
 
     return {
         "trading_state": state.trading_state,
         "nav": _s(state.nav),
         "cash": _s(state.cash),
         "daily_turnover": _s(state.daily_turnover),
-        "limits_state": None if state.limits is None else asdict(state.limits),
+        "limits_state": limits_dump,
         "prices": {str(k): str(v) for k, v in sorted(state.prices.items())},
         "positions": [
             {
@@ -186,6 +204,7 @@ def _state_snapshot(state: PortfolioState, trade_date: date) -> dict:
             for p in (state.positions or ())
         ],
         "trade_date": trade_date.isoformat(),
+        "now": state.now.isoformat() if state.now is not None else None,
     }
 
 
@@ -217,8 +236,9 @@ def gate_and_record(
         loaded_ips, loaded_mandates = load_and_validate()
         ips = ips or loaded_ips
         mandates = mandates or loaded_mandates
+    now = datetime.now(UTC)
     if trade_date is None:
-        trade_date = datetime.now(UTC).astimezone(_JST).date()
+        trade_date = now.astimezone(_JST).date()
 
     # 帳簿単位の直列化(トランザクション終了まで保持)。同一帳簿の並行ゲート判定が
     # 同じ「約定前状態」を読んで二重に枠を消費すること(TOCTOU)を防ぐ。
@@ -236,6 +256,7 @@ def gate_and_record(
         daily_turnover=_daily_turnover(conn, proposal.book_id, trade_date),
         limits=_load_limits(conn, proposal.book_id),
         prices=prices or {},
+        now=now,
     )
     result = evaluate(proposal, state, ips, mandates)
 
