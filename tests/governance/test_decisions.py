@@ -27,6 +27,7 @@ from ryza.governance.decisions import (
     record_revert_completion,
     record_veto,
     record_veto_withdrawal,
+    validate_proposal_ref,
 )
 from ryza.provenance import start_run
 
@@ -47,8 +48,20 @@ def conn(migrated_db):
         c.close()
 
 
+def _mref(name: str) -> str:
+    """テストの短い ID を F-10 の manual: 形式に揃える(既に前置済みの値はそのまま)。
+
+    F-10 で proposal_ref は 3 形式に制限された。テストは意味を持たない短い ID を大量に
+    使うが、そのまま渡すと writer の検証で弾かれる。書き込み時のみ manual:… に揃えて
+    「1提案=1決定」の意味を保つ(生成規則が決まっているので UNIQUE を邪魔しない)。
+    """
+    if name.startswith(("manual:", "decision:", "https://github.com/")):
+        return name
+    return f"manual:{name}"
+
+
 def _deemed(conn, ref: str, kind: str = "other"):
-    return record_deemed_approval(conn, ref, kind, NOTICE)
+    return record_deemed_approval(conn, _mref(ref), kind, NOTICE)
 
 
 def _veto(
@@ -63,11 +76,86 @@ def _veto(
     )
 
 
+# ── F-10: proposal_ref 様式の検証(純粋関数)──────────────────────────────
+@pytest.mark.parametrize(
+    "value",
+    [
+        # (a) PR URL
+        "https://github.com/klonyapin/ryza/pull/122",
+        "https://github.com/x/y/pull/1",
+        "https://github.com/A-B_1/repo.name/pull/9999",
+        # (b) decision:<数字>
+        "decision:1",
+        "decision:1234567890",
+        # (c) manual:<スラッグ>
+        "manual:abc",  # 下限 3 文字
+        "manual:a" + "b" * 63,  # 上限 64 文字
+        "manual:ips-2026-09",
+        "manual:frozen-ex-001",
+        "manual:with_underscore",
+        "manual:0abc",  # 先頭は数字も OK
+    ],
+)
+def test_validate_proposal_ref_accepts_3_forms(value):
+    """F-10 の 3 形式(PR URL / decision:数字 / manual:スラッグ)を素通ししていること。"""
+    assert validate_proposal_ref(value) == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # 短い任意文字列(旧テストで衝突していた形)
+        "dup-ref",
+        "prop-1",
+        "explicit-ref",
+        # 別リポジトリ(github.com 以外)の PR URL は不可
+        "https://gitlab.com/x/y/pull/1",
+        "http://github.com/x/y/pull/1",  # http は不可
+        "https://github.com/x/pull/1",  # owner のみで repo なし
+        "https://github.com/x/y/pull/0",  # PR 番号 0
+        # decision: が数字でない
+        "decision:abc",
+        "decision:",
+        "decision:0",
+        # manual: が短すぎ / 長すぎ / 大文字 / 空白 / メタ文字
+        "manual:ab",  # 3 文字未満
+        "manual:" + "a" * 65,  # 65 文字
+        "manual:ABC",  # 大文字不可
+        "manual:has space",
+        "manual:has.dot",  # . は許可外
+        "manual:",
+        # 空白入り / 空文字 / 型不一致
+        " manual:ok-ref",
+        "manual:ok-ref ",
+        "",
+        "   ",
+        "manual:改行\n入り",
+    ],
+)
+def test_validate_proposal_ref_rejects_bad(value):
+    with pytest.raises(ValueError):
+        validate_proposal_ref(value)
+
+
+def test_validate_proposal_ref_rejects_non_str():
+    with pytest.raises(ValueError):
+        validate_proposal_ref(123)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        validate_proposal_ref(None)  # type: ignore[arg-type]
+
+
+def test_writer_calls_validate_proposal_ref(conn):
+    """writer(record_deemed_approval)経由でも同じ検証が効くこと(A-12-04 の一次責任)。"""
+    with pytest.raises(ValueError, match="許可"):
+        record_deemed_approval(conn, "short-ref", "pr", NOTICE)
+    conn.rollback()
+
+
 # ── みなし承認の記録(定款第3条3号・0019 C-3)──────────────────────────────
 def test_record_deemed_approval_writes_deemed_row(conn):
     """decision='deemed'・decided_by='system:deemed'・通知参照つきで記録される。"""
     got = record_deemed_approval(
-        conn, "https://github.com/x/pull/101", "pr", NOTICE
+        conn, "https://github.com/x/y/pull/101", "pr", NOTICE
     )
     assert got.decided_by == "system:deemed"
     with conn.cursor() as cur:
@@ -83,7 +171,7 @@ def test_record_deemed_approval_writes_deemed_row(conn):
 def test_deemed_source_is_reflected_in_actor(conn):
     """発効源は decided_by='system:<source>' に載る(0019 の system:% CHECK に適合)。"""
     got = record_deemed_approval(
-        conn, "ips-rev-2026-09", "other", NOTICE, source="ips_monthly_review"
+        conn, "manual:ips-rev-2026-09", "other", NOTICE, source="ips_monthly_review"
     )
     assert got.decided_by == "system:ips_monthly_review"
     conn.rollback()
@@ -92,14 +180,14 @@ def test_deemed_source_is_reflected_in_actor(conn):
 def test_deemed_row_appears_in_current_decisions(conn):
     """現決定 view から読める(A-18 の突合・deemed_ratio 集計の読み口)。"""
     _deemed(conn, "mandate-rev-2026-09")
-    row = current_decision(conn, "mandate-rev-2026-09")
+    row = current_decision(conn, "manual:mandate-rev-2026-09")
     assert row["effective_decision"] == "deemed"
     assert row["is_vetoed"] is False
     conn.rollback()
 
 
 def test_current_decision_returns_none_for_unknown_ref(conn):
-    assert current_decision(conn, "no-such-proposal-ref") is None
+    assert current_decision(conn, "manual:no-such-proposal-ref") is None
     conn.rollback()
 
 
@@ -114,22 +202,22 @@ def test_reserved_kinds_rejected_before_insert(conn, kind):
     (test_reserved_matter_cannot_be_deemed が DB 側を直接検証している)。
     """
     with pytest.raises(ReservedMatterError, match="専決事項"):
-        record_deemed_approval(conn, f"reserved-{kind}", kind, NOTICE)
+        record_deemed_approval(conn, f"manual:reserved-{kind}", kind, NOTICE)
     # トランザクションが中断していない = 続けて別の記録ができる。
-    assert record_deemed_approval(conn, f"ok-after-{kind}", "pr", NOTICE).id > 0
+    assert record_deemed_approval(conn, f"manual:ok-after-{kind}", "pr", NOTICE).id > 0
     conn.rollback()
 
 
 def test_unknown_kind_rejected(conn):
     with pytest.raises(ValueError, match="未知の提案種別"):
-        record_deemed_approval(conn, "unknown-kind", "wishlist", NOTICE)
+        record_deemed_approval(conn, "manual:unknown-kind", "wishlist", NOTICE)
     conn.rollback()
 
 
 @pytest.mark.parametrize("missing", ["proposal_ref", "notice_ref"])
 def test_blank_required_fields_rejected(conn, missing):
     """通知参照は必須 — 定款第3条は通知を発効要件とする(通知なき発効は A-18 違反)。"""
-    args = {"proposal_ref": "blank-test", "notice_ref": NOTICE}
+    args = {"proposal_ref": "manual:blank-test", "notice_ref": NOTICE}
     args[missing] = "  "
     with pytest.raises(ValueError, match=missing):
         record_deemed_approval(conn, args["proposal_ref"], "pr", args["notice_ref"])
@@ -139,13 +227,13 @@ def test_blank_required_fields_rejected(conn, missing):
 # ── 1提案=1決定(0007 の UNIQUE)──────────────────────────────────────────
 def test_duplicate_proposal_ref_raises_clear_error(conn):
     """二重通知・リトライでも承認記録は増えない。UniqueViolation を包んで返す。"""
-    _deemed(conn, "dup-ref", "pr")
+    _deemed(conn, "manual:dup-ref", "pr")
     with pytest.raises(DuplicateDecisionError, match="1提案=1決定"):
-        _deemed(conn, "dup-ref", "pr")
+        _deemed(conn, "manual:dup-ref", "pr")
     # 事前検査で弾くためトランザクションは生きている(通知の書込を巻き添えにしない)。
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT count(*) FROM governance.decisions WHERE proposal_ref = 'dup-ref'"
+            "SELECT count(*) FROM governance.decisions WHERE proposal_ref = 'manual:dup-ref'"
         )
         assert cur.fetchone()[0] == 1
     conn.rollback()
@@ -153,19 +241,19 @@ def test_duplicate_proposal_ref_raises_clear_error(conn):
 
 def test_duplicate_against_explicit_decision_raises(conn):
     """明示承認済みの提案をみなし承認で上書きできない(承認経路の格上げ防止)。"""
-    record_decision(conn, "explicit-then-deemed", "approve", OWNER, OWNERS, kind="pr")
+    record_decision(conn, "manual:explicit-then-deemed", "approve", OWNER, OWNERS, kind="pr")
     with pytest.raises(DuplicateDecisionError, match="approve"):
-        _deemed(conn, "explicit-then-deemed", "pr")
+        _deemed(conn, "manual:explicit-then-deemed", "pr")
     conn.rollback()
 
 
 # ── 事後否認(定款第3条2号・0021)──────────────────────────────────────────
 def test_record_veto_marks_decision_vetoed(conn):
-    deemed = _deemed(conn, "veto-target")
+    deemed = _deemed(conn, "manual:veto-target")
     veto = _veto(conn, deemed)
     assert veto.veto_id > 0
     assert veto.kind == "veto"
-    row = current_decision(conn, "veto-target")
+    row = current_decision(conn, "manual:veto-target")
     assert row["effective_decision"] == "vetoed"
     assert row["recorded_decision"] == "deemed"  # 何が発効していたかは残る
     assert row["vetoed_by"] == OWNER
@@ -174,13 +262,13 @@ def test_record_veto_marks_decision_vetoed(conn):
 
 def test_record_veto_accepts_revert_and_derived_effects(conn):
     """取消コミットと取消不能な派生効果の参照を記録できる(第3条の報告義務)。"""
-    deemed = _deemed(conn, "veto-with-revert")
+    deemed = _deemed(conn, "manual:veto-with-revert")
     run_id = start_run("test.governance", conn=conn).run_id
     _veto(
         conn, deemed, "否認",
         revert_commit="0123abc", derived_effects_ref="discord://運営/999", run_id=run_id,
     )
-    row = current_decision(conn, "veto-with-revert")
+    row = current_decision(conn, "manual:veto-with-revert")
     assert row["revert_commit"] == "0123abc"
     assert row["derived_effects_ref"] == "discord://運営/999"
     conn.rollback()
@@ -188,9 +276,9 @@ def test_record_veto_accepts_revert_and_derived_effects(conn):
 
 def test_revert_completion_is_appended(conn):
     """取消完了は追記で表現し、現決定に反映される(追記オンリーのため UPDATE 不可)。"""
-    deemed = _deemed(conn, "veto-two-step")
+    deemed = _deemed(conn, "manual:veto-two-step")
     _veto(conn, deemed, "否認(取消未完了)")
-    assert current_decision(conn, "veto-two-step")["revert_commit"] is None
+    assert current_decision(conn, "manual:veto-two-step")["revert_commit"] is None
     got = record_revert_completion(
         conn, deemed.id, "否認に伴う取消完了",
         vetoed_by=OWNER, owner_ids=OWNERS,
@@ -198,7 +286,7 @@ def test_revert_completion_is_appended(conn):
         revert_commit="feedface",
     )
     assert got.kind == "revert_complete"
-    row = current_decision(conn, "veto-two-step")
+    row = current_decision(conn, "manual:veto-two-step")
     assert row["revert_commit"] == "feedface"
     assert row["is_vetoed"] is True  # 取消完了は否認を解除しない
     conn.rollback()
@@ -206,7 +294,7 @@ def test_revert_completion_is_appended(conn):
 
 def test_uninformative_append_does_not_erase_revert_commit(conn):
     """情報の無い追記が既記録を消さない(独立役員審査 0021 C-4)。"""
-    deemed = _deemed(conn, "veto-column-wise-writer")
+    deemed = _deemed(conn, "manual:veto-column-wise-writer")
     _veto(conn, deemed, "否認")
     record_revert_completion(
         conn, deemed.id, "取消完了", vetoed_by=OWNER, owner_ids=OWNERS,
@@ -218,7 +306,7 @@ def test_uninformative_append_does_not_erase_revert_commit(conn):
         expected_proposal_ref=deemed.proposal_ref, origin=ORIGIN,
         derived_effects_ref="discord://運営/777",
     )
-    row = current_decision(conn, "veto-column-wise-writer")
+    row = current_decision(conn, "manual:veto-column-wise-writer")
     assert row["revert_commit"] == "cafebabe"
     assert row["derived_effects_ref"] == "discord://運営/777"
     conn.rollback()
@@ -226,7 +314,7 @@ def test_uninformative_append_does_not_erase_revert_commit(conn):
 
 def test_veto_withdrawal_restores_previous_state(conn):
     """否認の撤回で現決定は否認前に戻る(誤った対象への否認からの復旧 — C-3)。"""
-    deemed = _deemed(conn, "veto-withdraw-writer")
+    deemed = _deemed(conn, "manual:veto-withdraw-writer")
     _veto(conn, deemed, "誤った対象への否認")
     got = record_veto_withdrawal(
         conn, deemed.id, "対象取り違えのため撤回",
@@ -234,7 +322,7 @@ def test_veto_withdrawal_restores_previous_state(conn):
         expected_proposal_ref=deemed.proposal_ref, origin=ORIGIN,
     )
     assert got.kind == "withdrawal"
-    row = current_decision(conn, "veto-withdraw-writer")
+    row = current_decision(conn, "manual:veto-withdraw-writer")
     assert row["is_vetoed"] is False
     assert row["effective_decision"] == "deemed"
     assert row["veto_kind"] == "withdrawal"  # 履歴は残る
@@ -244,14 +332,14 @@ def test_veto_withdrawal_restores_previous_state(conn):
 def test_explicit_approval_can_be_vetoed(conn):
     """明示承認も否認できる(定款は明示承認の撤回を禁じていない)。"""
     got = record_decision(
-        conn, "explicit-veto", "approve", OWNER, OWNERS, kind="strategy_promotion"
+        conn, "manual:explicit-veto", "approve", OWNER, OWNERS, kind="strategy_promotion"
     )
     record_veto(
         conn, got.id, "前提データの誤りが判明したため",
-        vetoed_by=OWNER, owner_ids=OWNERS, expected_proposal_ref="explicit-veto",
+        vetoed_by=OWNER, owner_ids=OWNERS, expected_proposal_ref="manual:explicit-veto",
         origin=ORIGIN,
     )
-    assert current_decision(conn, "explicit-veto")["effective_decision"] == "vetoed"
+    assert current_decision(conn, "manual:explicit-veto")["effective_decision"] == "vetoed"
     conn.rollback()
 
 
@@ -260,13 +348,13 @@ def test_explicit_approval_can_be_vetoed(conn):
 def test_reject_and_question_are_not_vetoable(conn, decision):
     """却下・質問は否認できない — 否認できると阻止の根拠が fail-open で消える。"""
     got = record_decision(
-        conn, f"nonvetoable-{decision}", decision, OWNER, OWNERS, kind="pr"
+        conn, f"manual:nonvetoable-{decision}", decision, OWNER, OWNERS, kind="pr"
     )
     with pytest.raises(NotVetoableError, match="否認できない"):
         record_veto(
             conn, got.id, "却下を覆す",
             vetoed_by=OWNER, owner_ids=OWNERS,
-            expected_proposal_ref=f"nonvetoable-{decision}", origin=ORIGIN,
+            expected_proposal_ref=f"manual:nonvetoable-{decision}", origin=ORIGIN,
         )
     # 事前検査で弾くためトランザクションは生きている。
     assert _deemed(conn, f"after-nonvetoable-{decision}").id > 0
@@ -275,7 +363,7 @@ def test_reject_and_question_are_not_vetoable(conn, decision):
 
 def test_reject_veto_blocked_by_schema_trigger(conn):
     """アプリ検証を迂回してもトリガが最後の防衛線(一次統制はスキーマ側)。"""
-    got = record_decision(conn, "nonvetoable-raw", "reject", OWNER, OWNERS, kind="pr")
+    got = record_decision(conn, "manual:nonvetoable-raw", "reject", OWNER, OWNERS, kind="pr")
     with conn.cursor() as cur:
         with pytest.raises(psycopg.errors.RaiseException, match="否認できない"):
             cur.execute(
@@ -290,7 +378,7 @@ def test_reject_veto_blocked_by_schema_trigger(conn):
 
 def test_non_owner_veto_rejected(conn):
     """否認は代表の専権(定款第3条)— record_decision と同型のオーナー検証。"""
-    deemed = _deemed(conn, "veto-by-non-owner")
+    deemed = _deemed(conn, "manual:veto-by-non-owner")
     with pytest.raises(NotOwnerError):
         record_veto(
             conn, deemed.id, "越権否認",
@@ -308,15 +396,15 @@ def test_non_owner_veto_rejected(conn):
 
 def test_proposal_ref_mismatch_rejected(conn):
     """decision_id の取り違えは INSERT 前に失敗する(無関係な承認を汚染しない)。"""
-    a = _deemed(conn, "veto-ref-a")
-    _deemed(conn, "veto-ref-b")
-    with pytest.raises(ProposalRefMismatchError, match="veto-ref-a"):
+    a = _deemed(conn, "manual:veto-ref-a")
+    _deemed(conn, "manual:veto-ref-b")
+    with pytest.raises(ProposalRefMismatchError, match="manual:veto-ref-a"):
         record_veto(
             conn, a.id, "取り違え否認",
-            vetoed_by=OWNER, owner_ids=OWNERS, expected_proposal_ref="veto-ref-b",
+            vetoed_by=OWNER, owner_ids=OWNERS, expected_proposal_ref="manual:veto-ref-b",
             origin=ORIGIN,
         )
-    assert current_decision(conn, "veto-ref-a")["is_vetoed"] is False
+    assert current_decision(conn, "manual:veto-ref-a")["is_vetoed"] is False
     conn.rollback()
 
 
@@ -325,16 +413,16 @@ def test_veto_of_unknown_decision_raises_clear_error(conn):
     with pytest.raises(ValueError, match="存在しない"):
         record_veto(
             conn, -1, "対象なし否認",
-            vetoed_by=OWNER, owner_ids=OWNERS, expected_proposal_ref="whatever",
+            vetoed_by=OWNER, owner_ids=OWNERS, expected_proposal_ref="manual:whatever",
             origin=ORIGIN,
         )
-    assert _deemed(conn, "after-bad-veto").id > 0
+    assert _deemed(conn, "manual:after-bad-veto").id > 0
     conn.rollback()
 
 
 @pytest.mark.parametrize("field", ["reason", "vetoed_by", "expected_proposal_ref"])
 def test_veto_requires_non_blank_fields(conn, field):
-    deemed = _deemed(conn, f"veto-blank-{field}")
+    deemed = _deemed(conn, f"manual:veto-blank-{field}")
     kwargs = {
         "reason": "理由",
         "vetoed_by": OWNER,
@@ -354,10 +442,10 @@ def test_veto_requires_non_blank_fields(conn, field):
 @pytest.mark.parametrize("origin", ["discord_button", "discord_command", "cli", "job"])
 def test_writer_records_origin(conn, origin):
     """writer が渡した出所がそのまま行と現決定 view に載る(語彙4値すべて)。"""
-    deemed = _deemed(conn, f"writer-origin-{origin}")
+    deemed = _deemed(conn, f"manual:writer-origin-{origin}")
     veto = _veto(conn, deemed, origin=origin)
     assert veto.origin == origin
-    assert current_decision(conn, f"writer-origin-{origin}")["veto_origin"] == origin
+    assert current_decision(conn, f"manual:writer-origin-{origin}")["veto_origin"] == origin
     conn.rollback()
 
 
@@ -367,17 +455,17 @@ def test_unknown_origin_rejected_before_insert(conn):
     一次統制は 0030 の CHECK だが、CheckViolation はトランザクションを中断させ、
     同一トランザクションで書く通知まで巻き添えにする(kind・3専決の事前検査と同型)。
     """
-    deemed = _deemed(conn, "writer-origin-unknown")
+    deemed = _deemed(conn, "manual:writer-origin-unknown")
     with pytest.raises(ValueError, match="未知の否認の出所"):
         _veto(conn, deemed, origin="webhook")
     # 事前検査で弾くためトランザクションは生きている。
-    assert _deemed(conn, "after-bad-origin").id > 0
+    assert _deemed(conn, "manual:after-bad-origin").id > 0
     conn.rollback()
 
 
 def test_withdrawal_records_origin(conn):
     """撤回にも出所が要る(身に覚えのない撤回は否認より危険 — 取消義務が消える)。"""
-    deemed = _deemed(conn, "writer-origin-withdraw")
+    deemed = _deemed(conn, "manual:writer-origin-withdraw")
     _veto(conn, deemed, "誤った否認", origin="discord_button")
     got = record_veto_withdrawal(
         conn, deemed.id, "撤回",
@@ -385,14 +473,14 @@ def test_withdrawal_records_origin(conn):
         expected_proposal_ref=deemed.proposal_ref, origin="cli",
     )
     assert got.origin == "cli"
-    assert current_decision(conn, "writer-origin-withdraw")["veto_origin"] == "cli"
+    assert current_decision(conn, "manual:writer-origin-withdraw")["veto_origin"] == "cli"
     conn.rollback()
 
 
 # ── 現決定の ID 引き(A-18-1 のトレーラ突合の読み口)────────────────────────
 def test_current_decision_by_id_reflects_veto(conn):
     """ID 引きでも否認が反映される(decisions 直読なら承認に見えてしまう)。"""
-    deemed = _deemed(conn, "by-id-ref")
+    deemed = _deemed(conn, "manual:by-id-ref")
     assert current_decision_by_id(conn, deemed.id)["effective_decision"] == "deemed"
     _veto(conn, deemed, "否認")
     assert current_decision_by_id(conn, deemed.id)["effective_decision"] == "vetoed"
@@ -683,7 +771,7 @@ def test_cli_records_and_notifies_on_a_fresh_connection(migrated_db, monkeypatch
 
 def test_veto_is_append_only(conn):
     """記録した否認は書き換えられない(0021 の追記オンリートリガ)。"""
-    deemed = _deemed(conn, "veto-immutable")
+    deemed = _deemed(conn, "manual:veto-immutable")
     veto = _veto(conn, deemed, "否認")
     with conn.cursor() as cur:
         with pytest.raises(psycopg.errors.RaiseException):
@@ -707,11 +795,11 @@ SHA_B = "b" * 40
 def test_reviewed_sha_and_review_ref_are_recorded(conn):
     """審査対象 SHA と審査参照は構造化列に入り、現決定 view から読める。"""
     got = record_deemed_approval(
-        conn, "reviewed-1", "pr", NOTICE,
+        conn, "manual:reviewed-1", "pr", NOTICE,
         reviewed_sha=SHA_A, review_ref="docs/reviews/x-review.md",
     )
     assert got.reviewed_sha == SHA_A and got.review_ref == "docs/reviews/x-review.md"
-    row = current_decision(conn, "reviewed-1")
+    row = current_decision(conn, "manual:reviewed-1")
     assert row["reviewed_sha"] == SHA_A
     assert row["review_ref"] == "docs/reviews/x-review.md"
     conn.rollback()
@@ -719,9 +807,11 @@ def test_reviewed_sha_and_review_ref_are_recorded(conn):
 
 def test_reviewed_sha_is_normalized_to_lowercase(conn):
     """大文字表記は不一致の誤検出になるため writer が正規化する(A-18-8 の突合前提)。"""
-    got = record_deemed_approval(conn, "reviewed-upper", "pr", NOTICE, reviewed_sha=SHA_A.upper())
+    got = record_deemed_approval(
+        conn, "manual:reviewed-upper", "pr", NOTICE, reviewed_sha=SHA_A.upper()
+    )
     assert got.reviewed_sha == SHA_A
-    assert current_decision(conn, "reviewed-upper")["reviewed_sha"] == SHA_A
+    assert current_decision(conn, "manual:reviewed-upper")["reviewed_sha"] == SHA_A
     conn.rollback()
 
 
@@ -729,15 +819,15 @@ def test_reviewed_sha_is_normalized_to_lowercase(conn):
 def test_short_or_invalid_reviewed_sha_is_rejected(conn, bad):
     """短縮・非 hex の SHA は拒否する(曖昧な参照は突合を「判定不能」にする)。"""
     with pytest.raises(ValueError, match="40 桁 hex"):
-        record_deemed_approval(conn, f"reviewed-bad-{bad}", "pr", NOTICE, reviewed_sha=bad)
+        record_deemed_approval(conn, f"manual:reviewed-bad-{bad}", "pr", NOTICE, reviewed_sha=bad)
     conn.rollback()
 
 
 def test_reviewed_sha_defaults_to_null(conn):
     """申告が無い決定は NULL(独立審査が前置されない発効経路を必須化で塞がない)。"""
-    got = record_deemed_approval(conn, "reviewed-none", "pr", NOTICE)
+    got = record_deemed_approval(conn, "manual:reviewed-none", "pr", NOTICE)
     assert got.reviewed_sha is None and got.review_ref is None
-    row = current_decision(conn, "reviewed-none")
+    row = current_decision(conn, "manual:reviewed-none")
     assert row["reviewed_sha"] is None and row["review_ref"] is None
     conn.rollback()
 
@@ -745,7 +835,7 @@ def test_reviewed_sha_defaults_to_null(conn):
 def test_blank_review_ref_is_rejected(conn):
     """空白だけの審査参照は「書いたが中身が無い」= 未記入と区別できないので弾く。"""
     with pytest.raises(ValueError, match="review_ref"):
-        record_deemed_approval(conn, "reviewed-blank", "pr", NOTICE, review_ref="   ")
+        record_deemed_approval(conn, "manual:reviewed-blank", "pr", NOTICE, review_ref="   ")
     conn.rollback()
 
 
@@ -768,7 +858,7 @@ def test_reviewed_sha_cannot_be_backfilled(conn):
     列の追加は DDL であって行の UPDATE ではないため追記オンリー原則に触れないが、
     「過去の決定を遡って審査済みに見せる」経路が開いていないことは確かめておく。
     """
-    got = record_deemed_approval(conn, "reviewed-backfill", "pr", NOTICE)
+    got = record_deemed_approval(conn, "manual:reviewed-backfill", "pr", NOTICE)
     with conn.cursor() as cur, pytest.raises(psycopg.errors.RaiseException):
         cur.execute(
             "UPDATE governance.decisions SET reviewed_sha = %s WHERE id = %s", (SHA_A, got.id)
@@ -913,7 +1003,7 @@ def test_cli_rejects_an_invalid_reviewed_sha(capsys):
 # 無いと**最重要の決定種別が構造的に A-18-8 の射程外**になる。
 def test_explicit_approval_can_record_reviewed_sha(conn):
     got = record_decision(
-        conn, "explicit-reviewed", "approve", OWNER, OWNERS, kind="budget",
+        conn, "manual:explicit-reviewed", "approve", OWNER, OWNERS, kind="budget",
         reviewed_sha=SHA_A.upper(), review_ref="docs/reviews/x-review.md",
     )
     row = current_decision_by_id(conn, got.id)
@@ -924,7 +1014,7 @@ def test_explicit_approval_can_record_reviewed_sha(conn):
 
 def test_explicit_approval_defaults_to_null(conn):
     """押下による承認は必ずしもコミットを対象としない — 既定は従来どおり NULL。"""
-    got = record_decision(conn, "explicit-plain", "approve", OWNER, OWNERS, kind="budget")
+    got = record_decision(conn, "manual:explicit-plain", "approve", OWNER, OWNERS, kind="budget")
     assert current_decision_by_id(conn, got.id)["reviewed_sha"] is None
     conn.rollback()
 
@@ -933,7 +1023,8 @@ def test_explicit_approval_rejects_an_invalid_reviewed_sha(conn):
     """様式検証は経路で変わらない(deemed と同じ規則 = 突合の前提が揃う)。"""
     with pytest.raises(ValueError, match="40 桁 hex"):
         record_decision(
-            conn, "explicit-bad", "approve", OWNER, OWNERS, kind="budget", reviewed_sha="abc123"
+            conn, "manual:explicit-bad", "approve", OWNER, OWNERS,
+            kind="budget", reviewed_sha="abc123",
         )
     conn.rollback()
 

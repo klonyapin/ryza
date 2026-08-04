@@ -36,12 +36,50 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 import psycopg
+
+# ── source の様式検証(F-10 / A-12-04)─────────────────────────────────────────
+# ``ledger.evidence.source`` は表示系(embed・週次レポート)に素で載る列であり、空白・改行・
+# 制御文字・markdown メタ文字が混ざると、後段の描画が壊れる/なりすまし行を刺せる。
+# ``re.fullmatch(r"[\\w][\\w.:/\\-]{0,127}", source)`` に制限する。Python の str に対する
+# ``\\w`` は Unicode 単語文字なので、既存の日本語 source(TDnet / 日銀 / 米経済分析局BEA など)
+# は素通りする。**ASCII 限定にしない**理由: 既存の実運用値 11 種のうち複数が日本語を含み、
+# 遡及書き換えは追記オンリー原則の逸脱にあたるため。狙いは注入面の遮断であって語彙統一ではない。
+_SOURCE_VALID_RE = re.compile(r"[\w][\w.:/\-]{0,127}")
+
+
+def validate_source(value: str) -> str:
+    """``ledger.evidence.source`` の様式を検証する純粋関数(F-10)。
+
+    許可: 先頭 1 文字が Unicode 単語文字(``\\w`` — 日本語を含む)で、続く 0〜127 文字が
+    ``\\w`` または ``. : / -`` のいずれか。空白・改行・制御文字・markdown メタ文字
+    (``[]()*_~|<>`` 等 — ``\\w`` と ``.:/‐`` 以外の記号)は不可。全長 128 文字まで。
+
+    Raises:
+        ValueError: 型不一致・空文字・様式不一致
+
+    設計判断: **注入面の遮断が目的**。既存の 11 種の実運用値(TDnet / 日銀 / BOE /
+    米経済分析局BEA / FRB / ECB / FRED / intl_banks / investment_committee / demo /
+    J-Quants)はすべて通る。ASCII 限定にしないのは既存の日本語 source の遡及書き換えを
+    避けるため(証憑の source は付替不能)。
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"source は文字列である必要がある: {type(value).__name__}")
+    if not value:
+        raise ValueError("source は非空文字列である必要がある")
+    if not _SOURCE_VALID_RE.fullmatch(value):
+        raise ValueError(
+            f"source={value!r} は許可された様式に一致しない。"
+            "先頭は Unicode 単語文字、続きは単語文字または `. : / -` のみ、全長 128 まで"
+            "(空白・改行・制御文字・markdown メタ文字は表示系への注入面のため不可)"
+        )
+    return value
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -197,6 +235,8 @@ class EvidenceStore:
         source: str,
     ) -> int:
         """証憑を保存し ``evidence_id`` を返す。同一 sha256 は再保存せず既存 ID を返す。"""
+        # F-10: 表示系(embed・週次レポート)への注入面を writer で塞ぐ。既存 11 種は通る。
+        validate_source(source)
         data, ext = _serialize(payload)
         digest = hashlib.sha256(data).digest()
 
