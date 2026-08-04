@@ -299,6 +299,15 @@ UNNOTIFIED_DEEMED_MINUTES = 60
 # (A-18-4 が PR_RULE_BASELINE_COMMIT を置いたのと同じ理由)。
 DEEMED_RECORD_BASELINE_COMMIT = "649c4e292ef2ba78d931749e782ae1d3c42c3ada"
 
+# A-18-9(リマインダー台帳の意味的改ざん検査)の基準コミット = 独立役員審査 2026-08-04
+# 時点の origin/main HEAD。**遡及適用しない理由**: 検査新設以前の運用は証跡を「実装先ファイル
+# パス+ISO 日付」の注記で書く慣行であり、新しい証跡様式(SHA/#番号/URL/`fired: <日付>`)を
+# 遡及適用すると独立役員審査 §7 の実測で 52 件(terminal_without_evidence 47・
+# pending_removed 5)の正当な過去運用が所見になる(A-18-8 受容拡張が「時間的な爆風」として
+# 避けた恒常 ⚠️ を初週から作る)。A-18-4 の ``PR_RULE_BASELINE_COMMIT`` と A-18-7 の
+# ``DEEMED_RECORD_BASELINE_COMMIT`` と同じ「前向き適用」の流儀。
+REMINDER_TAMPER_BASELINE_COMMIT = "d232a56bddfd1c1abdcba84344960c1d824fec7e"
+
 # 現決定 view の effective_decision のうち「発効している承認」。'vetoed' は含めない
 # (否認された承認をトレーラの参照先として受理しない — 独立役員審査 0021 C-5)。
 APPROVED_DECISIONS: frozenset[str] = frozenset({"approve", "deemed"})
@@ -1250,6 +1259,7 @@ def check_protected_commits(
 #: ``acknowledged_findings`` の kind 語彙。省略時は A-18-1(既存エントリの後方互換)。
 ACK_KIND_PROTECTED = "a18-1"
 ACK_KIND_REVIEWED_SHA = "a18-8"
+ACK_KIND_REMINDER_TAMPER = "a18-9"
 
 
 def _ack_kind(entry: dict[str, Any]) -> str:
@@ -1540,6 +1550,112 @@ def partition_acknowledged_reviewed(
     notes += [
         "acknowledged_findings(kind: a18-8)のエントリが一致する所見を持たない"
         f"(陳腐化・SHA/参照の誤りの可能性): {key[0][:12]} / {key[1]}"
+        for key in index
+        if key not in matched
+    ]
+    return unacknowledged, acknowledged, notes
+
+
+def _reminder_tamper_ack_key(
+    commit: str, kind: str, entry_id: str | None
+) -> tuple[str, str, str]:
+    """A-18-9 受容の一致キー: (完全 SHA, kind, entry_id 正規化)。
+
+    所見は「確定履歴の再走査で毎週再現する」ため、A-18-8 と同じく受容が無いと1件で週次が
+    恒常 ⚠️ 化する(A-18-8 受容拡張と同じ裁定理由)。一致キーは所見を一意に特定できる形
+    ((commit, kind, entry_id))とし、entry_id が無い所見(file_removed / unparseable)は
+    空文字で正規化する。
+    """
+    return (
+        commit.strip().lower(),
+        kind.strip().lower(),
+        (entry_id or "").strip(),
+    )
+
+
+def acknowledged_reminder_tamper_index(
+    gov: dict[str, Any],
+) -> tuple[dict[tuple[str, str, str], dict[str, Any]], list[str]]:
+    """``kind: a18-9`` の受容記録を(一致キー → エントリ, 無効エントリの注記)に変換する。
+
+    エントリの必須項目: ``commit``(40 桁 hex の完全 SHA)・``kind``(所見の kind
+    文字列 — ``terminal_without_evidence`` / ``pending_removed`` / ``deadline_deferred`` /
+    ``deadline_removed`` / ``file_removed`` / ``unparseable``)・``entry_id``(entry_id を
+    持たない ``file_removed`` / ``unparseable`` は省略可)。無効エントリは受容として効かせず
+    注記で開示する(fail-safe — A-18-1 の索引と同じ規律)。
+    """
+    index: dict[tuple[str, str, str], dict[str, Any]] = {}
+    notes: list[str] = []
+    for entry in gov.get("acknowledged_findings") or []:
+        if _ack_kind(entry) != ACK_KIND_REMINDER_TAMPER:
+            continue
+        commit = str(entry.get("commit", "")).strip()
+        kind = str(entry.get("kind_finding") or entry.get("finding_kind") or "").strip()
+        entry_id = entry.get("entry_id")
+        if not commit or not kind:
+            notes.append(
+                "acknowledged_findings(kind: a18-9)のエントリが無効"
+                "(commit / kind_finding のいずれかが欠落): "
+                f"{commit or '(commit なし)'}"
+            )
+            continue
+        if not _FULL_SHA_RE.match(commit):
+            notes.append(
+                "acknowledged_findings(kind: a18-9)のエントリが無効"
+                f"(commit は 40 桁 hex の完全 SHA): {commit}"
+            )
+            continue
+        eid: str | None = None
+        if entry_id is not None:
+            if not isinstance(entry_id, str) or not entry_id.strip():
+                notes.append(
+                    "acknowledged_findings(kind: a18-9)のエントリが無効"
+                    "(entry_id は非空文字列であること — file_removed/unparseable なら省略): "
+                    f"{commit[:12]}"
+                )
+                continue
+            eid = entry_id.strip()
+        index[_reminder_tamper_ack_key(commit, kind, eid)] = entry
+    return index, notes
+
+
+def partition_acknowledged_reminder_tamper(
+    findings: list[dict[str, Any]], gov: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """A-18-9 の所見を(未受容, 受容済み, 陳腐化した受容エントリの注記)に分割する。
+
+    受容済みは ``has_findings`` を立てないが、**報告 embed には必ず別枠で出す**
+    (A-18-1・A-18-8 の受容と同じ規律 — 黙って消さない)。所見の kind は「確定履歴の再走査
+    で毎週再現する」ため、受容は「事実として残したまま週次の ⚠️ から外す」ためだけの仕組み。
+    """
+    index, notes = acknowledged_reminder_tamper_index(gov)
+    matched: set[tuple[str, str, str]] = set()
+    unacknowledged: list[dict[str, Any]] = []
+    acknowledged: list[dict[str, Any]] = []
+    for f in findings:
+        key = _reminder_tamper_ack_key(
+            str(f.get("commit_full") or f.get("commit") or ""),
+            str(f.get("kind") or ""),
+            f.get("entry_id") if isinstance(f.get("entry_id"), str) else None,
+        )
+        entry = index.get(key)
+        if entry is None:
+            unacknowledged.append(f)
+            continue
+        matched.add(key)
+        acknowledged.append(
+            {
+                **f,
+                "acknowledged_on": entry.get("acknowledged_on"),
+                "approval_ref": entry.get("approval_ref"),
+                "ack_reason": entry.get("reason"),
+            }
+        )
+    notes += [
+        "acknowledged_findings(kind: a18-9)のエントリが一致する所見を持たない"
+        f"(陳腐化・SHA/kind_finding/entry_id の誤りの可能性): "
+        f"{key[0][:12]} / {key[1]}"
+        + (f" / {key[2]}" if key[2] else "")
         for key in index
         if key not in matched
     ]
@@ -2380,23 +2496,35 @@ def _classify_review_provenance(
 
 REMINDERS_PATH = "ops/reminders.yaml"
 
-# 終端遷移とみなす status 語彙。``pending`` からこれらへ遷移するとき証跡を要求する。
-_REMINDER_TERMINAL_STATES: frozenset[str] = frozenset({"done", "fired", "superseded", "cancelled"})
-
 # 証跡参照のパターン(diff ハンクの生テキストで判定): 7〜40 桁の hex SHA / ``#<数字>`` の
 # PR・Issue 番号 / URL(http/https)。40 桁を超える連続 hex は SHA として扱わない。
 _REMINDER_EVIDENCE_RE = re.compile(
     r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{7,40}(?![0-9A-Fa-f])|#\d+|https?://\S+"
 )
 
+# 週次ジョブ(src/ryza/ops/weekly.py)が status を書き換える際の**決定的な記法**。
+# ``set_reminder_status`` は必ず ``"fired: <ISO日付>"`` の形で書き込むため、この形式が
+# 変更後(``+``)の行に現れているコミットは正当な発火として証跡ありと判定する。
+# 一般の日付や自由文までは広げない — 「+ ... status: ... fired: YYYY-MM-DD」の型のみ。
+# (独立役員審査 F-1: 現行の主要な証跡記法「実装先パス+ISO 日付」までは広げない — その方向
+#  は基準コミットの前向き適用で対応する)
+_REMINDER_FIRED_EVIDENCE_RE = re.compile(
+    r"^\+.*fired:\s*\d{4}-\d{2}-\d{2}", re.MULTILINE
+)
+
 
 @dataclass(frozen=True)
 class ReminderTamperScan:
-    """A-18-9 の集計。``findings`` は疑わしい変更、``unparseable`` は fail-closed 件数。"""
+    """A-18-9 の集計。``findings`` は疑わしい変更、``unparseable`` は fail-closed 件数。
+
+    ``trailered`` は Approved トレーラ付きで対象外化したコミット数。0 件でも報告に見える形
+    で分母として開示する(独立役員審査 F-2: 存在検査のみの対象外化を「静かに」させない)。
+    """
 
     findings: list[dict[str, Any]] = field(default_factory=list)
     checked: int = 0
     unparseable: int = 0
+    trailered: int = 0
 
 
 def _reminders_index(text: str) -> dict[str, dict[str, Any]] | None:
@@ -2430,7 +2558,13 @@ def _reminders_index(text: str) -> dict[str, dict[str, Any]] | None:
 
 
 def _reminder_deadline(entry: dict[str, Any]) -> str | None:
-    """エントリの ``conditions[].date_after.date`` の最も遅い日付を返す(無ければ None)。"""
+    """エントリの ``conditions[].date_after.date`` の最も遅い日付を返す(無ければ None)。
+
+    YAML の非クオート ``date: 2027-09-01`` は ``safe_load`` が ``datetime.date`` に解決する
+    ため、``isinstance(d, str)`` で弾くと後ろ倒しをクオート外しと同時に行うだけで検出を
+    外れる(独立役員審査 F-5)。``str(d)`` で正規化し、ISO 文字列の辞書式比較を保つ。
+    値が空文字・None のときは無視する。
+    """
     conds = entry.get("conditions")
     if not isinstance(conds, list):
         return None
@@ -2441,8 +2575,11 @@ def _reminder_deadline(entry: dict[str, Any]) -> str | None:
         if c.get("type") != "date_after":
             continue
         d = c.get("date")
-        if isinstance(d, str) and d:
-            dates.append(d)
+        if d is None:
+            continue
+        s = str(d).strip()
+        if s:
+            dates.append(s)
     return max(dates) if dates else None
 
 
@@ -2532,8 +2669,20 @@ def _entry_diff_text(
 
 
 def _has_evidence(text: str) -> bool:
-    """diff ハンクの生テキストに証跡参照(SHA/PR/URL)が含まれるか。"""
-    return bool(_REMINDER_EVIDENCE_RE.search(text))
+    """diff ハンクの生テキストに証跡参照が含まれるか。
+
+    認める記法は2種類:
+    (i) SHA(7〜40 桁 hex)・``#\\d+`` の PR/Issue 番号・URL(``_REMINDER_EVIDENCE_RE``)
+    (ii) 週次ジョブが書き込む決定的な記法 ``fired: YYYY-MM-DD``(変更後行 ``+`` に限る)—
+        ``src/ryza/ops/weekly.py`` の ``set_reminder_status`` が唯一この形で status を書く。
+        一般の日付や自由文までは広げない(F-1 の裁定: 「実装先パス+日付」等の従来記法へ
+        広げると誤検出が積み上がる — その方向は基準コミットの前向き適用で対応する)。
+    """
+    if _REMINDER_EVIDENCE_RE.search(text):
+        return True
+    if _REMINDER_FIRED_EVIDENCE_RE.search(text):
+        return True
+    return False
 
 
 def _parent_for(repo: str | Path, sha: str) -> str | None:
@@ -2553,10 +2702,26 @@ def _read_blob(repo: str | Path, ref: str, path: str) -> str | None:
     return res.stdout
 
 
+def _blob_sha(repo: str | Path, ref: str, path: str) -> str | None:
+    """``git rev-parse <ref>:<path>`` を返す(存在しなければ None)。
+
+    ``diff-tree`` はマージコミットにパス名を出さない(-c/--cc なし)ため、A-18-9 の touched
+    判定は blob SHA の直接比較で行う(独立役員審査 F-4)。マージ・通常コミット共通に「第1親と
+    現在で当該 blob が異なるか」を1回で判定でき、evil merge も自然に対象化される。
+    """
+    res = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", f"{ref}:{path}"],
+        capture_output=True, text=True, check=False,
+    )
+    if res.returncode != 0:
+        return None
+    return res.stdout.strip() or None
+
+
 def check_reminder_tampering(
     repo_path: str | Path,
     *,
-    since_commit: str | None = RATIFICATION_COMMIT,
+    since_commit: str | None = REMINDER_TAMPER_BASELINE_COMMIT,
     trailer: str = "Approved:",
     path: str = REMINDERS_PATH,
 ) -> ReminderTamperScan:
@@ -2567,17 +2732,31 @@ def check_reminder_tampering(
     全体登録は「1/3 の PR に独立審査 + 48h」を強いるため、リマインダー登録の逆インセンティブを
     生む(登録するほど自分の PR が重くなる=登録が減る)。よって疑わしい変更だけを鳴らす。
 
-    対象: ``since_commit`` 以降で ``ops/reminders.yaml`` に触れた、``trailer`` の無いコミット。
-    承認済み変更(トレーラあり)は対象外。所見は次の3種:
+    対象: ``since_commit`` 以降で ``ops/reminders.yaml`` の blob が第1親と異なる、``trailer``
+    の無いコミット。承認済み変更(トレーラあり)は対象外だが件数(``trailered``)を分母として
+    開示する(F-2: 静かに対象外化しない)。マージコミットも第1親との blob 比較で自然に対象化
+    される(F-4: 素の ``diff-tree`` はマージにパス名を出さないため、``touched`` 判定を blob
+    比較に切り替える)。所見は次の4種:
 
     1. ``status: pending`` エントリの期日の後ろ倒し(前倒しは対象外)
     2. ``status: pending`` エントリの削除(id 改名も削除として鳴らす)
-    3. ``pending`` → 終端(``done``/``fired``/``superseded``/``cancelled``)遷移で、当該エントリの
-       diff ハンクの**生テキスト**に証跡参照(7〜40 桁 hex の SHA・``#\\d+``・URL)が含まれない
+    3. ``pending`` エントリの ``date_after`` 期日条件が削除された(``a_date`` が None 化 —
+       期日変更より強い改変が無音だった F-5 を閉じる)
+    4. ``pending`` から **pending 以外への全遷移**(status 文字列は何であれ)で、当該エントリ
+       の diff ハンクの生テキストに証跡参照(SHA/PR/Issue/URL、または weekly.py が書く
+       ``fired: <ISO日付>`` 記法)が含まれない — F-3: 終端ホワイトリスト(done/fired/
+       superseded/cancelled)は fail-open(``pending → paused`` などの中間 status で 1 コミット
+       回避できた)なので撤廃。所見 ``kind`` は互換のため ``terminal_without_evidence`` のまま。
 
     パース不能は ``unparseable`` として件数を開示する(黙って緑にしない — fail-closed)。
-    ファイルの改名・削除そのものは所見。マージコミットの反復は A-18-1 と同じで、``rev-list``
-    の全コミットを走査する(evil-merge の直接検査ではないため ``--first-parent`` に絞らない)。
+    ファイルの改名・削除そのものは所見。
+
+    **Approved トレーラの扱いの既知の限界**(F-2 の一部・独立役員審査 2026-08-04): 判定は
+    ``has_approval_trailer`` の**存在検査**であり、参照の実在照合はしていない。A-18-1 の
+    ``trailer_approves`` を使えば実在照合が可能だが、reminders.yaml のみに触れるコミットは
+    A-18-1 の突合対象外(保護領域限定)なので現状は流用が大掛かりになる。件数を分母として
+    ``trailered`` に出すことで「架空トレーラで対象外化された疑い」が見える形にし、実在照合を
+    フォローアップとして登録する(``ops/reminders.yaml`` の ``a18-9-review-followups``)。
     """
     repo = str(repo_path)
     if since_commit and not _git_ok(repo, "cat-file", "-e", f"{since_commit}^{{commit}}"):
@@ -2587,19 +2766,23 @@ def check_reminder_tampering(
     findings: list[dict[str, Any]] = []
     checked = 0
     unparseable = 0
+    trailered = 0
     for sha in commits:
         message = _git(repo, "log", "-1", "--format=%B", sha)
-        if has_approval_trailer(message, trailer):
-            continue  # 承認済み変更は対象外(トレーラの参照有効性は A-18-1 の担当)
         parent = _parent_for(repo, sha)
         if parent is None:
             continue  # ルート(親なし)は before が存在しないため diff できない
-        # マージは第1親比較にする — first-parent が main で親2がブランチ。マージ自身の解消差分
-        # (evil merge)は A-18-1 の担当で、本検査は「main に持ち込まれた最終的な変化」を見る。
-        # ファイルが変わっていないコミットは無視(subprocess 削減)。
-        touched = _git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
-        if path not in touched.splitlines():
-            continue
+        # touched 判定は blob の直接比較に切り替える(F-4: 素の ``diff-tree`` はマージに
+        # パス名を出さないため、マージ自身で持ち込む改変が常にスキップされていた)。
+        # 第1親と現在の blob の SHA を比較し、異なる場合のみ検査対象にする。マージコミット
+        # (コンフリクト解消を装った第1親からの変更)も自然にここに載る。
+        parent_blob = _blob_sha(repo, parent, path)
+        current_blob = _blob_sha(repo, sha, path)
+        if parent_blob == current_blob:
+            continue  # 当該ファイルの blob が第1親と同一 → 検査不要
+        if has_approval_trailer(message, trailer):
+            trailered += 1
+            continue  # 承認済み変更は対象外だが件数(trailered)を分母として開示する
         checked += 1
         before = _read_blob(repo, parent, path)
         after = _read_blob(repo, sha, path)
@@ -2662,11 +2845,28 @@ def check_reminder_tampering(
                 )
                 continue
             after_status = str(after_entry.get("status") or "").strip().lower()
-            # (1) 期日の後ろ倒し(pending のまま date が後ろに動いた)。
+            # (1)(3) pending のまま: 期日の後ろ倒し・期日条件の削除。
             if after_status == "pending":
                 b_date = _reminder_deadline(before_entry)
                 a_date = _reminder_deadline(after_entry)
-                if b_date and a_date and a_date > b_date:
+                if b_date and a_date is None:
+                    # (3) 期日条件そのものが消えた — 期日変更より強い改変(F-5)。
+                    findings.append(
+                        {
+                            "commit": sha[:12],
+                            "commit_full": sha,
+                            "subject": subject,
+                            "kind": "deadline_removed",
+                            "entry_id": rid,
+                            "before": b_date,
+                            "reason": (
+                                f"pending エントリ `{rid}` の期日条件(date_after)が"
+                                f"削除された(改変前は {b_date} — 発火条件の削除は"
+                                "期日変更より強い改変)"
+                            ),
+                        }
+                    )
+                elif b_date and a_date and a_date > b_date:
                     findings.append(
                         {
                             "commit": sha[:12],
@@ -2683,25 +2883,31 @@ def check_reminder_tampering(
                         }
                     )
                 continue
-            # (3) 終端遷移: pending → done/fired/superseded/cancelled で証跡がない。
-            if after_status in _REMINDER_TERMINAL_STATES:
-                hunk = _entry_diff_text(repo, sha, parent, path, rid, after)
-                if not _has_evidence(hunk):
-                    findings.append(
-                        {
-                            "commit": sha[:12],
-                            "commit_full": sha,
-                            "subject": subject,
-                            "kind": "terminal_without_evidence",
-                            "entry_id": rid,
-                            "to_status": after_status,
-                            "reason": (
-                                f"pending エントリ `{rid}` を `{after_status}` に遷移させたが"
-                                "当該エントリの差分に証跡(SHA/PR/Issue/URL)が無い"
-                            ),
-                        }
-                    )
-    return ReminderTamperScan(findings=findings, checked=checked, unparseable=unparseable)
+            # (4) pending → pending 以外への**全遷移**で証跡が無い(F-3: 終端ホワイトリスト
+            # 廃止 — done/fired/superseded/cancelled に加え paused/completed/typo/未知
+            # 語彙まですべて対象にする。status バリデーションがどこにも無く「未知の語彙 =
+            # 検査から外れる」は fail-open だった)。
+            hunk = _entry_diff_text(repo, sha, parent, path, rid, after)
+            if not _has_evidence(hunk):
+                findings.append(
+                    {
+                        "commit": sha[:12],
+                        "commit_full": sha,
+                        "subject": subject,
+                        # kind 名は既存互換のため維持(意味は「pending から非 pending への
+                        # 遷移で証跡なし」に拡張されている — docstring 参照)。
+                        "kind": "terminal_without_evidence",
+                        "entry_id": rid,
+                        "to_status": after_status,
+                        "reason": (
+                            f"pending エントリ `{rid}` を `{after_status}` に遷移させたが"
+                            "当該エントリの差分に証跡(SHA/PR/Issue/URL・fired: <日付>)が無い"
+                        ),
+                    }
+                )
+    return ReminderTamperScan(
+        findings=findings, checked=checked, unparseable=unparseable, trailered=trailered
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -2714,6 +2920,7 @@ def run_a18(
     since_commit: str | None = RATIFICATION_COMMIT,
     pr_since_commit: str | None = PR_RULE_BASELINE_COMMIT,
     deemed_since_commit: str | None = DEEMED_RECORD_BASELINE_COMMIT,
+    reminder_tamper_since_commit: str | None = REMINDER_TAMPER_BASELINE_COMMIT,
     version_pairs: tuple[tuple[str, str], ...] = VERSION_PAIRS,
     conn: Any | None = None,
     verify_prs: bool = True,
@@ -2746,10 +2953,23 @@ def run_a18(
     direct_pushes, fp_checked = check_direct_pushes(
         repo_path, since_commit=pr_since_commit, pr_verifier=pr_verifier
     )
+    # 本番用の A-18-9 基準コミットが試験リポジトリに存在しない場合は、A-18-1 と同じ基準
+    # (``since_commit`` — 通常は ``RATIFICATION_COMMIT`` かテスト用の批准 SHA)へフォール
+    # バックする。本番リポジトリでは基準が必ず存在するのでこの経路には入らない。
+    effective_reminder_since = reminder_tamper_since_commit
+    if effective_reminder_since and not _git_ok(
+        str(repo_path), "cat-file", "-e", f"{effective_reminder_since}^{{commit}}"
+    ):
+        effective_reminder_since = since_commit
     reminder_scan = check_reminder_tampering(
         repo_path,
-        since_commit=since_commit,
+        since_commit=effective_reminder_since,
         trailer=str(gov.get("approval_trailer") or "Approved:"),
+    )
+    # 受容: 所見は履歴の再走査で毎週再現する(A-18-8 と同じ「時間的な爆風」構造)ので、
+    # kind: a18-9 の受容で個別に落とせるようにする(独立役員審査 F-8 / A-18-8 の裁定と同型)。
+    reminder_tamper_findings, reminder_tamper_acked, reminder_tamper_ack_notes = (
+        partition_acknowledged_reminder_tamper(reminder_scan.findings, gov)
     )
     unnotified: list[dict[str, Any]] = []
     untracked_deemed = 0
@@ -2789,9 +3009,16 @@ def run_a18(
         "direct_pushes": direct_pushes,
         # A-18-9: リマインダー台帳の疑わしい変更(A-12 是正 F-1 / Issue #117)。
         # 承認済み変更・pending 以外・新規追加・前倒し・証跡付き遷移は無音で通す。
-        "reminder_tamper": reminder_scan.findings,
+        # ``reminder_tamper`` は未受容の所見。受容済み(kind: a18-9)は
+        # ``acknowledged_reminder_tamper`` に別枠で残し、has_findings を立てない。
+        "reminder_tamper": reminder_tamper_findings,
+        "acknowledged_reminder_tamper": reminder_tamper_acked,
         "reminder_tamper_checked": reminder_scan.checked,
         "reminder_tamper_unparseable": reminder_scan.unparseable,
+        # トレーラ付きで対象外にしたコミット数(F-2: 存在検査のみによる対象外化を分母として
+        # 開示する — 静かに件数から外さない)。
+        "reminder_tamper_trailered": reminder_scan.trailered,
+        "reminder_tamper_since_commit": effective_reminder_since,
         "decision_refs_verified": conn is not None,
         "prs_verified": pr_verifier is not None,
         # PR 照合の成立/縮退の件数。縮退 > 0 の週は緑にしない(独立役員審査 重要-4:
@@ -2847,6 +3074,7 @@ def run_a18(
                 "保護領域 PR の承認記録(A-18-7)・審査対象 SHA の突合(A-18-8)は未照合"
             ]),
             *reviewed_ack_notes,
+            *reminder_tamper_ack_notes,
             *([] if reviewed_scan is None or not reviewed_scan.trailer_only else [
                 f"トレーラに reviewed= はあるが承認記録に reviewed_sha が無い決定 "
                 f"{reviewed_scan.trailer_only} 件 — A-18-8 の突合が働かない記録"
@@ -3145,12 +3373,21 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
 
     # A-18-9: リマインダー台帳の疑わしい変更(A-12 是正 F-1 / Issue #117)。0 件でも1行載せる
     # (A-18-5/6/7 と同じ流儀 — 沈黙を「見ていない」と区別できるようにする)。
+    # ``trailered`` はトレーラ付きで対象外にしたコミット数(独立役員審査 F-2: 存在検査のみに
+    # よる対象外化を分母として開示する — 0 件でも見える形で出す)。
     reminder_findings = result.get("reminder_tamper") or []
+    reminder_acked = result.get("acknowledged_reminder_tamper") or []
     reminder_checked = result.get("reminder_tamper_checked") or 0
     reminder_unparseable = result.get("reminder_tamper_unparseable") or 0
+    reminder_trailered = result.get("reminder_tamper_trailered") or 0
     unparseable_suffix = (
         f"(パース不能 {reminder_unparseable} 件 — 検査できず)"
         if reminder_unparseable else ""
+    )
+    # トレーラ付きは常に注記(0 件でも書く — 分母として見える形にする)。
+    trailered_suffix = (
+        f" / Approved トレーラ付きで対象外 {reminder_trailered} 件"
+        f"(存在検査のみ・参照実在照合は未実装)"
     )
     if reminder_findings:
         lines = [
@@ -3172,8 +3409,24 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
             {
                 "name": "A-18-9 リマインダー台帳の改変検査",
                 "value": (
-                    f"✅ 疑わしい変更なし(検査 {reminder_checked} コミット){unparseable_suffix}"
+                    f"✅ 疑わしい変更なし(検査 {reminder_checked} コミット"
+                    f"{trailered_suffix}){unparseable_suffix}"
                 ),
+                "inline": False,
+            }
+        )
+    # 受容済みの所見は必ず別枠で開示する(A-18-1/A-18-8 の受容と同じ規律 — 黙って消さない)。
+    if reminder_acked:
+        ack_lines = [
+            f"- `{f['commit']}` {f.get('entry_id') or '(全体)'} "
+            f"[{f.get('kind')}]"
+            f"{' / ' + str(f['ack_reason'])[:120] if f.get('ack_reason') else ''}"
+            for f in reminder_acked
+        ]
+        fields.append(
+            {
+                "name": f"受容済みの A-18-9 所見: {len(reminder_acked)} 件",
+                "value": "\n".join(ack_lines)[:1024],
                 "inline": False,
             }
         )
