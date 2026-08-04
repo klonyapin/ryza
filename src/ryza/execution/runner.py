@@ -59,7 +59,11 @@ def _turnover_breach_embed(breach: TurnoverBreach) -> dict[str, Any]:
         )
         title = f"⚠ G-7 事後監視: NAV 判定不能({breach.book_id} {breach.trade_date})"
     else:
-        limit_text = f"¥{breach.limit:,.0f}(NAV ¥{breach.nav:,.0f} × 30%)"
+        # 比率は limit/nav から動的に出す(IPS 値のハードコード禁止 — 設定変更時に表示が嘘になる)。
+        limit_text = (
+            f"¥{breach.limit:,.0f}(NAV ¥{breach.nav:,.0f}"
+            f" × {float(breach.limit / breach.nav):.0%})"
+        )
         title = (
             f"⚠ G-7 上限跨ぎ検知({breach.book_id} {breach.trade_date}"
             f" — 約定 {breach.execution_id})"
