@@ -534,15 +534,35 @@ def test_done_entries_do_not_fire():
 
 
 def test_real_reminders_yaml_done_entries_never_fire():
-    """実ファイルの done エントリ(過去日条件を多数含む)が1件も発火しない。"""
+    """実ファイルの done エントリが、**条件が全て成立する時点でも**1件も発火しない。
+
+    独立役員審査 2026-08-04 中-3 の是正。従来は NOW=2026-08-02 固定で実行していたが、実
+    ファイルの done エントリの条件は全件が未来日の ``date_after`` のみ(最古 2026-08-05)
+    であり、**done ガードを外しても緑のまま**だった — 何も発火しない時点で「発火しない」
+    ことを確かめる vacuous な検査になっていた。現在時刻を全 ``date_after`` より十分未来へ
+    固定し、終端 status ガードだけが発火を止めている状態を検査する。
+    """
     real = (REPO_ROOT / "ops" / "reminders.yaml").read_text(encoding="utf-8")
     doc = weekly.yaml.safe_load(real)
     done_ids = {r["id"] for r in doc["reminders"] if str(r.get("status", "")).startswith("done")}
     assert done_ids, "前提: 実ファイルに done エントリが存在する"
+    # 全 date_after を追い越す遠未来。ここを固定値にしておくと、将来 reminders.yaml に
+    # もっと先の日付が入っても検査の前提(条件が成立する)が崩れない。
+    far_future = datetime(2999, 1, 1, tzinfo=UTC)
+    assert all(
+        c["date"] < far_future.date().isoformat()
+        for r in doc["reminders"]
+        if str(r.get("status", "")).startswith("done")
+        for c in (r.get("conditions") or [])
+        if c["type"] == "date_after"
+    ), "前提: done エントリの date_after が全て far_future より前(条件が成立する時点である)"
     digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
     client = StubClient(reminders_text=real, issues=[digest_issue])
-    outcome = weekly.fire_reminders(client, doc, real, "sha0", NOW, bq_checker=_false_bq)
+    outcome = weekly.fire_reminders(client, doc, real, "sha0", far_future, bq_checker=_false_bq)
     assert not (set(outcome.fired) & done_ids)
+    # done エントリは action を試行すらされないので failures にも現れない
+    # (failures は (id, エラー要約) のタプル列。id だけを取り出して突き合わせる)。
+    assert not ({fid for fid, _ in outcome.failures} & done_ids)
 
 
 # ── 1件の失敗がループ全体を止めない(失敗は黙殺せずサマリに載せる) ─────────────

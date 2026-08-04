@@ -391,25 +391,49 @@ protected_areas:
     area: ops_engine
   # 対になる不変条件テスト。登録基準(実装から独立した参照を保持し、参照を先に書き換えると
   # 以後の保護領域変更がテスト差分に現れなくなる)への適合:
-  #   - RESOLUTION_STATUS_DELEGATED の**文言の写し**(「スキップ」を含まない/「A-18-6」を含む)。
-  #     これは VM 移設審査 2026-08-04 重大-2 の裁定「統制が外された状態と正常状態を同じ文字列に
-  #     しない」を逐語で凍結したものであり、実装から独立している。この assertion を先に緩めれば、
-  #     既定行を「スキップ」へ戻す weekly.py の改変が緑のまま通る
+  #   - RESOLUTION_STATUS_DELEGATED の**性質検査**(「スキップ」を含まない/「A-18-6」を含む)。
+  #     VM 移設審査 2026-08-04 重大-2 の裁定「統制が外された状態と正常状態を同じ文字列に
+  #     しない」を検査の形で凍結したものであり、実装から独立している。逐語の写しではないため
+  #     「A-18-6 を含み『スキップ』を含まない任意の文字列」への置換は通る(審査 軽微-6 —
+  #     効力どおりに書く)。それでも既定行を「スキップ」へ戻す改変は落ちることをミューテーション
+  #     で実証済み
   #   - ダイジェストに A-18 行・決議の批判経由行が**必ず載る**ことの構造の存在検査
   #     (tests/test_migrations.py をトリガの存在検査として登録したのと同じ形)
   #   - A-18 呼び出しが always_report=True であることの固定(独立役員審査 中-4:受容・承継は
   #     所見ゼロの週でも可視化する)
-  #   - 実ファイル ops/reminders.yaml の done エントリが1件も発火しないことの実データ検査
+  #   - 実ファイル ops/reminders.yaml の done エントリが、**条件が全成立する時点でも**1件も
+  #     発火しないことの実データ検査。当初は現在時刻を 2026-08-02 に固定しており、実ファイルの
+  #     done の条件が全件未来日の date_after だったため done ガードを外しても緑という vacuous な
+  #     検査だった(審査 中-3)。現在時刻を 2999-01-01 に固定して是正済み — 同じミューテーション
+  #     で done 55 件が発火し検査が落ちることを実測した
   - path: tests/ops/test_weekly.py
     area: invariant_tests
-  # 棚卸しの記録(2026-08-04・本登録): src/ryza/ops/github.py は **今回は対象外**。
-  #   本ジョブが reminders.yaml を読み書きし通知を配送する唯一のトランスポートであり、
-  #   「weekly.py に触れずに執行を空回りさせる」迂回口(get_file が空を返す・update_file が
-  #   no-op になる)が理屈上は残る。ただし github.py は icon_revalidate 等も使う汎用
-  #   クライアントであり、glob(src/ryza/ops/**)化は無関係な運用スクリプトまで巻き込む。
-  #   本登録の範囲(PR #111 の所見=ジョブ本体の非対称の解消)を超えるため、github.py 自体の
-  #   保護は独立の審査に送る。暫定の担保: tests/ops/test_weekly.py の StubClient 群と
-  #   test_dry_run_real_client_makes_no_write_requests が読み書きの契約を固定している。
+  # 書き込み経路(GitHub クライアント)の不変条件テスト — 独立役員審査 2026-08-04 重要-1。
+  #   審査は起草者の異議(github.py 経由で weekly.py に触れずに空回りさせられる)を両方向
+  #   プローブし、**書き側だけが開いている**ことを実測した:
+  #     - 読み側 `get_file` を空返しに改変 → test_weekly の
+  #       test_dry_run_real_client_makes_no_write_requests が落ちる(塞がっている)
+  #     - 書き側 `update_file` / `create_issue_comment` を no-op 化 → **test_weekly の 31 件は
+  #       全て緑**で、落ちるのは tests/ops/test_github.py の 2 件のみ(本登録の実装時に再現確認)
+  #   つまり status コミット・action 配送・ダイジェスト投稿の書き込み契約は StubClient の偽実装が
+  #   担っており、実クライアント側はこのファイルにしか固定されていない。
+  #   登録基準(実装から独立した参照)への適合: 本ファイルは GitHub REST API の**ワイヤ様式の
+  #   ゴールデン**を持つ — `PUT /repos/{repo}/contents/{path}` の body が base64 本文と更新対象
+  #   sha を含むこと、`POST /repos/{repo}/issues/{n}/comments` の body が {"body": ...} であること、
+  #   Authorization/Accept/X-GitHub-Api-Version の各ヘッダ値、および dry_run 時に opener へ
+  #   リクエストが1件も届かないこと(`op.records == []` の構造検査)。いずれも実装から導出した
+  #   値ではなく外部 API 契約の写しであり、先に書き換えれば書き込みの無害化が緑のまま通る。
+  - path: tests/ops/test_github.py
+    area: invariant_tests
+  # 棚卸しの記録(2026-08-04・審査 重要-1 の是正後): src/ryza/ops/github.py **本体**は今回登録
+  #   しない。見送りの理由は「glob 化が無関係なファイルを巻き込む」ではない(単一ファイル登録には
+  #   当てはまらず、論理のすり替えだと審査が指摘した)。正しくは次の2点である:
+  #     (1) クライアント本体を ops_engine に入れるか独立 area を立てるかは、weekly 以外の利用者
+  #         (icon_revalidate 等)への波及を含めて**別途判断する** — ops/reminders.yaml の
+  #         `github-client-protect`(期限 2026-08-18)に機械可読で登録済み。YAML コメントは
+  #         誰も発火させないので追跡先にしない(CLAUDE.md「将来アクションの制度化」・審査 重要-2)
+  #     (2) その判断が出るまでの担保は上の tests/ops/test_github.py の invariant_tests 登録である。
+  #         CI は required なので、書き込み経路の no-op 化はテスト改変(= 承認必須)なしには通らない
 
 # 承認記録の様式(定款第5条・C-5): 保護領域の変更コミットは本文末尾に承認トレーラを必須と
 # する。A-18-1 はこのトレーラと承認記録(governance.decisions)・GitHub を突合する。

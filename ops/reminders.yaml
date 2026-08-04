@@ -1435,3 +1435,27 @@ reminders:
       labels: [impl]
       body: "指示書は docs/tasks/T-019-fm-second-gen.md(自己完結)。役職資産(personas/fm-stan/・personas/fm-peter/)とマンデート(config/mandates/stan.yaml・peter.yaml — 81 §3 で 2026-08-03 承認済み)は整備済みで、残るのはシグナル実装(src/ryza/fm/indicators.py・stan.py・screening.py・peter.py)と daily 配線。**着手可否をまず判定すること — 判定主体は設計リード、時点は本リマインダーの期日である**(T-019 §6 反対意見1・独立役員 L3 レビュー 2026-08-04 の注文): 40-fund-managers.md の起動順は『Stan/Peter は市場観・マクロ系(T-011)の安定後』であり、加えて T-019 §1-2・§2-2 のデータ制約が未解消なら発注ゼロの FM を2体増やすだけになる。判定材料 = ①config/universe/** に index_etf / jp_equity_midcap_cash の供給があるか(無ければ fm-etf-futures-curated-classification が先)、②EDINET/EDGAR の構造化財務数値が使える形で入っているか(無ければ Peter 第一段は実装せず本リマインダーを繰り延べる)。**見送る場合は本エントリの date を更新し、見送り理由を同ファイルに残すこと**(判断の履歴を消さない)。src/ryza/fm/** は保護領域(fm_engine)のため独立役員審査+承認トレーラが要る。"
     status: pending
+
+  - id: github-client-protect
+    what: "src/ryza/ops/github.py(週次ジョブの唯一のトランスポート)を protected_areas に登録するかの判断 — 書き込み経路の迂回口が実測で開いていた(ops-weekly-protect 審査 重要-1/2)"
+    conditions:
+      - type: date_after
+        date: "2026-08-18"
+    action:
+      type: issue_create
+      title: "判断: src/ryza/ops/github.py を protected_areas に登録するか(書き込み経路の迂回口)"
+      labels: [decision, governance]
+      body: "**決めること**: `src/ryza/ops/github.py` を config/governance.yaml の protected_areas に登録するか。登録する場合の area は既存の `ops_engine`(src/ryza/ops/weekly.py と同じ)か、クライアント専用の新 area か。登録しない場合は、代わりの担保と『登録しない』判断の根拠を governance.yaml に書き残すこと。\n\n**背景(迂回口の内容)**: 2026-08-04 に `src/ryza/ops/weekly.py` を保護領域へ登録した(area: ops_engine)。weekly.py は CLAUDE.md『将来アクションは必ず reminders.yaml に登録』の唯一の執行点だが、**ジョブが GitHub に読み書きする経路はすべて github.py の GitHubClient を通る**。したがって weekly.py に一切触れずに執行を空回りさせられる: ①`get_file` を空文字返しにすれば reminders.yaml が読めず条件評価が空になる、②`update_file` を no-op にすれば status が `fired:` へ遷移せず(=発火の記録が残らず)毎週同じ発火を繰り返すか、発火自体が記録されない、③`create_issue_comment` を no-op にすれば action の配送(notify・issue_comment)とダイジェスト投稿が黙って消える。いずれも例外を出さないため運用上は『静かに何も起きない』。\n\n**独立役員審査 重要-1 の実測(2026-08-04・両方向プローブ)**: 読み側 `get_file` の空返しは登録済みテスト `tests/ops/test_weekly.py::test_dry_run_real_client_makes_no_write_requests` が検出して落ちる(塞がっている)。一方、書き側 `update_file` と `create_issue_comment` を no-op 化すると **tests/ops/test_weekly.py の 31 テストは全て緑**のまま通り、落ちるのは `tests/ops/test_github.py` の 2 テストのみだった(是正実装時に再現確認済み)。理由は、weekly 側のテストが StubClient(偽実装)に対して書き込み契約を検査しているため、実クライアントの契約はどのテストにも固定されていなかったこと。\n\n**暫定の担保(すでに入っている)**: 上記の是正として `tests/ops/test_github.py` を protected_areas に `area: invariant_tests` で登録済み(2026-08-04・同 PR)。同ファイルは GitHub REST API のワイヤ様式のゴールデン(PUT contents の base64 本文+sha、POST issue comments の body 形、認証・API バージョンヘッダ、dry_run で opener へ 1 件も届かないこと)を持つ。CI は required status check なので、書き込み経路の no-op 化はテスト改変(=保護領域の変更=承認必須)なしには通らない。**したがって本件は『穴が開いたまま』ではなく『本体の登録要否を別途決める』案件である。**\n\n**判断材料**: (1) github.py の利用者は weekly.py だけでなく `src/ryza/ops/icon_revalidate.py` もあり、単純登録は運用スクリプト側の変更にも承認手続を課す。(2) 一方で ops/lib/** ・ src/ryza/risk/** を glob で登録した先例は『新しいモジュールを足す形の迂回』を塞ぐためであり、クライアントを差し替える新ファイルを足す迂回は本件にも当てはまる。(3) テスト側の登録だけでは『テストを通したまま実装を変える』余地(ワイヤ様式は保つが呼び出し元から見た副作用を変える)が残るかを検証すること。\n\n出典: docs/reviews/ops-weekly-protect-review.md 重要-1・重要-2、config/governance.yaml の tests/ops/test_github.py 登録行のコメント。"
+    status: pending
+
+  - id: reminders-status-tamper-detection
+    what: "ops/reminders.yaml の status 直接書き換え(pending→done)に検出手段が無い — 制度の最安価な迂回(ops-weekly-protect 審査 中-4)"
+    conditions:
+      - type: date_after
+        date: "2026-08-25"
+    action:
+      type: issue_create
+      title: "決定: reminders.yaml の status 遷移をどう検出するか(pending→done の無検出書き換え)"
+      labels: [decision, governance]
+      body: "**問題**: 将来アクション制度(CLAUDE.md『将来のアクションは必ず ops/reminders.yaml に機械可読で登録すること』)の最も安価な迂回は、weekly.py でも github.py でもなく **ops/reminders.yaml の status を 1 行書き換えること**である。pending エントリを `done` にすれば、その将来アクションは承認手続も検出も無しに消える。ops/reminders.yaml は protected_areas に入っておらず、A-18 のどの検査も status の遷移を見ていない。根拠の添付(『なぜ done にしてよいか』)を強制する仕組みも無い — 実際、この指摘を生んだ PR 自身が 2 エントリを done 化しており(根拠付きで正当だったが、正当性を担保したのは起草者の裁量と独立審査であって仕組みではない)。\n\n**単純な保護登録は不可**: ops/reminders.yaml を protected_areas に入れると、**週次ジョブ自身の正常動作が毎週 A-18-1 違反になる**。ジョブは Contents API で main へ直接 `fired: <日付>` のコミットを書く(PR を経ない・Approved トレーラを持たない)ため、保護登録はジョブを止めるか監査を毎週赤にするかの二択を生む。これは 05-governance §6-5 の形骸化(『毎週赤いが誰も見ない』)を自ら作る手である。\n\n**対案(いずれかを選ぶ・併用可)**: (a) **週次ダイジェストへの status 遷移の列挙** — ジョブが reminders.yaml の直前版と現行版を diff し、『今週 status が遷移したエントリ(id・旧 status・新 status・遷移させたコミット)』をダイジェストに載せる。ジョブ自身の `fired:` 遷移と人手の `done` 化が同じ表に並ぶため、根拠なき done 化が代表の目に触れる。実装は weekly.py 側(保護領域)で完結し、A-18 にも DB にも依存しない。(b) **A-18 に遷移検査を足す** — main の履歴で ops/reminders.yaml の `pending` → `done` 遷移を含むコミットを列挙し、ジョブ自身のコミット(件名・author が `fired:` の様式)を除外したうえで、Approved トレーラまたは PR 承継を要求する。A-18-1 と同じ突合機構に載るので受容(acknowledged_findings)も効くが、A-18 実装(保護領域 src/ryza/audit/**)の変更が要る。\n\n**判断のポイント**: (a) は検出が『人が読むこと』に依存するが実装コストが小さく、ジョブの正常動作と競合しない。(b) は機械的な検出になるが、ジョブのコミットを様式で除外する部分が偽装可能(件名を真似れば除外される)なので、除外条件を author/committer や Contents API 経由であることに寄せられるか検証が要る。**両方を採るなら (a) を先に入れて実データで遷移の頻度を見てから (b) の閾値・除外条件を決めるのが順当。**\n\n出典: docs/reviews/ops-weekly-protect-review.md 中-4(敵対的観点・審査者の自発的提起)。関連: 同意見書 重要-2(『将来アクションを YAML コメントに書くのは CLAUDE.md 違反』)、リマインダー `github-client-protect`。"
+    status: pending
