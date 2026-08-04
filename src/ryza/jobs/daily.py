@@ -145,11 +145,19 @@ def _default_ingest_sources() -> list[tuple[str, IngestSource]]:
         tdnet,
     )
 
+    # T-029: J-Quants 財務サマリ(docs.documents に取込済みの生 JSON)を
+    # market.indicators へ決定論・point-in-time で昇格する後段。jquants 取込の
+    # 直後に置き、当日の新規開示が同一 daily 実行内で数値系列化される。
+    from ryza.preprocess import fundamentals as jquants_fundamentals
+
     def _date(as_of: datetime) -> str:
         return as_of.astimezone(JST).date().isoformat()
 
     return [
         ("jquants", lambda as_of: jquants.main(["--date", _date(as_of)])),
+        # jquants 取込の直後に fundamentals 昇格(取込ソースではないが取込に伴う
+        # 数値化パスとして同段扱い。冪等マーカで再実行は安全 — T-029 §1-4)。
+        ("jquants_fundamentals", lambda as_of: jquants_fundamentals.main([])),
         # tdnet は日付範囲取得(対象日+前日)。recent.rss だと決算集中日(1000件超/日)に
         # 日次 1 回の実行では取りこぼすため(tdnet.py の既定 URL 参照)。
         ("tdnet", lambda as_of: tdnet.main(["--date", _date(as_of)])),
