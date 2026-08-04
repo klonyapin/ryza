@@ -8,6 +8,7 @@ test_ips_effective_values で固定する(IPS v1.3 の承認値が変われば�
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -15,7 +16,7 @@ import pytest
 from ryza.gate.compliance import LimitsState, PositionState, evaluate
 from ryza.ips import Mandate
 
-from .conftest import jp_stock_proposal, make_state, rules_of
+from .conftest import fresh_limits, jp_stock_proposal, make_state, rules_of
 
 
 def _dec(x) -> Decimal:
@@ -406,7 +407,7 @@ def test_g7_dd_soft_halves_new_build_allowance(ips, mandates):
     nav = Decimal(10_000_000)
     half = _dec(ips.hard_limits.daily_turnover_nav_max) * nav / 2
     state = make_state(
-        nav=nav, daily_turnover=half - Decimal(50_000), limits=LimitsState(dd_soft=True)
+        nav=nav, daily_turnover=half - Decimal(50_000), limits=fresh_limits(dd_soft=True)
     )
     over = evaluate(jp_stock_proposal(qty=Decimal(100)), state, ips, mandates)  # +10万円
     assert over.verdict == "block"
@@ -583,7 +584,7 @@ def test_g10_dd_hard_blocks_everything(ips, mandates):
     positions = (PositionState("ben", 1, "equity_jp", Decimal(500), Decimal(1000)),)
     result = evaluate(
         jp_stock_proposal(side="sell", qty=Decimal(100)),
-        make_state(positions=positions, limits=LimitsState(dd_hard=True)),
+        make_state(positions=positions, limits=fresh_limits(dd_hard=True)),
         ips,
         mandates,
     )
@@ -593,7 +594,7 @@ def test_g10_dd_hard_blocks_everything(ips, mandates):
 
 @pytest.mark.parametrize("flag", ["vol_exceeded", "es_exceeded"])
 def test_g10_vol_es_block_new_build_only(ips, mandates, flag):
-    limits = LimitsState(**{flag: True})
+    limits = fresh_limits(**{flag: True})
     new_build = evaluate(
         jp_stock_proposal(), make_state(limits=limits), ips, mandates
     )
@@ -608,6 +609,167 @@ def test_g10_vol_es_block_new_build_only(ips, mandates, flag):
         mandates,
     )
     assert closing.verdict == "pass"
+
+
+# ── G-10 限度状態鮮度検査(独立役員審査 2026-08-03 T-015 統合条件)────────────────
+# 判定時刻 _NOW = 2026-08-04(火)10:00 UTC / 19:00 JST → JST 判定日 = Aug 4 (Tue)。
+# 経過営業日は「as_of 翌日〜判定日」に含まれる JP 営業日の数(``business_days_between``)。
+# 「> 2 で block」= ちょうど 2 は pass(境界の下)、3 は block(境界の直上)。
+_G10_NOW = datetime(2026, 8, 4, 10, 0, tzinfo=UTC)
+
+
+def _limits_at(as_of: datetime, **flags) -> LimitsState:
+    """as_of と任意のフラグを持つ ``LimitsState`` を作る補助。"""
+    return LimitsState(as_of=as_of, **flags)
+
+
+def test_g10_freshness_at_now_passes(ips, mandates):
+    """as_of == 判定時点(経過ゼロ営業日)は pass。"""
+    state = make_state(now=_G10_NOW, limits=_limits_at(_G10_NOW))
+    result = evaluate(jp_stock_proposal(), state, ips, mandates)
+    assert result.verdict == "pass"
+    assert "G-10" not in rules_of(result)
+
+
+def test_g10_freshness_exactly_two_business_days_passes(ips, mandates):
+    """境界: 経過 2 営業日ちょうど(as_of=Jul 31 Fri)は pass(> 2 で block のため境界の下)。
+
+    Fri Jul 31 → Sat/Sun 非営業 → Mon Aug 3 (1) → Tue Aug 4 (2)。合計 2 → pass。
+    """
+    as_of = datetime(2026, 7, 31, 10, 0, tzinfo=UTC)  # Fri
+    state = make_state(now=_G10_NOW, limits=_limits_at(as_of))
+    result = evaluate(jp_stock_proposal(), state, ips, mandates)
+    assert result.verdict == "pass", result.reasons
+    assert "G-10" not in rules_of(result, "block")
+
+
+def test_g10_freshness_three_business_days_blocks(ips, mandates):
+    """境界: 経過 3 営業日(as_of=Jul 30 Thu)は block(> 2 の直上)。
+
+    Thu Jul 30 → Fri Jul 31 (1) → Mon Aug 3 (2) → Tue Aug 4 (3)。合計 3 → block。
+    """
+    as_of = datetime(2026, 7, 30, 10, 0, tzinfo=UTC)
+    state = make_state(now=_G10_NOW, limits=_limits_at(as_of))
+    result = evaluate(jp_stock_proposal(), state, ips, mandates)
+    assert result.verdict == "block"
+    assert "G-10" in rules_of(result, "block")
+    assert any(
+        "古い" in r.message and "経過 3 営業日" in r.message
+        for r in result.reasons
+    ), result.reasons
+
+
+def test_g10_freshness_as_of_none_blocks(ips, mandates):
+    """as_of=NULL(限度状態行はあるが as_of が未記録)は fail-closed で block。"""
+    state = make_state(now=_G10_NOW, limits=LimitsState(as_of=None))
+    result = evaluate(jp_stock_proposal(), state, ips, mandates)
+    assert result.verdict == "block"
+    assert "G-10" in rules_of(result, "block")
+    assert any(
+        "as_of が NULL" in r.message and "fail-closed" in r.message
+        for r in result.reasons
+    )
+
+
+def test_g10_freshness_no_row_blocks_via_gf(ips, mandates):
+    """限度状態の**行が無い**(``limits=None``)は G-F(入力不足)で block。
+
+    行不存在時は G-F 段階で止まり G-10 まで進まない。この二段構造は「行が無い」と
+    「行はあるが as_of が古い/NULL」の**区別**を監査ログに残すため — 前者は engine
+    が動いていない(初期化前)、後者は engine が止まっている(運用問題)。
+    """
+    result = evaluate(jp_stock_proposal(), make_state(now=_G10_NOW, limits=None),
+                      ips, mandates)
+    assert result.verdict == "block"
+    assert rules_of(result) == {"G-F"}
+    assert result.checked_rules == ("G-F",)
+
+
+def test_g10_freshness_future_as_of_blocks(ips, mandates):
+    """未来 as_of(時計ずれ等)も判定不能として block(fail-closed)。"""
+    future = _G10_NOW + timedelta(days=1)
+    state = make_state(now=_G10_NOW, limits=_limits_at(future))
+    result = evaluate(jp_stock_proposal(), state, ips, mandates)
+    assert result.verdict == "block"
+    assert "G-10" in rules_of(result, "block")
+    assert any("未来" in r.message for r in result.reasons)
+
+
+def test_g10_freshness_weekend_crossing_two_bdays_passes(ips, mandates):
+    """週末跨ぎ: as_of=Fri Jul 31 → 判定=Tue Aug 4。経過 = 2 営業日 → pass(境界の下)。
+
+    注記: UTC の 22:00 以降は JST 日付が翌日にずれる — Fri 10:00 UTC = Fri 19:00 JST に固定。
+    """
+    as_of = datetime(2026, 7, 31, 10, 0, tzinfo=UTC)  # Fri 19:00 JST
+    state = make_state(now=_G10_NOW, limits=_limits_at(as_of))
+    result = evaluate(jp_stock_proposal(), state, ips, mandates)
+    assert result.verdict == "pass"
+
+
+def test_g10_freshness_weekend_crossing_three_bdays_blocks(ips, mandates):
+    """週末跨ぎ: as_of=Fri Jul 31 → 判定=Wed Aug 5。経過 = 3 営業日(Aug 3/4/5)→ block。"""
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)  # Wed
+    as_of = datetime(2026, 7, 31, 10, 0, tzinfo=UTC)  # Fri
+    state = make_state(now=now, limits=_limits_at(as_of))
+    result = evaluate(jp_stock_proposal(), state, ips, mandates)
+    assert result.verdict == "block"
+    assert "G-10" in rules_of(result, "block")
+
+
+def test_g10_freshness_holiday_crossing_passes(ips, mandates):
+    """JP 祝日跨ぎ: 山の日(Tue Aug 11 2026)を挟んで判定 = Wed Aug 12。
+
+    as_of=Fri Aug 7 の場合:
+      翌日 Sat/Sun(非営業)→ Mon Aug 10 (1) → Tue Aug 11 (祝日・非営業) → Wed Aug 12 (2)。
+    経過 = 2 営業日 → pass(祝日を「非営業」として数えたことで境界の下に留まる)。
+    祝日テーブルが効かなければ経過 = 3 となり block に反転する — ミューテーション観点。
+    """
+    now = datetime(2026, 8, 12, 10, 0, tzinfo=UTC)  # Wed after 山の日
+    as_of = datetime(2026, 8, 7, 10, 0, tzinfo=UTC)  # Fri
+    state = make_state(now=now, limits=_limits_at(as_of))
+    result = evaluate(jp_stock_proposal(), state, ips, mandates)
+    assert result.verdict == "pass", result.reasons
+
+
+def test_g10_freshness_holiday_crossing_boundary_blocks(ips, mandates):
+    """祝日跨ぎでも判定日を1日進めると block(経過 = 3 営業日)— 境界を落とすミューテーション検知。
+
+    as_of=Fri Aug 7 → 判定=Thu Aug 13: Mon 10 (1) → Tue 11 (祝日) → Wed 12 (2) → Thu 13 (3)。
+    """
+    now = datetime(2026, 8, 13, 10, 0, tzinfo=UTC)  # Thu
+    as_of = datetime(2026, 8, 7, 10, 0, tzinfo=UTC)  # Fri
+    state = make_state(now=now, limits=_limits_at(as_of))
+    result = evaluate(jp_stock_proposal(), state, ips, mandates)
+    assert result.verdict == "block"
+    assert "G-10" in rules_of(result, "block")
+
+
+def test_g10_freshness_and_flags_are_independent(ips, mandates):
+    """dd_hard=True でも as_of が古ければ理由が**両方**乗る(監査再現性)。
+
+    dd_hard は「全注文停止」で既に block だが、鮮度検査を外すミューテーションが
+    dd_hard に隠れて素通しにならないよう、鮮度違反の Reason が独立に残る。
+    """
+    as_of = datetime(2026, 7, 28, 10, 0, tzinfo=UTC)  # 過去(> 2 営業日)
+    state = make_state(now=_G10_NOW, limits=_limits_at(as_of, dd_hard=True))
+    result = evaluate(jp_stock_proposal(), state, ips, mandates)
+    assert result.verdict == "block"
+    messages = [r.message for r in result.reasons if r.rule == "G-10"]
+    assert any("古い" in m for m in messages)
+    assert any("DD ハード" in m for m in messages)
+
+
+def test_g10_freshness_now_missing_blocks_via_gf(ips, mandates):
+    """判定時刻 ``state.now`` を渡さないと G-F で block(fail-closed)。
+
+    「時刻が測定できない」を「新鮮」と主張しない — 呼び出し側が now を渡さないだけで
+    鮮度検査を素通しにできる経路を潰す(独立役員審査 2026-08-03 T-015 統合条件と同姿勢)。
+    """
+    state = make_state(now=None, limits=_limits_at(_G10_NOW))
+    result = evaluate(jp_stock_proposal(), state, ips, mandates)
+    assert result.verdict == "block"
+    assert rules_of(result) == {"G-F"}
+    assert any("now" in r.message for r in result.reasons)
 
 
 # ── 注文案そのものの検証 ─────────────────────────────────────────────────────
