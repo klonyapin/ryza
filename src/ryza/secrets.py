@@ -47,6 +47,46 @@ def _urlopen(req: urllib.request.Request, timeout: float) -> IO[bytes]:
     return urllib.request.urlopen(req, timeout=timeout)  # noqa: S310
 
 
+# GCE 判定のプロセス内キャッシュ(``is_running_on_gce`` が使う)。
+# None は未判定、bool は前回判定結果。テストは ``reset_gce_cache`` で明示的にクリアする
+# か、``_gce_cache`` を直接 False/True にセットして分岐を固定できる。
+_gce_cache: bool | None = None
+
+
+def reset_gce_cache() -> None:
+    """``is_running_on_gce`` のプロセス内キャッシュをクリアする(テスト用)。"""
+    global _gce_cache
+    _gce_cache = None
+
+
+def is_running_on_gce(timeout: float = 1.0) -> bool:
+    """このプロセスが GCE(Metadata サーバに到達可能)上で動いているか。
+
+    T-024 で会計エンジンの ``RYZA_EVIDENCE_DIR`` 必須ガードが本番検出に使う共通判定。
+    ``access_secret`` の Secret Manager フェッチと同じメタデータサーバ URL・同じ
+    ``Metadata-Flavor: Google`` ヘッダを用いる(``access_secret`` の挙動は不変で、この
+    関数は独立に呼び出されて成否だけを返す)。プロセス内で結果をキャッシュするため、
+    ``create_evidence`` の呼び出しごとに毎回メタデータサーバへ問い合わせない。
+    キャッシュのリセットは ``reset_gce_cache()``。テストは ``_urlopen`` をモックしても
+    よいし、``_gce_cache`` を直接 True/False に固定してもよい(ledger のテストは後者を
+    採り、ネットワーク往復を発生させない)。
+    """
+    global _gce_cache
+    if _gce_cache is not None:
+        return _gce_cache
+    req = urllib.request.Request(
+        _METADATA_TOKEN_URL, headers={"Metadata-Flavor": "Google"}
+    )
+    try:
+        _urlopen(req, timeout).close()
+    except (OSError, TimeoutError, urllib.error.URLError):
+        # 非 GCE 環境では名前解決失敗・接続拒否・タイムアウトのいずれかになる。
+        _gce_cache = False
+        return False
+    _gce_cache = True
+    return True
+
+
 def access_secret(secret: str, *, project: str, timeout: float = 10.0) -> str:
     """Secret Manager から値を取得する(GCE メタデータ + REST)。失敗は例外送出。"""
     meta = urllib.request.Request(
@@ -131,4 +171,11 @@ def load_secret(
     ).value
 
 
-__all__ = ["SecretLookup", "access_secret", "load_secret", "probe_secret"]
+__all__ = [
+    "SecretLookup",
+    "access_secret",
+    "is_running_on_gce",
+    "load_secret",
+    "probe_secret",
+    "reset_gce_cache",
+]

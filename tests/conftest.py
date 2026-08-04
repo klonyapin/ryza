@@ -66,6 +66,11 @@ def pytest_configure(config: pytest.Config) -> None:
     # 実メタデータ・実 Secret へ到達しないよう、環境の GCP_PROJECT は外す。
     # 必要なテストは monkeypatch.setenv("GCP_PROJECT", ...) で明示設定する。
     os.environ.pop("GCP_PROJECT", None)
+    # T-024: 会計エンジンの GCE ガード(``ryza.ledger._util._evidence_store``)が
+    # 実メタデータサーバへ問い合わせに行かないよう、GCE 判定を False で固定する。
+    # GCE ガードを検証するテスト(tests/ledger/test_evidence_gce_guard.py)は
+    # ``ryza.secrets._gce_cache`` を明示的に True にセットして分岐を作る。
+    secrets._gce_cache = False
 
 
 @pytest.fixture(scope="session")
