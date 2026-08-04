@@ -103,9 +103,25 @@ SSH=(gcloud compute ssh "${VM}" --zone "${ZONE}" --project "${PROJECT}")
 # ゲートが無効化されるので注意。
 # shellcheck source=lib/deploy-guards.sh
 . "${ROOT}/ops/lib/deploy-guards.sh"
+# SQL 識別子検証(A-12 F-8・pass4-1)。ロール名 env の入口検査。
+# shellcheck source=lib/sql_ident_check.sh
+. "${ROOT}/ops/lib/sql_ident_check.sh"
 
 echo "== ryza-dashboard deploy (Cloud Run + IAP) =="
 echo "project=${PROJECT} region=${REGION} vm=${VM} service=${SERVICE} user=${DASHBOARD_USER}"
+
+# ── 0.0 ロール名 env の SQL 識別子検証(A-12 F-8・pass4-1)────────────────────────
+# 後段(§4)で SQL テンプレートに `.replace()` で埋め込む env を、入口で必ず検査する。
+# operator 制御の env であり悪用経路は限定的だが、タイポや `"` / 空白 / セミコロン
+# 混入で意図しない SQL に化ける経路を、ここで止める。
+# DB_NAME(→RYZA_DB)も同じ SQL テンプレートに識別子として埋め込まれる。指示書の対象
+# は「ロール名 env」だが、同じ入口に片方だけの検査を付けるとゲートの整合性が崩れる
+# (`"; DROP …` のような値がロール名では止まるが DB 名では素通りする)ため、同一関数で
+# 併せて検査する。判断根拠は本コメントに明記(実装指示書との逸脱として完了報告に記載)。
+assert_sql_ident RYZA_DASH_ROLE "${DB_ROLE}" || exit 1
+assert_sql_ident RYZA_BR_ROLE   "${BOARDROOM_ROLE}" || exit 1
+assert_sql_ident RYZA_OWNER     "${DB_OWNER}" || exit 1
+assert_sql_ident RYZA_DB        "${DB_NAME}" || exit 1
 
 # ── 0. 承認済みコード一致の検証(重大-1・定款第5条)────────────────────────────
 echo "-- 稼働コードの検証: 作業ツリー clean かつ HEAD == origin/main"
