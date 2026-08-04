@@ -2872,13 +2872,31 @@ def _deemed_with_review(conn, run_id, proposal_ref: str, reviewed_sha: str | Non
 
 
 def _write_review(r: Path, path: str, sha: str | None) -> str:
-    """意見書(新様式 = front matter 付き)を一時リポジトリに置く。``sha=None`` は旧様式。"""
+    """意見書(新様式 = front matter 付き)を一時リポジトリに置く。``sha=None`` は旧様式。
+
+    committer date は**過去(2026-08-01)に固定する**。由来判定は「意見書の初回コミット時刻
+    ≤ 決定時刻」の比較だが、テストの決定時刻は Postgres の ``now()`` = **トランザクション
+    開始時刻**に固定される(conn フィクスチャが先に開始)一方、git のコミット時刻は実時刻
+    (秒精度)である。実時刻でコミットすると、トランザクション開始から秒境界を跨いだ実行
+    だけ ``post_hoc`` に化けて flaky になる(CI で実測)。事後製造のテストは
+    :func:`_post_hoc_commit_review` が日時を明示して作るので、ここを過去に固定しても
+    検査の意味は変わらない。
+    """
     body = "# 独立役員意見書\n\n判定: 条件付き承認\n"
     text = body if sha is None else (
         f"---\nreviewed_sha: {sha}\nreview_date: 2026-08-04\nverdict: conditional_approve\n---\n\n"
         + body
     )
-    _commit(r, path, text, f"docs(reviews): 意見書 {path}")
+    p = r / path
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+    _git(r, "add", "-A")
+    fixed = "2026-08-01T00:00:00+09:00"
+    subprocess.run(
+        ["git", "-C", str(r), "commit", "-m", f"docs(reviews): 意見書 {path}"],
+        capture_output=True, text=True, check=True,
+        env={**os.environ, "GIT_AUTHOR_DATE": fixed, "GIT_COMMITTER_DATE": fixed},
+    )
     return path
 
 
