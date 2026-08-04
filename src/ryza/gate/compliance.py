@@ -476,11 +476,30 @@ def _g5_crypto(ctx: _Ctx) -> list[Reason]:
 
 
 def _g6_cash_floor(ctx: _Ctx) -> list[Reason]:
-    """G-6 現金下限: 約定後の現金 ≥ NAV の 5%(IPS §4.2)。現金が増える注文は除く。"""
+    """G-6 現金下限: 約定後の現金 ≥ NAV の 5%(IPS §4.2)。現金が増える注文は除く。
+
+    **新規ショート建て(side == "short")の扱い(F-5・Issue #120)**:
+    素朴に ``post_cash = cash - delta*price`` を計算すると、``delta`` は sell/short で
+    負(:759 付近)なので新規ショートは「現金が増える取引」となり早期リターンで
+    G-6 を素通ししてしまう。しかし新規ショートの売却代金は**担保として拘束される**
+    ものであり、自由現金として現金下限を満たす原資にはならない。担保モデルを
+    実装するまでの fail-closed 側の近似として、``side == "short"`` のときは
+    ``post_cash = ctx.state.cash``(売却代金を数えない)で現金下限を評価する
+    — ショート自体は殺さず、現金が下限未満のときにだけ止める。
+    sell(ロング解消の売り・現金増)と cover(買い戻し・現金減)は従来どおり。
+
+    TODO(g6-short-margin-model / ops/reminders.yaml):
+      担保モデル導入時に精緻化する(必要担保・維持証拠金・クローズ売りの
+      avg_cost 考慮など)。
+    """
     assert ctx.state.nav is not None and ctx.state.cash is not None
-    post_cash = ctx.state.cash - ctx.delta * ctx.price
-    if post_cash >= ctx.state.cash:  # 売り等で現金が増える注文は現金下限を悪化させない
-        return []
+    # ショートの売却代金は担保拘束 → 自由現金には加算しない(fail-closed 近似)。
+    if ctx.proposal.side == "short":
+        post_cash = ctx.state.cash
+    else:
+        post_cash = ctx.state.cash - ctx.delta * ctx.price
+        if post_cash >= ctx.state.cash:  # 売り等で現金が増える注文は現金下限を悪化させない
+            return []
     floor = _dec(ctx.ips.guardrails.cash_nav_min) * ctx.state.nav
     if post_cash < floor:
         return [

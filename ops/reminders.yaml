@@ -1483,3 +1483,15 @@ reminders:
       labels: [decision, governance]
       body: "**問題**: 将来アクション制度(CLAUDE.md『将来のアクションは必ず ops/reminders.yaml に機械可読で登録すること』)の最も安価な迂回は、weekly.py でも github.py でもなく **ops/reminders.yaml の status を 1 行書き換えること**である。pending エントリを `done` にすれば、その将来アクションは承認手続も検出も無しに消える。ops/reminders.yaml は protected_areas に入っておらず、A-18 のどの検査も status の遷移を見ていない。根拠の添付(『なぜ done にしてよいか』)を強制する仕組みも無い — 実際、この指摘を生んだ PR 自身が 2 エントリを done 化しており(根拠付きで正当だったが、正当性を担保したのは起草者の裁量と独立審査であって仕組みではない)。\n\n**単純な保護登録は不可**: ops/reminders.yaml を protected_areas に入れると、**週次ジョブ自身の正常動作が毎週 A-18-1 違反になる**。ジョブは Contents API で main へ直接 `fired: <日付>` のコミットを書く(PR を経ない・Approved トレーラを持たない)ため、保護登録はジョブを止めるか監査を毎週赤にするかの二択を生む。これは 05-governance §6-5 の形骸化(『毎週赤いが誰も見ない』)を自ら作る手である。\n\n**対案(いずれかを選ぶ・併用可)**: (a) **週次ダイジェストへの status 遷移の列挙** — ジョブが reminders.yaml の直前版と現行版を diff し、『今週 status が遷移したエントリ(id・旧 status・新 status・遷移させたコミット)』をダイジェストに載せる。ジョブ自身の `fired:` 遷移と人手の `done` 化が同じ表に並ぶため、根拠なき done 化が代表の目に触れる。実装は weekly.py 側(保護領域)で完結し、A-18 にも DB にも依存しない。(b) **A-18 に遷移検査を足す** — main の履歴で ops/reminders.yaml の `pending` → `done` 遷移を含むコミットを列挙し、ジョブ自身のコミット(件名・author が `fired:` の様式)を除外したうえで、Approved トレーラまたは PR 承継を要求する。A-18-1 と同じ突合機構に載るので受容(acknowledged_findings)も効くが、A-18 実装(保護領域 src/ryza/audit/**)の変更が要る。\n\n**判断のポイント**: (a) は検出が『人が読むこと』に依存するが実装コストが小さく、ジョブの正常動作と競合しない。(b) は機械的な検出になるが、ジョブのコミットを様式で除外する部分が偽装可能(件名を真似れば除外される)なので、除外条件を author/committer や Contents API 経由であることに寄せられるか検証が要る。**両方を採るなら (a) を先に入れて実データで遷移の頻度を見てから (b) の閾値・除外条件を決めるのが順当。**\n\n出典: docs/reviews/ops-weekly-protect-review.md 中-4(敵対的観点・審査者の自発的提起)。関連: 同意見書 重要-2(『将来アクションを YAML コメントに書くのは CLAUDE.md 違反』)、リマインダー `github-client-protect`。"
     status: pending
+
+  - id: g6-short-margin-model
+    what: "G-6 現金下限のショート担保モデル導入 — F-5 の fail-closed 近似(担保拘束を数えない)を精緻化(実弾移行前提)"
+    conditions:
+      - type: date_after
+        date: "2026-09-15"
+    action:
+      type: issue_create
+      title: "G-6 現金下限: ショート担保モデル+クローズ売りの avg_cost 考慮"
+      labels: [impl]
+      body: "**現状(F-5 是正・Issue #120)**: src/ryza/gate/compliance.py `_g6_cash_floor` は新規ショート(side == \"short\")で `post_cash = ctx.state.cash`(売却代金を自由現金に加算しない)として現金下限を評価する — 担保拘束モデルを持たないための fail-closed 近似。**残課題**: (1) ブローカーの必要担保・維持証拠金モデル(例: 委託保証金率・維持保証金率・信用取引の建玉金額×一定率)を導入し、実際の担保拘束額を差し引いた自由現金で下限を判定する。(2) sell(ロング解消)で avg_cost と時価の乖離により実際の入金額が `qty*price` と異なるケース(税・手数料・信用返済の金利込み)を評価に含めるか判断する。(3) cover(買い戻し)の担保解放と当日決済の同時性を考慮した現金推移を評価する。ゲート・IPS 双方に触れるため保護領域手続で実装。実弾移行前に完成させること(担保無視の近似はデモ/紙面では安全側だが、実弾では機会損失が過大になる)。"
+    status: pending
