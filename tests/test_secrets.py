@@ -150,3 +150,42 @@ def test_probe_secret_reason_no_secret_name(monkeypatch):
     res = secrets.probe_secret(env=_ENV)
     assert res.value is None
     assert "未設定" in res.reason
+
+
+# ── is_running_on_gce: T-024 の共通 GCE 判定 ─────────────────────────────────
+def test_is_running_on_gce_true_when_metadata_reachable(monkeypatch):
+    """メタデータサーバに到達できれば True。"""
+    monkeypatch.setattr(secrets, "_urlopen", fake_urlopen({}))
+    secrets.reset_gce_cache()
+    try:
+        assert secrets.is_running_on_gce() is True
+    finally:
+        secrets.reset_gce_cache()
+
+
+def test_is_running_on_gce_false_when_metadata_unreachable(monkeypatch):
+    """メタデータサーバ不達(非 GCE)なら False(例外は握って False)。"""
+
+    def _down(req, timeout):
+        raise urllib.error.URLError("unreachable")
+
+    monkeypatch.setattr(secrets, "_urlopen", _down)
+    secrets.reset_gce_cache()
+    try:
+        assert secrets.is_running_on_gce() is False
+    finally:
+        secrets.reset_gce_cache()
+
+
+def test_is_running_on_gce_cached_across_calls(monkeypatch):
+    """判定結果はプロセス内でキャッシュされ、``_urlopen`` は 1 度しか呼ばれない。"""
+    calls: list[str] = []
+    monkeypatch.setattr(secrets, "_urlopen", fake_urlopen({}, calls))
+    secrets.reset_gce_cache()
+    try:
+        secrets.is_running_on_gce()
+        secrets.is_running_on_gce()
+        secrets.is_running_on_gce()
+        assert len(calls) == 1
+    finally:
+        secrets.reset_gce_cache()
