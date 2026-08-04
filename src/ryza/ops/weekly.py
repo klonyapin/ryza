@@ -54,8 +54,11 @@ DIGEST_TITLE = "週次ダイジェスト"
 CO_AUTHOR = "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 # 発火対象から外す status(前方一致)。``fired: <日付>`` は本ジョブが書き、``done`` は
-# 人手で完了を記録したもの。reminders.yaml v2 に現れる終端 status はこの2種のみ。
-TERMINAL_STATUS_PREFIXES = ("fired", "done")
+# 人手で完了を記録したもの。``superseded`` は後継エントリへ意思決定を引き継いだ休止状態
+# (T-020 独立役員審査 F-6 で追加 — 発火対象に残していると 2026-08-25 に誤発火する)。
+# ``cancelled`` は明示的な破棄。A-18-9 の終端集合(done/fired/superseded/cancelled)と
+# 揃える(モジュール間不整合の解消)。
+TERMINAL_STATUS_PREFIXES = ("fired", "done", "superseded", "cancelled")
 
 # notify の channel 省略時の宛先(reminders.yaml の実在エントリはいずれも「運営」)。
 NOTIFY_CHANNEL_DEFAULT = "運営"
