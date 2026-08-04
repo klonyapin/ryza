@@ -10,11 +10,14 @@ from __future__ import annotations
 import pytest
 
 from ryza.reviews import (
+    BLOCKING_VERDICTS,
     ReviewArtifact,
     ReviewArtifactError,
+    first_commit_date,
     is_repo_path_ref,
     load_review_artifact,
     parse_review_artifact,
+    resolve_review_path,
     split_front_matter,
 )
 
@@ -125,11 +128,21 @@ def test_malformed_review_date_is_a_warning():
 
 # ── 参照の解決 ────────────────────────────────────────────────────────────
 @pytest.mark.parametrize(
-    "ref", ["https://github.com/x/y/pull/1", "#承認", "/etc/passwd", "../outside.md", "", None]
+    "ref", ["https://github.com/x/y/pull/1", "http://a/b/c", "#承認", "/etc/passwd", "", None]
 )
 def test_non_repo_path_references_are_not_read(ref):
-    """URL・絶対パス・親ディレクトリ参照はリポジトリ内の審査記録として扱わない。"""
+    """URL・絶対パス・#-参照はリポジトリ内の審査記録として扱わない。
+
+    ``..`` は本関数では弾かない(旧実装が弾いていたため、``docs/reviews/../reviews/x.md`` が
+    無音で「審査記録なし」に落ちる迂回路になっていた — 独立役員審査 C-2)。正規化と範囲検査は
+    :func:`resolve_review_path` の担当で、そこでリポジトリ外へ出るものは**エラー**になる。
+    """
     assert not is_repo_path_ref(ref)
+
+
+def test_dot_dot_reference_is_repo_path_shape():
+    """``..`` を含む参照は本関数では通し、範囲検査は resolve_review_path に任せる(C-2)。"""
+    assert is_repo_path_ref("docs/reviews/../reviews/x.md")
 
 
 def test_load_reads_a_repository_relative_path(tmp_path):
@@ -146,3 +159,122 @@ def test_load_returns_none_for_a_missing_file(tmp_path):
 def test_load_returns_none_without_a_repo_root():
     """ルートを決められない実行(パッケージ設置)では検査そのものを行わない。"""
     assert load_review_artifact("docs/reviews/x.md", repo_root=None) is None
+
+
+# ── C-1: 発効を止める判定(BLOCKING_VERDICTS)─────────────────────────────────
+def test_blocking_verdicts_are_defined():
+    """``request_changes`` と ``reject`` は語彙内で発効を止める判定である(C-1)。"""
+    assert "reject" in BLOCKING_VERDICTS
+    assert "request_changes" in BLOCKING_VERDICTS
+    assert "approve" not in BLOCKING_VERDICTS
+    assert "conditional_approve" not in BLOCKING_VERDICTS
+
+
+# ── C-2: 参照表記の書式を変えるだけの無音迂回を塞ぐ ──────────────────────────
+def _install_new_style(tmp_path):
+    d = tmp_path / "docs" / "reviews"
+    d.mkdir(parents=True)
+    (d / "x.md").write_text(NEW_STYLE, encoding="utf-8")
+
+
+def test_dot_dot_normalization_resolves_to_the_same_file(tmp_path):
+    """``docs/reviews/../reviews/x.md`` は正規化されて同じファイルに解決する(C-2(a))。
+
+    旧実装は ``..`` を含む参照を「リポジトリ内パスではない」と判定し、無音で「審査記録なし」に
+    落としていた。書式を変えるだけで fail-safe を迂回できてはならない。
+    """
+    _install_new_style(tmp_path)
+    art = load_review_artifact("docs/reviews/../reviews/x.md", repo_root=tmp_path)
+    assert art is not None and art.reviewed_sha == SHA
+
+
+def test_escape_reference_is_an_error(tmp_path):
+    """正規化してリポジトリ外へ出る参照は ``None`` ではなくエラー(中止)にする(C-2(a))。"""
+    with pytest.raises(ReviewArtifactError, match="外"):
+        resolve_review_path("../outside.md", repo_root=tmp_path)
+
+
+def test_absolute_reference_is_an_error(tmp_path):
+    """絶対パスはリポジトリ相対で書く規則を明示するためエラーにする。"""
+    with pytest.raises(ReviewArtifactError, match="絶対パス"):
+        resolve_review_path("/etc/passwd", repo_root=tmp_path)
+
+
+def test_symlink_reference_is_an_error(tmp_path):
+    """symlink 経由でリポジトリ外を読む経路を塞ぐ(C-2 / C-7)。"""
+    outside = tmp_path.parent / "outside.md"
+    outside.write_text(NEW_STYLE, encoding="utf-8")
+    d = tmp_path / "docs" / "reviews"
+    d.mkdir(parents=True)
+    (d / "link.md").symlink_to(outside)
+    with pytest.raises(ReviewArtifactError, match="symlink|外"):
+        resolve_review_path("docs/reviews/link.md", repo_root=tmp_path)
+
+
+def test_blob_url_for_own_repo_resolves_to_repository_path(tmp_path):
+    """自リポジトリの GitHub blob URL はリポジトリ内パスに変換して扱う(C-2(b))。
+
+    ``resolve_review_path`` に ``repo_slug`` を明示すれば ``git remote get-url`` は呼ばれない。
+    URL の書式を変えるだけで「リポジトリ内参照ではない」に落ちる迂回を塞ぐ。
+    """
+    _install_new_style(tmp_path)
+    url = "https://github.com/klonyapin/ryza/blob/main/docs/reviews/x.md"
+    path = resolve_review_path(url, repo_root=tmp_path, repo_slug="klonyapin/ryza")
+    assert path is not None and path.name == "x.md"
+
+
+def test_blob_url_for_other_repo_is_not_local(tmp_path):
+    """他リポジトリの blob URL は従来どおりリポジトリ外扱い(``None``)にする。"""
+    _install_new_style(tmp_path)
+    url = "https://github.com/other/other/blob/main/docs/reviews/x.md"
+    assert resolve_review_path(url, repo_root=tmp_path, repo_slug="klonyapin/ryza") is None
+
+
+def test_load_via_blob_url_reads_the_repository_file(tmp_path):
+    """自リポの blob URL を ``load_review_artifact`` に渡しても意見書として読める。"""
+    _install_new_style(tmp_path)
+    url = "https://github.com/klonyapin/ryza/blob/main/docs/reviews/x.md"
+    art = load_review_artifact(url, repo_root=tmp_path, repo_slug="klonyapin/ryza")
+    assert art is not None and art.reviewed_sha == SHA
+
+
+def test_front_matter_after_leading_blank_line_is_parsed():
+    """先頭に空行を1行入れた front matter は読める(C-2(d))。
+
+    旧実装は 0 行目だけを開始フェンスと見なしたため、先頭に空行1行を入れるだけで front matter
+    全体が無効化できた。開始フェンスの前後の空白は既に許容されているのに、空行だけを無効化する
+    非対称は様式として説明できない。
+    """
+    text = "\n" + NEW_STYLE
+    art = parse_review_artifact(text)
+    assert art is not None and art.reviewed_sha == SHA
+
+
+def test_multiple_leading_blank_lines_are_tolerated():
+    text = "\n\n\n" + NEW_STYLE
+    art = parse_review_artifact(text)
+    assert art is not None and art.reviewed_sha == SHA
+
+
+# ── C-6: front matter のトップレベルキー重複は拒否 ─────────────────────────
+def test_duplicate_top_level_key_is_an_error():
+    """``yaml.safe_load`` の後勝ちで無警告に採用値が入れ替わる経路を塞ぐ(C-6)。"""
+    text = f"---\nreviewed_sha: {SHA}\nreviewed_sha: {'f'*40}\n---\n本文\n"
+    with pytest.raises(ReviewArtifactError, match="複数"):
+        parse_review_artifact(text)
+
+
+def test_indented_duplicate_is_not_a_top_level_key():
+    """インデントされた行は「別のキーの値」でありトップレベルキー重複ではない。"""
+    # 現様式にネスト構造は無いが、将来の拡張で誤検出しないことを固定する。
+    text = f"---\nreviewed_sha: {SHA}\nnotes:\n  reviewed_sha: なにか\n---\n本文\n"
+    # notes のパース自体は成立するので余剰キー警告のみ。
+    art = parse_review_artifact(text)
+    assert art is not None and art.reviewed_sha == SHA
+
+
+# ── C-3: 意見書の初出コミット日時 ─────────────────────────────────────────
+def test_first_commit_date_returns_none_for_untracked_file(tmp_path):
+    """git 追跡されていないファイル(または git 以外のリポジトリ)は ``None`` を返す。"""
+    (tmp_path / "x.md").write_text("hello", encoding="utf-8")
+    assert first_commit_date(tmp_path, tmp_path / "x.md") is None

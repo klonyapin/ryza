@@ -11,9 +11,11 @@ outbox 投入はテスト専用 DB で検証する。全変更 PR 化(A-18-4)は
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -2982,4 +2984,116 @@ def test_a18_8_provenance_is_shown_on_the_mismatch_line_too(repo, conn, run_id):
     result = _run_a18_deemed(r, since, conn)
     field = next(f for f in a18.build_alert_embed(result)["fields"] if "A-18-8" in f["name"])
     assert "1/1 決定 / うち審査記録由来 1 件" in field["name"]
+    conn.rollback()
+
+
+# ── C-3: 意見書が決定より後に出現した場合は由来にしない ──────────────────────
+def _post_hoc_commit_review(r: Path, path: str, sha: str, decided_at: Any) -> str:
+    """意見書を ``decided_at`` より後の committer date で追加する(C-3 の post_hoc 実証用)。
+
+    ``git commit --date`` は author date しか変えず ``%cI`` は変わらないため、
+    ``GIT_COMMITTER_DATE`` を明示的に決定時刻 + 1 分に設定する。
+    """
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    if isinstance(decided_at, _dt):
+        after = decided_at + _td(minutes=1)
+    else:
+        after = _dt.fromisoformat(str(decided_at)) + _td(minutes=1)
+    p = r / path
+    p.parent.mkdir(parents=True, exist_ok=True)
+    body = (
+        f"---\nreviewed_sha: {sha}\nreview_date: 2026-08-04\nverdict: conditional_approve\n---\n\n"
+        "# 独立役員意見書\n\n判定: 条件付き承認\n"
+    )
+    p.write_text(body, encoding="utf-8")
+    _git(r, "add", "-A")
+    env_iso = after.isoformat()
+    subprocess.run(
+        ["git", "-C", str(r), "commit", "-m", f"docs(reviews): 事後 {path}"],
+        check=True, capture_output=True, text=True,
+        env={**os.environ, "GIT_COMMITTER_DATE": env_iso, "GIT_AUTHOR_DATE": env_iso},
+    )
+    return path
+
+
+def test_a18_8_post_hoc_review_is_not_counted_as_provenance(repo, conn, run_id):
+    """意見書 commit が決定 ``decided_at`` より後なら独立審査の裏付けにしない(C-3)。
+
+    旧実装は監査時点で意見書が実在するかだけを見て、決定が先に確定していても由来に数えていた。
+    決定と ``Approved:`` を作った後で意見書を commit するだけで由来率 100% にできる経路を塞ぐ。
+    """
+    from ryza.governance.decisions import current_decision
+
+    r, since = repo
+    url = "https://github.com/x/y/pull/828"
+    _deemed_with_review(conn, run_id, url, REVIEWED_A, "docs/reviews/post-hoc.md")
+    decided_at = current_decision(conn, url)["decided_at"]
+    _post_hoc_commit_review(r, "docs/reviews/post-hoc.md", REVIEWED_A, decided_at)
+    _commit_reviewed_trailer(r, url, REVIEWED_A)
+    scan = _scan_a188(r, since, conn)
+    assert scan.compared == 1 and scan.from_review_artifact == 0 and scan.post_hoc == 1
+    conn.rollback()
+
+
+def test_a18_8_post_hoc_review_appears_in_breakdown_notes(repo, conn, run_id):
+    """C-4 の内訳開示に「事後製造の疑い」が件数で出る(旧実装は 4 種類を 1 つに潰していた)。"""
+    from ryza.governance.decisions import current_decision
+
+    r, since = repo
+    url = "https://github.com/x/y/pull/829"
+    _deemed_with_review(conn, run_id, url, REVIEWED_A, "docs/reviews/post-hoc-2.md")
+    decided_at = current_decision(conn, url)["decided_at"]
+    _post_hoc_commit_review(r, "docs/reviews/post-hoc-2.md", REVIEWED_A, decided_at)
+    _commit_reviewed_trailer(r, url, REVIEWED_A)
+    result = _run_a18_deemed(r, since, conn)
+    assert result["reviewed_post_hoc"] == 1
+    assert any("事後製造" in n and "1 件" in n for n in result["notes"])
+    conn.rollback()
+
+
+# ── C-4: 由来なしの内訳をカテゴリ別に開示する ──────────────────────────────
+def test_a18_8_breakdown_covers_multiple_categories(repo, conn, run_id):
+    """複数カテゴリが混在するとき、内訳注記に各件数が個別に現れる(C-4)。
+
+    旧実装は「compared - from_review_artifact」の 1 数字だったため、旧様式が多い移行期は
+    (b) 新様式で SHA 欠落・(c) 参照迂回・(e) 事後製造 がその陰に隠れて検出できなかった。
+    """
+    r, since = repo
+    # (a) 旧様式
+    old_url = "https://github.com/x/y/pull/830"
+    old_ref = _write_review(r, "docs/reviews/old.md", None)
+    _deemed_with_review(conn, run_id, old_url, REVIEWED_A, old_ref)
+    _commit(
+        r, "docs/protected.md", "breakdown-1\n",
+        f"docs: 保護領域変更 1\n\nApproved: {old_url} reviewed={REVIEWED_A}",
+    )
+    # (b) 参照が読めない
+    missing_url = "https://github.com/x/y/pull/831"
+    _deemed_reviewed(conn, run_id, missing_url, REVIEWED_A)  # review_ref なし
+    _commit(
+        r, "docs/protected.md", "breakdown-2\n",
+        f"docs: 保護領域変更 2\n\nApproved: {missing_url} reviewed={REVIEWED_A}",
+    )
+    result = _run_a18_deemed(r, since, conn)
+    assert result["reviewed_old_style"] == 1
+    assert result["reviewed_unreadable"] == 1
+    breakdown = next((n for n in result["notes"] if "由来なしの内訳" in n), None)
+    assert breakdown is not None
+    assert "旧様式 1 件" in breakdown
+    assert "参照が読めない 1 件" in breakdown
+    conn.rollback()
+
+
+def test_a18_8_breakdown_is_omitted_when_all_provenance_is_backed(repo, conn, run_id):
+    """全件が由来ありなら内訳注記は出さない(緑の意味を弱める余計な注記を避ける)。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/832"
+    ref = _write_review(r, "docs/reviews/all-backed.md", REVIEWED_A)
+    _deemed_with_review(conn, run_id, url, REVIEWED_A, ref)
+    _commit_reviewed_trailer(r, url, REVIEWED_A)
+    result = _run_a18_deemed(r, since, conn)
+    assert result["reviewed_from_artifact"] == 1
+    assert not any("由来なしの内訳" in n for n in result["notes"])
     conn.rollback()

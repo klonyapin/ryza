@@ -216,8 +216,8 @@ reminders:
       type: issue_create
       title: "src/ryza/reviews.py の保護領域登録の要否(発効 fail-safe の判定コード)"
       labels: [governance]
-      body: "2026-08-04 に新設した `src/ryza/reviews.py` は、みなし承認 CLI が『審査側の記録と起票者の申告が食い違うか』を判定する経路そのものである(食い違えば発効を中止)。パーサを緩めれば fail-safe は黙って無効化でき、統制上は `src/ryza/governance/**`(governance_engine)と同格に見える。一方で本モジュールは判定を持たない読み取り専用のパーサであり、保護領域を増やすと承認手続の対象が広がる(定款第5条の運用コスト)。判断材料: ①本パーサの変更が実際に発効可否を変えうる範囲(現状は例外を投げるか否かの2択)、②`config/universe/**` を『マンデート変更と同格』として登録した先例(t017-fm-agents 審査 C-24)との整合、③A-18-8 の `from_review_artifact` が実運用で機能しているか(件数 > 0 か)。登録する場合は config/governance.yaml の変更であり、独立役員審査+みなし承認の L1 手続を要する。"
-    status: pending
+      body: "2026-08-04 に新設した `src/ryza/reviews.py` は、みなし承認 CLI が『審査側の記録と起票者の申告が食い違うか』を判定する経路そのものである(食い違えば発効を中止)。**判断は既にパーサ側に宿っている** —— (a) `BLOCKING_VERDICTS`(``reject`` / ``request_changes``)の集合が発効停止のトリガ語彙そのものであり、この集合を空にするだけで verdict による fail-safe は無音で無効化できる、(b) `is_repo_path_ref` / `resolve_review_path` の書式受理境界が『どの参照を意見書として読み、どれをリポジトリ外扱いにするか』を決めており、境界を緩めれば審査記録の突合が形骸化する、(c) 重複キー・様式不備の拒否も同じ論法。したがって本モジュールは『読み取り専用のパーサ』ではなく、governance_engine の一部として保護すべき統制コードである。**判断**: 独立役員審査 C-8 の裁定にしたがい保護登録済み(config/governance.yaml — 2026-08-04)。同時に対応する不変条件テスト `tests/test_reviews.py` も invariant_tests として登録し、境界の受理・拒否を先にテストで緩める二段手順を塞いだ。本リマインダーは登録の合意までの意思決定路であり、目的は完了(status: done)。将来の見直し材料: A-18-8 の `from_review_artifact` の実運用件数、パーサ変更頻度に対する承認手続の運用コスト。"
+    status: done # 2026-08-04 独立役員審査 C-8 裁定にしたがい reviews.py と tests/test_reviews.py を保護登録
 
   - id: reviewed-sha-mismatch-fail-safe
     what: "A-18-8 の不一致に対する fail-safe 全面化(承継の起点にしない)の要否 — 中間案(記録側採用)の実測後に再判断"

@@ -2039,11 +2039,29 @@ class ReviewedShaScan:
     record_only: int = 0
     #: ``compared`` のうち、記録側 ``reviewed_sha`` が**審査記録に由来する**決定数。
     #: 決定の ``review_ref`` が指す意見書(``docs/reviews/*.md``)の front matter が同じ
-    #: ``reviewed_sha`` を宣言している場合に数える(:mod:`ryza.reviews`)。
+    #: ``reviewed_sha`` を宣言し、**かつ意見書が決定より前から存在する**場合に数える。
     #: **これが本検査の意味を決める分子である**: 由来のない一致は「起票者が書いた2つの値が
     #: 揃っている」ことしか意味せず、由来のある一致だけが「独立審査が実際にその SHA を見た」
     #: という主張の裏付けを持つ(reminders ``reviewed-sha-from-review-agent`` ③)。
     from_review_artifact: int = 0
+    #: 由来なしの内訳(独立役員審査 2026-08-04 C-4)。``compared`` の全件がいずれか1つに入る。
+    #:
+    #: - ``post_hoc`` … 意見書は一致するが**決定より後に**リポジトリへ現れた(C-3)。
+    #:   起票者が既に申告済みの SHA を書き写したファイルを後から足せば由来率は上げられる。
+    #:   違反にはしない(正当な遡及整備もある)が、由来には数えず別枠で開示する
+    #: - ``old_style`` … 参照先は在るが front matter が無い(後方互換で意図された多数派)
+    #: - ``missing_sha`` … 新様式だが ``reviewed_sha`` を書いていない(判断3 が警戒する当のもの)
+    #: - ``sha_conflict`` … 意見書が**別の** SHA を宣言している(記録側の裏付けにならない)
+    #: - ``unreadable`` … 参照がリポジトリ外・実在しない・front matter が壊れている
+    #:
+    #: **なぜ分けるか**: 旧実装は ``compared - from_review_artifact`` の1つの数に4つの原因を
+    #: 潰しており、docs/reviews が旧様式ばかりの移行期には由来率が**良性の理由で**低く張り付く。
+    #: 参照迂回や「新様式なのに SHA を書かない」定常化は、その陰に隠れて検出できなかった。
+    post_hoc: int = 0
+    old_style: int = 0
+    missing_sha: int = 0
+    sha_conflict: int = 0
+    unreadable: int = 0
 
 
 def _log_messages(repo: str | Path, since: str | None) -> list[tuple[str, str]]:
@@ -2116,7 +2134,15 @@ def check_reviewed_sha_agreement(
     compared_ids: set[Any] = set()
     trailer_only_ids: set[Any] = set()
     record_only_ids: set[Any] = set()
-    artifact_ids: set[Any] = set()
+    # 由来の内訳(独立役員審査 2026-08-04 C-4)。compared の全件がいずれか1つに入る。
+    provenance_categories: dict[str, set[Any]] = {
+        "from_review_artifact": set(),
+        "post_hoc": set(),
+        "old_style": set(),
+        "missing_sha": set(),
+        "sha_conflict": set(),
+        "unreadable": set(),
+    }
     mismatches: dict[tuple[Any, str], dict[str, Any]] = {}
     for sha, message in _log_messages(repo, since_commit):
         for line in approval_trailers(message, trailer):
@@ -2141,8 +2167,10 @@ def check_reviewed_sha_agreement(
                 continue
             if decision_id not in compared_ids:
                 compared_ids.add(decision_id)
-                if _review_artifact_sha(repo, row.get("review_ref")) == recorded:
-                    artifact_ids.add(decision_id)
+                category = _classify_review_provenance(
+                    repo, row.get("review_ref"), recorded, row.get("decided_at"),
+                )
+                provenance_categories[category].add(decision_id)
             if recorded == declared:
                 continue
             key = (decision_id, declared)
@@ -2171,33 +2199,98 @@ def check_reviewed_sha_agreement(
         compared=len(compared_ids),
         trailer_only=len(trailer_only_ids),
         record_only=len(record_only_ids),
-        from_review_artifact=len(artifact_ids),
+        from_review_artifact=len(provenance_categories["from_review_artifact"]),
+        post_hoc=len(provenance_categories["post_hoc"]),
+        old_style=len(provenance_categories["old_style"]),
+        missing_sha=len(provenance_categories["missing_sha"]),
+        sha_conflict=len(provenance_categories["sha_conflict"]),
+        unreadable=len(provenance_categories["unreadable"]),
     )
 
 
-def _review_artifact_sha(repo: str | Path, review_ref: Any) -> str | None:
-    """決定の ``review_ref`` が指す意見書の front matter が宣言する ``reviewed_sha``。
+def _classify_review_provenance(
+    repo: str | Path, review_ref: Any, recorded_sha: str, decided_at: Any,
+) -> str:
+    """決定の ``review_ref`` から由来のカテゴリを決める(独立役員審査 C-3・C-4)。
 
-    読めない場合(参照が URL / ファイルが無い / 旧様式 / front matter が壊れている)は
-    ``None`` を返す —— **由来ありには数えない**方向へ倒す。由来件数は開示であって所見では
-    ないので、読めないものを楽観的に数えると「割合が高い=裏付けがある」という報告の意味が
-    崩れる。様式不備で発効を止めるのは CLI 側の責務であり(``governance.decisions``)、
-    監査は事後の観測に徹する。
+    戻り値は :class:`ReviewedShaScan` の内訳キーのいずれか:
 
-    照合先は**監査時点の作業ツリー**のファイルである。意見書を後から削除・改名すると由来が
-    消える(件数が下がる)が、それは可視化として正しい方向であり、逆(消して増える)には
-    ならない。
+    - ``from_review_artifact`` … 意見書が同じ SHA を宣言し、**決定より前から**リポジトリに
+      存在する(独立審査が実際にその SHA を見た主張の裏付け)
+    - ``post_hoc`` … SHA は一致するが意見書が**決定より後に**現れた(C-3)。事後に書き写せば
+      由来率を上げられるので、由来には数えず別枠で開示する
+    - ``old_style`` … 参照先は在るが front matter が無い(後方互換で意図された多数派)
+    - ``missing_sha`` … 新様式だが ``reviewed_sha`` を書いていない(判断3 が警戒する経路)
+    - ``sha_conflict`` … 意見書が**別の** SHA を宣言している
+    - ``unreadable`` … 参照が空/リポジトリ外/実在しない/front matter が壊れている
+
+    **なぜ由来判定に git 履歴を使うか**(C-3): 旧実装は監査時点の作業ツリーだけを読み、
+    「意見書が決定より前に在ったか」を検査しなかった。決定と ``Approved:`` トレーラを先に
+    作り、その後で同じ SHA を宣言する意見書を commit するだけで由来率は 100% にできた。
+    照合先を**トレーラコミット時点**ではなく決定時刻との前後比較にする(意見書は決定より前に
+    書かれていなければ独立審査の主張を裏付けない)。改名は ``git log --follow`` で辿る。
+
+    **監査は楽観に倒さない**: 判定できない側は ``unreadable`` に落とす。由来件数は開示で
+    あって所見ではないので、読めないものを楽観的に数えると「割合が高い=裏付けがある」という
+    報告の意味が崩れる。様式不備で発効を止めるのは CLI 側の責務(``governance.decisions``)。
     """
-    from ryza.reviews import ReviewArtifactError, load_review_artifact
+    from ryza.reviews import (
+        ReviewArtifactError,
+        first_commit_date,
+        load_review_artifact,
+        resolve_review_path,
+    )
 
     ref = str(review_ref).strip() if review_ref else ""
     if not ref:
-        return None
+        return "unreadable"
+    try:
+        path = resolve_review_path(ref, repo_root=repo)
+    except ReviewArtifactError:
+        return "unreadable"
+    if path is None or not path.is_file():
+        return "unreadable"
     try:
         artifact = load_review_artifact(ref, repo_root=repo)
     except (ReviewArtifactError, OSError, UnicodeDecodeError):
-        return None
-    return artifact.reviewed_sha if artifact is not None else None
+        return "unreadable"
+    if artifact is None:
+        return "old_style"
+    if artifact.reviewed_sha is None:
+        return "missing_sha"
+    if artifact.reviewed_sha != recorded_sha:
+        return "sha_conflict"
+    # 一致。事後製造(意見書が決定より後に現れた)は分子から外す。
+    initial = first_commit_date(repo, path)
+    if initial is None:
+        # 追跡されていない(未 commit)意見書は「決定より前に在った」ことを git が保証しないため
+        # 由来には数えない。作業ツリーの手元編集で由来率を上げる経路を閉じる。
+        return "post_hoc"
+    if decided_at is None:
+        # 決定時刻が読めない実行(view 定義の不整合等)は保守的に post_hoc へ寄せる。
+        return "post_hoc"
+    # タイムゾーンを跨ぐ比較のため、両方を aware な datetime に正規化する。文字列比較だと
+    # ``+09:00`` と ``+00:00`` の同時刻でも辞書順で誤判定する(独立役員審査 C-3 の是正)。
+    try:
+        initial_dt = datetime.fromisoformat(initial)
+    except ValueError:
+        return "post_hoc"
+    if isinstance(decided_at, datetime):
+        decided_dt = decided_at
+    else:
+        try:
+            decided_dt = datetime.fromisoformat(str(decided_at))
+        except ValueError:
+            return "post_hoc"
+    # naive を UTC 扱いにする(postgres の timestamptz は tz-aware で返るはずだが、
+    # SQL 経路の diff や将来の view 改定で naive に化けたときの保険)。
+    if initial_dt.tzinfo is None:
+        initial_dt = initial_dt.replace(tzinfo=UTC)
+    if decided_dt.tzinfo is None:
+        decided_dt = decided_dt.replace(tzinfo=UTC)
+    if initial_dt > decided_dt:
+        return "post_hoc"
+    return "from_review_artifact"
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -2303,6 +2396,14 @@ def run_a18(
         # 突合済みのうち審査記録(意見書 front matter)に由来する決定数。緑の意味を
         # 「起票者の申告どうしの一致」と「審査記録の裏付けがある一致」に分ける分子。
         "reviewed_from_artifact": reviewed_scan.from_review_artifact if reviewed_scan else 0,
+        # 由来の内訳(C-4)。旧実装は「compared - from_review_artifact」1つの数に4種の原因を
+        # 潰しており、docs/reviews が旧様式ばかりの移行期は由来率が良性の理由で低く張り付く。
+        # 参照迂回や「新様式なのに SHA を書かない」定常化はその陰に隠れて検出できなかった。
+        "reviewed_post_hoc": reviewed_scan.post_hoc if reviewed_scan else 0,
+        "reviewed_old_style": reviewed_scan.old_style if reviewed_scan else 0,
+        "reviewed_missing_sha": reviewed_scan.missing_sha if reviewed_scan else 0,
+        "reviewed_sha_conflict": reviewed_scan.sha_conflict if reviewed_scan else 0,
+        "reviewed_unreadable": reviewed_scan.unreadable if reviewed_scan else 0,
         # 既知の限界は毎回開示する(独立役員審査条件)+ 個別の注記(登録漏れ・鮮度)。
         "notes": [
             *_coverage_notes(gov),
@@ -2338,6 +2439,11 @@ def run_a18(
                     else "(全件が審査記録に由来)"
                 )
             ]),
+            # C-4 の内訳開示。旧実装は「compared - from_review_artifact」の1つの数に
+            # 4種類の原因を潰しており、旧様式が多い移行期は由来率が良性の理由で低く張り付く。
+            # 参照迂回や「新様式なのに SHA を書かない」定常化はその陰に隠れて検出できなかった。
+            # 由来なしが1件でもあれば内訳を出す。
+            *_provenance_breakdown_notes(reviewed_scan),
             # SHA-2: 逆側(記録にはあるがトレーラが v1)。**承継が無制限に戻る側**なので、
             # 件数 0 でない限り必ず出す(reviewed= を落とすだけで A-18-8 が無音になる経路)。
             *([] if reviewed_scan is None or not reviewed_scan.record_only else [
@@ -2358,6 +2464,39 @@ def run_a18(
             *STANDARD_DISCLOSURES,
         ],
     }
+
+
+def _provenance_breakdown_notes(scan: ReviewedShaScan | None) -> list[str]:
+    """A-18-8 の由来なしの内訳を毎週の報告に出す(独立役員審査 2026-08-04 C-4)。
+
+    旧実装は ``compared - from_review_artifact`` の1つの数に (a) 旧様式・(b) 新様式だが SHA
+    欠落・(c) 参照迂回で読めない・(d) SHA が食い違う・(e) 事後製造 の5原因を潰していた。
+    docs/reviews の現存が旧様式ばかりの移行期は由来率が (a) で低く張り付くため、(b)(c)(e)
+    がその陰に隠れて検出できない。件数を分けて出すだけで、判断3 が想定した検出が成立する。
+    """
+    if scan is None or not scan.compared:
+        return []
+    if scan.from_review_artifact == scan.compared:
+        return []
+    parts: list[str] = []
+    # 順序は「良性 → 警戒すべき」の順に置く(読み手が最後の数を見る癖に合わせる)。
+    if scan.old_style:
+        parts.append(f"旧様式 {scan.old_style} 件")
+    if scan.missing_sha:
+        parts.append(f"新様式だが reviewed_sha 欠落 {scan.missing_sha} 件")
+    if scan.sha_conflict:
+        parts.append(f"意見書が別の SHA を宣言 {scan.sha_conflict} 件")
+    if scan.unreadable:
+        parts.append(f"参照が読めない {scan.unreadable} 件")
+    if scan.post_hoc:
+        parts.append(f"意見書が決定より後に現れた(事後製造の疑い){scan.post_hoc} 件")
+    if not parts:
+        return []
+    return [
+        "由来なしの内訳: " + " / ".join(parts)
+        + "(移行期は旧様式が多い。新様式で SHA を書かない経路・意見書が決定より後に足された"
+        "経路は独立審査の裏付けにならない)"
+    ]
 
 
 def _unverified_inheritance_notes(inherited: list[dict[str, Any]]) -> list[str]:

@@ -408,7 +408,7 @@ def test_cli_dry_run_prints_notice_embed(capsys):
     rc = main([
         "--deemed", "--proposal-ref", "https://x/pull/1",
         "--kind", "pr", "--notice", "保護領域の変更",
-        "--review", "docs/reviews/x-review.md", "--dry-run",
+        "--review", "docs/reviews/x-review.md", "--review-missing-ok", "--dry-run",
     ])
     assert rc == 0
     embed = json.loads(capsys.readouterr().out)
@@ -470,7 +470,8 @@ def test_cli_deemed_for_pr_builds_the_notice(fake_gh, capsys):
 
     calls = fake_gh(PR_JSON, ["src/ryza/gate/limits.py", "migrations/0025_x.sql"])
     rc = main([
-        "--deemed-for-pr", "99", "--review", "docs/reviews/gate-review.md", "--dry-run",
+        "--deemed-for-pr", "99",
+        "--review", "docs/reviews/gate-review.md", "--review-missing-ok", "--dry-run",
     ])
     assert rc == 0
     embed = json.loads(capsys.readouterr().out)
@@ -531,7 +532,7 @@ def test_cli_review_reference_reaches_the_notice_body(capsys):
     rc = main([
         "--deemed", "--proposal-ref", "https://github.com/klonyapin/ryza/pull/2",
         "--kind", "pr", "--notice", "保護領域 X の変更",
-        "--review", "docs/reviews/x-review.md", "--dry-run",
+        "--review", "docs/reviews/x-review.md", "--review-missing-ok", "--dry-run",
     ])
     assert rc == 0
     body = json.loads(capsys.readouterr().out)["description"]
@@ -543,7 +544,7 @@ def test_cli_review_line_is_not_duplicated(capsys):
     rc = main([
         "--deemed", "--proposal-ref", "https://github.com/klonyapin/ryza/pull/3",
         "--kind", "pr", "--notice", "独立役員審査: docs/reviews/x-review.md で完了",
-        "--review", "docs/reviews/x-review.md", "--dry-run",
+        "--review", "docs/reviews/x-review.md", "--review-missing-ok", "--dry-run",
     ])
     assert rc == 0
     assert json.loads(capsys.readouterr().out)["description"].count("docs/reviews/x-review.md") == 1
@@ -552,7 +553,10 @@ def test_cli_review_line_is_not_duplicated(capsys):
 def test_cli_deemed_for_pr_refuses_a_closed_pr(fake_gh, capsys):
     """取り下げられた PR を発効させない(通知だけ出て取消義務が残る)。"""
     fake_gh({**PR_JSON, "state": "closed", "merged": False})
-    rc = main(["--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--dry-run"])
+    rc = main([
+        "--deemed-for-pr", "99", "--review", "docs/reviews/x.md",
+        "--review-missing-ok", "--dry-run",
+    ])
     assert rc == 1
     assert "クローズ済み" in capsys.readouterr().err
 
@@ -560,7 +564,10 @@ def test_cli_deemed_for_pr_refuses_a_closed_pr(fake_gh, capsys):
 def test_cli_deemed_for_pr_accepts_a_merged_pr(fake_gh, capsys):
     """マージ済み PR は対象になる(事後の記録漏れを CLI で埋められる — A-18-7 の是正手段)。"""
     fake_gh({**PR_JSON, "state": "closed", "merged": True})
-    rc = main(["--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--dry-run"])
+    rc = main([
+        "--deemed-for-pr", "99", "--review", "docs/reviews/x.md",
+        "--review-missing-ok", "--dry-run",
+    ])
     assert rc == 0
     assert json.loads(capsys.readouterr().out)["fields"]
 
@@ -569,7 +576,7 @@ def test_cli_explicit_arguments_win_over_the_generated_ones(fake_gh, capsys):
     """自動生成の文面が状況に合わないときは手で上書きできる。"""
     fake_gh(PR_JSON)
     rc = main([
-        "--deemed-for-pr", "99", "--review", "docs/reviews/x.md",
+        "--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--review-missing-ok",
         "--notice", "手書きの要旨", "--kind", "other", "--dry-run",
     ])
     assert rc == 0
@@ -581,19 +588,29 @@ def test_cli_explicit_arguments_win_over_the_generated_ones(fake_gh, capsys):
 def test_cli_deemed_for_pr_survives_a_file_list_failure(fake_gh, capsys):
     """変更ファイル一覧は文面の補助でしかない — 取れなくても発効そのものは止めない。"""
     fake_gh(PR_JSON, files_fail=True)
-    rc = main(["--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--dry-run"])
+    rc = main([
+        "--deemed-for-pr", "99", "--review", "docs/reviews/x.md",
+        "--review-missing-ok", "--dry-run",
+    ])
     assert rc == 0
     assert "変更ファイル" not in json.loads(capsys.readouterr().out)["description"]
 
 
 def test_cli_deemed_for_pr_reports_gh_failure(monkeypatch, capsys):
-    """gh が失敗したら黙って別の参照で発効させず、失敗として返す。"""
+    """gh が失敗したら黙って別の参照で発効させず、失敗として返す。
+
+    実在検査は gh 呼び出しの前に済ませる(存在しない審査参照でネットワークを使わない)ため、
+    ここでは ``--review-missing-ok`` を明示して「gh 応答の失敗」だけをテストの対象にする。
+    """
 
     def failing(path, *, paginate=False, jq=None):
         raise decisions_mod.PullRequestLookupError("gh api に失敗した(未認証)")
 
     monkeypatch.setattr(decisions_mod, "_gh_api", failing)
-    rc = main(["--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--dry-run"])
+    rc = main([
+        "--deemed-for-pr", "99", "--review", "docs/reviews/x.md",
+        "--review-missing-ok", "--dry-run",
+    ])
     assert rc == 1
     assert "未認証" in capsys.readouterr().err
 
@@ -781,12 +798,49 @@ def _build_args(argv: list[str]):
     return decisions_mod._build_parser().parse_args(argv)
 
 
-def test_cli_warns_but_does_not_refuse_a_missing_review_ref(fake_gh, capsys):
-    """実在しない審査参照は**警告のみ**(遡及登録・リポジトリ外の審査を塞がない)。"""
+def test_cli_kind_pr_aborts_on_missing_review_ref(fake_gh, capsys):
+    """**C-2(c)**: --kind pr で審査参照が実在しなければ**中止**する。
+
+    旧実装は警告のみで通していたが、``--review docs/reviews/存在しない.md`` が審査の代用に
+    なるうえ、警告は stderr に流れて消えるので実質的に無検査だった。--kind pr は独立役員審査を
+    前置する手続なので、遡及登録は ``--review-missing-ok`` の明示に一本化する。
+    """
     fake_gh(PR_JSON)
     rc = main(["--deemed-for-pr", "99", "--review", "docs/reviews/nope.md", "--dry-run"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "実在しない" in err and "--review-missing-ok" in err
+
+
+def test_cli_kind_pr_missing_ok_falls_back_to_warning(fake_gh, capsys):
+    """--review-missing-ok を明示すれば遡及登録・リポジトリ外の審査の口は塞がない(警告のみ)。"""
+    fake_gh(PR_JSON)
+    rc = main([
+        "--deemed-for-pr", "99", "--review", "docs/reviews/nope.md",
+        "--review-missing-ok", "--dry-run",
+    ])
     assert rc == 0
     assert "警告" in capsys.readouterr().err
+
+
+def test_cli_kind_other_missing_review_still_only_warns(capsys):
+    """--kind pr 以外(独立役員審査を前置しない手続)は従来どおり警告のみ。"""
+    rc = main([
+        "--deemed", "--proposal-ref", "ips-2026-09", "--kind", "other",
+        "--notice", "IPS 月次改訂", "--review", "docs/reviews/nope.md", "--dry-run",
+    ])
+    assert rc == 0
+    assert "警告" in capsys.readouterr().err
+
+
+def test_cli_kind_pr_dot_dot_escape_reference_aborts(capsys):
+    """**C-2(a)**: 正規化してリポジトリ外へ出る参照は中止(``..`` 経由の迂回を塞ぐ)。"""
+    rc = main([
+        "--deemed", "--proposal-ref", "https://x/pull/9", "--kind", "pr",
+        "--notice", "保護領域の変更", "--review", "../outside.md", "--dry-run",
+    ])
+    assert rc == 1
+    assert "外" in capsys.readouterr().err
 
 
 # ── CLI: 審査対象 SHA の自動取得・手動指定 ────────────────────────────────────
@@ -797,11 +851,16 @@ def test_cli_deemed_for_pr_captures_the_head_sha(fake_gh, capsys):
     """PR の head SHA が審査対象として自動で入る(手入力させない = 発効時刻に固定する)。"""
     fake_gh(PR_JSON_WITH_HEAD)
     target = decisions_mod._resolve_deemed_args(
-        _build_args(["--deemed-for-pr", "99", "--review", "docs/reviews/x.md"])
+        _build_args([
+            "--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--review-missing-ok",
+        ])
     )
     assert target.reviewed_sha == SHA_B
     assert target.review_ref == "docs/reviews/x.md"
-    rc = main(["--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--dry-run"])
+    rc = main([
+        "--deemed-for-pr", "99", "--review", "docs/reviews/x.md",
+        "--review-missing-ok", "--dry-run",
+    ])
     assert rc == 0
     assert SHA_B in json.loads(capsys.readouterr().out)["description"]
 
@@ -811,7 +870,8 @@ def test_cli_explicit_reviewed_sha_wins_over_the_head_sha(fake_gh):
     fake_gh(PR_JSON_WITH_HEAD)
     target = decisions_mod._resolve_deemed_args(
         _build_args([
-            "--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--reviewed-sha", SHA_A,
+            "--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--review-missing-ok",
+            "--reviewed-sha", SHA_A,
         ])
     )
     assert target.reviewed_sha == SHA_A
@@ -821,7 +881,9 @@ def test_cli_head_sha_is_optional(fake_gh):
     """head を返さない応答でも発効そのものは止めない(reviewed_sha は任意)。"""
     fake_gh(PR_JSON)
     target = decisions_mod._resolve_deemed_args(
-        _build_args(["--deemed-for-pr", "99", "--review", "docs/reviews/x.md"])
+        _build_args([
+            "--deemed-for-pr", "99", "--review", "docs/reviews/x.md", "--review-missing-ok",
+        ])
     )
     assert target.reviewed_sha is None
 
