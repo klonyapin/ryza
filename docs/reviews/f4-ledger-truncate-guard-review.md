@@ -2,7 +2,7 @@
 review: f4-ledger-truncate-guard
 reviewed_sha: 489946b6b3d8e018d80f2b031f368126c3cf3b69
 reviewer: independent-officer
-date: 2026-08-04
+review_date: 2026-08-04
 verdict: approve
 ---
 
