@@ -59,6 +59,17 @@
                           ``reviewed=`` を落とすだけで承継が無制限に戻り本検査が無音になる
                           経路である。不一致は訂正不能なので ``acknowledged_findings``
                           (``kind: a18-8``)で受容できる。DB 接続がある実行でのみ動く
+  A-18-9 リマインダー台帳改変検査 … ``ops/reminders.yaml`` は将来アクションの登録先
+                          (CLAUDE.md「将来のアクションは必ずここに登録」)であり、
+                          status/期日/エントリを無承認で書き換えると制度の発火を無音で止められる
+                          (A-12-15)。だが直近1週間で 35%(166/473)のコミットが本ファイルに触れ、
+                          protected_areas への全体登録は「1/3 の PR に独立審査+48h」を強い、
+                          リマインダー登録の逆インセンティブを生む。そこで **``Approved:``
+                          トレーラの無い**コミットで (1) ``pending`` エントリの期日の後ろ倒し、
+                          (2) ``pending`` エントリの削除、(3) 証跡(SHA/PR/Issue/URL)なしでの
+                          終端遷移(pending→done/fired/superseded)のみを所見にする。
+                          パース不能は「検査できなかった」件数として開示する(黙って緑にしない)。
+                          Issue #117 / A-12 是正 F-1
 
 **A-18-6 をここに置く理由**(ops-weekly VM 移設審査 2026-08-04 の代替案(d)・設計リード裁定):
 この指標は決議精緻化審査(2026-08-03)が新設した統制で、当初は週次ジョブ ops-weekly の
@@ -2338,6 +2349,362 @@ def _classify_review_provenance(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# A-18-9 リマインダー台帳の改変検査(A-12 是正 F-1 / Issue #117)
+#
+# ``ops/reminders.yaml`` は将来アクション制度の登録先(CLAUDE.md「将来のアクションは必ず
+# ここに登録」)。status/期日を1行書き換えれば「あとで発火する統制」を無音で止められるが、
+# 全体を protected_areas に入れると直近1週間で全コミットの 35%(166/473)が本ファイルに
+# 触れる観測から、1/3 の PR に「独立審査 + 48h」を課してリマインダー登録の逆インセンティブを
+# 生む(登録するほど自分の PR が重くなる=登録が減る)。そこで**疑わしい変更だけ**を検出する
+# semantic tamper check として A-18 に載せる。
+#
+# 対象: ``Approved:`` トレーラの無いコミットのうち ``ops/reminders.yaml`` に触れたもの。
+# 承認済み変更(トレーラあり)は対象外。マージコミットの反復は A-18-1 と同じ流儀。
+#
+# 所見の3種(過剰検出で通常運用の PR が鳴らないこと):
+#
+# 1. **期日の後ろ倒し**: ``status: pending`` の ``conditions[].date_after.date`` がより遅い日付へ
+# 2. **pending エントリの削除**: 変更前に ``pending`` だった id が変更後に存在しない
+#    (改名も削除として鳴らす — 「削除+追加」に見えるが承認かエントリ内経緯の記載を要する運用)
+# 3. **証跡なしの終端遷移**: ``pending`` → ``done``/``fired``/``superseded`` などで、当該
+#    エントリの diff ハンクに証跡参照(7〜40 桁 hex の SHA・``#\d+``・URL)が含まれない
+#    (現行運用は ``status: done # 2026-08-04 …(b4f21b6)`` のように YAML コメントで証跡を書く
+#    ため、パース後の値ではなく **diff の生テキスト**で判定する)
+#
+# 無音で通すもの: エントリの新規追加・証跡付きの終端遷移・期日の前倒し・コメントや ``what`` の
+# 文言変更・上記以外のフィールド変更。
+#
+# fail-closed: 変更前後いずれかの YAML がパース不能なら「検査できなかった件数」として開示する
+# (黙って緑にしない — A-18 の一貫原則)。ファイルの改名・削除そのものは所見。
+# ────────────────────────────────────────────────────────────────────────────
+
+REMINDERS_PATH = "ops/reminders.yaml"
+
+# 終端遷移とみなす status 語彙。``pending`` からこれらへ遷移するとき証跡を要求する。
+_REMINDER_TERMINAL_STATES: frozenset[str] = frozenset({"done", "fired", "superseded", "cancelled"})
+
+# 証跡参照のパターン(diff ハンクの生テキストで判定): 7〜40 桁の hex SHA / ``#<数字>`` の
+# PR・Issue 番号 / URL(http/https)。40 桁を超える連続 hex は SHA として扱わない。
+_REMINDER_EVIDENCE_RE = re.compile(
+    r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{7,40}(?![0-9A-Fa-f])|#\d+|https?://\S+"
+)
+
+
+@dataclass(frozen=True)
+class ReminderTamperScan:
+    """A-18-9 の集計。``findings`` は疑わしい変更、``unparseable`` は fail-closed 件数。"""
+
+    findings: list[dict[str, Any]] = field(default_factory=list)
+    checked: int = 0
+    unparseable: int = 0
+
+
+def _reminders_index(text: str) -> dict[str, dict[str, Any]] | None:
+    """YAML テキストをパースして id → エントリ dict の索引を返す(不能なら None)。
+
+    ``reminders`` キーが list でない・エントリが dict でない・id が無い場合は「読めない」と
+    みなして None を返す(fail-closed で unparseable にカウントされる)。
+    """
+    try:
+        doc = yaml.safe_load(text) if text else {}
+    except yaml.YAMLError:
+        return None
+    if doc is None:
+        return {}
+    if not isinstance(doc, dict):
+        return None
+    entries = doc.get("reminders")
+    if entries is None:
+        return {}
+    if not isinstance(entries, list):
+        return None
+    index: dict[str, dict[str, Any]] = {}
+    for e in entries:
+        if not isinstance(e, dict):
+            return None
+        rid = e.get("id")
+        if not isinstance(rid, str) or not rid:
+            return None
+        index[rid] = e
+    return index
+
+
+def _reminder_deadline(entry: dict[str, Any]) -> str | None:
+    """エントリの ``conditions[].date_after.date`` の最も遅い日付を返す(無ければ None)。"""
+    conds = entry.get("conditions")
+    if not isinstance(conds, list):
+        return None
+    dates: list[str] = []
+    for c in conds:
+        if not isinstance(c, dict):
+            continue
+        if c.get("type") != "date_after":
+            continue
+        d = c.get("date")
+        if isinstance(d, str) and d:
+            dates.append(d)
+    return max(dates) if dates else None
+
+
+_HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_ID_LINE_RE = re.compile(r"^\s*-\s*id:\s*([A-Za-z0-9_.\-]+)\s*(?:#.*)?$")
+
+
+def _entry_line_ranges(after_text: str) -> list[tuple[str, int, int]]:
+    """後方(変更後)の YAML テキストから ``(id, 開始行, 終了行)`` を行番号ベースで返す。
+
+    ``- id:`` 行の位置を境界に切る(YAML リスト要素の頭のみを拾う)。次の ``- id:`` に出会う
+    までを1エントリ範囲とし、行番号は 1-based。構造解析はここでは不要で、id 行の位置さえ
+    分かれば「変更後の N 行目はどのエントリに属するか」が引ける。
+    """
+    lines = after_text.splitlines()
+    id_positions: list[tuple[str, int]] = []
+    for i, line in enumerate(lines, 1):
+        m = _ID_LINE_RE.match(line)
+        if m:
+            id_positions.append((m.group(1), i))
+    ranges: list[tuple[str, int, int]] = []
+    for idx, (rid, start) in enumerate(id_positions):
+        end = id_positions[idx + 1][1] - 1 if idx + 1 < len(id_positions) else len(lines)
+        ranges.append((rid, start, end))
+    return ranges
+
+
+def _hunks_touching_entry(
+    diff_text: str, entry_id: str, ranges: list[tuple[str, int, int]]
+) -> str:
+    """diff の全ハンクのうち、**変更後**の行番号が ``entry_id`` の範囲に入るものを返す。
+
+    ハンクヘッダは ``@@ -a,b +c,d @@`` で c が変更後の開始行、d が行数。d 省略時は 1、
+    d=0 は削除(挿入位置直後を指す)。閉区間の重なり判定で「当該エントリに属するハンク」を拾う。
+    id 行がハンク内に現れない(``-U0`` で status 行だけが変わった)ケースも救う。
+    """
+    target = next((r for r in ranges if r[0] == entry_id), None)
+    if target is None:
+        return ""
+    _rid, entry_start, entry_end = target
+    hunks: list[list[str]] = []
+    current: list[str] = []
+    current_start: int | None = None
+    current_len: int | None = None
+
+    def flush() -> None:
+        if current_start is None or not current:
+            return
+        assert current_len is not None
+        h_end = current_start + max(current_len, 1) - 1
+        if current_start <= entry_end and h_end >= entry_start:
+            hunks.append(current[:])
+
+    for line in diff_text.splitlines():
+        m = _HUNK_HEADER_RE.match(line)
+        if m:
+            flush()
+            current = [line]
+            current_start = int(m.group(1))
+            current_len = int(m.group(2)) if m.group(2) is not None else 1
+        elif current:
+            current.append(line)
+    flush()
+    return "\n".join("\n".join(h) for h in hunks)
+
+
+def _entry_diff_text(
+    repo: str | Path,
+    sha: str,
+    parent: str,
+    path: str,
+    entry_id: str,
+    after_text: str,
+) -> str:
+    """コミットの diff から**当該エントリの範囲に重なるハンク**の生テキストを返す。
+
+    証跡(コメント内の SHA・PR 番号・URL)の判定は「本当にこの id のブロックに書かれているか」で
+    行う必要がある(別 id のコメントに書かれた SHA を流用して緑にする経路を塞ぐ)。id 行が
+    ``-U0`` のハンクに現れないケース(``status: pending`` の 1 行だけを書き換えた場合)は
+    ハンクヘッダの変更後行番号を後方テキストの id 行位置と突合して救う。
+    """
+    try:
+        raw = _git(repo, "diff", "-U0", parent, sha, "--", path)
+    except subprocess.CalledProcessError:
+        return ""
+    return _hunks_touching_entry(raw, entry_id, _entry_line_ranges(after_text))
+
+
+def _has_evidence(text: str) -> bool:
+    """diff ハンクの生テキストに証跡参照(SHA/PR/URL)が含まれるか。"""
+    return bool(_REMINDER_EVIDENCE_RE.search(text))
+
+
+def _parent_for(repo: str | Path, sha: str) -> str | None:
+    """マージは第1親、通常コミットは唯一の親を返す(親なし = ルートは None)。"""
+    parents = _git(repo, "log", "-1", "--format=%P", sha).split()
+    return parents[0] if parents else None
+
+
+def _read_blob(repo: str | Path, ref: str, path: str) -> str | None:
+    """``git show <ref>:<path>`` を返す(存在しなければ None)。"""
+    res = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{ref}:{path}"],
+        capture_output=True, text=True, check=False,
+    )
+    if res.returncode != 0:
+        return None
+    return res.stdout
+
+
+def check_reminder_tampering(
+    repo_path: str | Path,
+    *,
+    since_commit: str | None = RATIFICATION_COMMIT,
+    trailer: str = "Approved:",
+    path: str = REMINDERS_PATH,
+) -> ReminderTamperScan:
+    """A-18-9: ``ops/reminders.yaml`` の疑わしい変更を semantic tamper check として検出する。
+
+    **なぜ全体保護でなく semantic check か**(Issue #117 / A-12 是正 F-1・設計リード裁定 2026-08-04):
+    直近1週間の実測で全コミットの 35%(166/473)が本ファイルに触れていた。protected_areas への
+    全体登録は「1/3 の PR に独立審査 + 48h」を強いるため、リマインダー登録の逆インセンティブを
+    生む(登録するほど自分の PR が重くなる=登録が減る)。よって疑わしい変更だけを鳴らす。
+
+    対象: ``since_commit`` 以降で ``ops/reminders.yaml`` に触れた、``trailer`` の無いコミット。
+    承認済み変更(トレーラあり)は対象外。所見は次の3種:
+
+    1. ``status: pending`` エントリの期日の後ろ倒し(前倒しは対象外)
+    2. ``status: pending`` エントリの削除(id 改名も削除として鳴らす)
+    3. ``pending`` → 終端(``done``/``fired``/``superseded``/``cancelled``)遷移で、当該エントリの
+       diff ハンクの**生テキスト**に証跡参照(7〜40 桁 hex の SHA・``#\\d+``・URL)が含まれない
+
+    パース不能は ``unparseable`` として件数を開示する(黙って緑にしない — fail-closed)。
+    ファイルの改名・削除そのものは所見。マージコミットの反復は A-18-1 と同じで、``rev-list``
+    の全コミットを走査する(evil-merge の直接検査ではないため ``--first-parent`` に絞らない)。
+    """
+    repo = str(repo_path)
+    if since_commit and not _git_ok(repo, "cat-file", "-e", f"{since_commit}^{{commit}}"):
+        raise ValueError(f"A-18-9 の基準コミットがリポジトリに存在しない: {since_commit}")
+
+    commits = _rev_list(repo, since_commit)
+    findings: list[dict[str, Any]] = []
+    checked = 0
+    unparseable = 0
+    for sha in commits:
+        message = _git(repo, "log", "-1", "--format=%B", sha)
+        if has_approval_trailer(message, trailer):
+            continue  # 承認済み変更は対象外(トレーラの参照有効性は A-18-1 の担当)
+        parent = _parent_for(repo, sha)
+        if parent is None:
+            continue  # ルート(親なし)は before が存在しないため diff できない
+        # マージは第1親比較にする — first-parent が main で親2がブランチ。マージ自身の解消差分
+        # (evil merge)は A-18-1 の担当で、本検査は「main に持ち込まれた最終的な変化」を見る。
+        # ファイルが変わっていないコミットは無視(subprocess 削減)。
+        touched = _git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
+        if path not in touched.splitlines():
+            continue
+        checked += 1
+        before = _read_blob(repo, parent, path)
+        after = _read_blob(repo, sha, path)
+
+        subject = _git(repo, "log", "-1", "--format=%s", sha).strip()
+        # ファイルの改名・削除そのものは最も強い改変 → 所見。追加のみ(before=None)は無音で通す。
+        if after is None:
+            findings.append(
+                {
+                    "commit": sha[:12],
+                    "commit_full": sha,
+                    "subject": subject,
+                    "kind": "file_removed",
+                    "reason": f"リマインダー台帳 ({path}) が削除・改名された",
+                    "entry_id": None,
+                }
+            )
+            continue
+        if before is None:
+            continue  # 新規追加のみ
+
+        before_idx = _reminders_index(before)
+        after_idx = _reminders_index(after)
+        if before_idx is None or after_idx is None:
+            # fail-closed: パース不能でも「検査できなかった」として開示する(A-18 の一貫原則)。
+            unparseable += 1
+            findings.append(
+                {
+                    "commit": sha[:12],
+                    "commit_full": sha,
+                    "subject": subject,
+                    "kind": "unparseable",
+                    "reason": (
+                        f"変更前後いずれかの {path} が YAML としてパースできない"
+                        "(検査できなかった)"
+                    ),
+                    "entry_id": None,
+                }
+            )
+            continue
+
+        for rid, before_entry in before_idx.items():
+            before_status = str(before_entry.get("status") or "").strip().lower()
+            if before_status != "pending":
+                continue  # pending だったエントリのみ追跡する(他状態からの遷移は対象外)
+            after_entry = after_idx.get(rid)
+            if after_entry is None:
+                findings.append(
+                    {
+                        "commit": sha[:12],
+                        "commit_full": sha,
+                        "subject": subject,
+                        "kind": "pending_removed",
+                        "entry_id": rid,
+                        "reason": (
+                            f"pending エントリ `{rid}` が削除された"
+                            "(id 改名は削除+追加として扱う — 承認かエントリ内の経緯記載を要する)"
+                        ),
+                    }
+                )
+                continue
+            after_status = str(after_entry.get("status") or "").strip().lower()
+            # (1) 期日の後ろ倒し(pending のまま date が後ろに動いた)。
+            if after_status == "pending":
+                b_date = _reminder_deadline(before_entry)
+                a_date = _reminder_deadline(after_entry)
+                if b_date and a_date and a_date > b_date:
+                    findings.append(
+                        {
+                            "commit": sha[:12],
+                            "commit_full": sha,
+                            "subject": subject,
+                            "kind": "deadline_deferred",
+                            "entry_id": rid,
+                            "before": b_date,
+                            "after": a_date,
+                            "reason": (
+                                f"pending エントリ `{rid}` の期日を {b_date} → {a_date} へ"
+                                "後ろ倒し(前倒しは対象外)"
+                            ),
+                        }
+                    )
+                continue
+            # (3) 終端遷移: pending → done/fired/superseded/cancelled で証跡がない。
+            if after_status in _REMINDER_TERMINAL_STATES:
+                hunk = _entry_diff_text(repo, sha, parent, path, rid, after)
+                if not _has_evidence(hunk):
+                    findings.append(
+                        {
+                            "commit": sha[:12],
+                            "commit_full": sha,
+                            "subject": subject,
+                            "kind": "terminal_without_evidence",
+                            "entry_id": rid,
+                            "to_status": after_status,
+                            "reason": (
+                                f"pending エントリ `{rid}` を `{after_status}` に遷移させたが"
+                                "当該エントリの差分に証跡(SHA/PR/Issue/URL)が無い"
+                            ),
+                        }
+                    )
+    return ReminderTamperScan(findings=findings, checked=checked, unparseable=unparseable)
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # 本体・報告
 # ────────────────────────────────────────────────────────────────────────────
 def run_a18(
@@ -2379,6 +2746,11 @@ def run_a18(
     direct_pushes, fp_checked = check_direct_pushes(
         repo_path, since_commit=pr_since_commit, pr_verifier=pr_verifier
     )
+    reminder_scan = check_reminder_tampering(
+        repo_path,
+        since_commit=since_commit,
+        trailer=str(gov.get("approval_trailer") or "Approved:"),
+    )
     unnotified: list[dict[str, Any]] = []
     untracked_deemed = 0
     resolution_bypass: dict[str, Any] | None = None
@@ -2415,6 +2787,11 @@ def run_a18(
         "pr_since_commit": pr_since_commit,
         "checked_first_parent": fp_checked,
         "direct_pushes": direct_pushes,
+        # A-18-9: リマインダー台帳の疑わしい変更(A-12 是正 F-1 / Issue #117)。
+        # 承認済み変更・pending 以外・新規追加・前倒し・証跡付き遷移は無音で通す。
+        "reminder_tamper": reminder_scan.findings,
+        "reminder_tamper_checked": reminder_scan.checked,
+        "reminder_tamper_unparseable": reminder_scan.unparseable,
         "decision_refs_verified": conn is not None,
         "prs_verified": pr_verifier is not None,
         # PR 照合の成立/縮退の件数。縮退 > 0 の週は緑にしない(独立役員審査 重要-4:
@@ -2620,6 +2997,7 @@ def has_findings(result: dict[str, Any]) -> bool:
         or result.get("unrecorded_prs")
         or (result.get("resolution_bypass") or {}).get("alert")
         or result.get("reviewed_sha_mismatches")
+        or result.get("reminder_tamper")
         or vetoed_trailer_findings(result)
         or pr_verification_degraded(result)
     )
@@ -2764,6 +3142,42 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
                 "inline": False,
             }
         )
+
+    # A-18-9: リマインダー台帳の疑わしい変更(A-12 是正 F-1 / Issue #117)。0 件でも1行載せる
+    # (A-18-5/6/7 と同じ流儀 — 沈黙を「見ていない」と区別できるようにする)。
+    reminder_findings = result.get("reminder_tamper") or []
+    reminder_checked = result.get("reminder_tamper_checked") or 0
+    reminder_unparseable = result.get("reminder_tamper_unparseable") or 0
+    unparseable_suffix = (
+        f"(パース不能 {reminder_unparseable} 件 — 検査できず)"
+        if reminder_unparseable else ""
+    )
+    if reminder_findings:
+        lines = [
+            f"- `{f['commit']}` {f['subject']}({f['reason']})"
+            for f in reminder_findings
+        ]
+        fields.append(
+            {
+                "name": (
+                    f"⚠️ A-18-9 リマインダー台帳の改変 {len(reminder_findings)} 件"
+                    f"{unparseable_suffix}(ops/reminders.yaml の pending 遷移・期日変更)"
+                ),
+                "value": "\n".join(lines)[:1024],
+                "inline": False,
+            }
+        )
+    else:
+        fields.append(
+            {
+                "name": "A-18-9 リマインダー台帳の改変検査",
+                "value": (
+                    f"✅ 疑わしい変更なし(検査 {reminder_checked} コミット){unparseable_suffix}"
+                ),
+                "inline": False,
+            }
+        )
+
     unnotified = result.get("unnotified_deemed") or []
     if unnotified:
         lines = [
@@ -3131,6 +3545,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
     bypass = result.get("resolution_bypass")
     if bypass and bypass["alert"]:
         print(f"[決議の批判経由] {bypass['line']}", file=sys.stderr)
+    for f in result.get("reminder_tamper") or []:
+        print(f"[台帳改変] {f['commit']} {f['subject']}: {f['reason']}", file=sys.stderr)
     print(
         f"A-18 完了(検査 {result['checked_commits']} コミット, 違反 {len(result['violations'])}, "
         f"PR 承継 {len(result.get('inherited') or [])}, "
@@ -3139,7 +3555,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - CLI 実行
         f"直push {len(result['direct_pushes'])}, "
         f"通知なき発効 {len(result.get('unnotified_deemed', []))}, "
         f"承認記録漏れ {len(result.get('unrecorded_prs') or [])}, "
-        f"批判を経ない決議 {(result.get('resolution_bypass') or {}).get('bypassed', '未照合')})",
+        f"批判を経ない決議 {(result.get('resolution_bypass') or {}).get('bypassed', '未照合')}, "
+        f"台帳改変 {len(result.get('reminder_tamper') or [])})",
         file=sys.stderr,
     )
     return 1 if has_findings(result) else 0
