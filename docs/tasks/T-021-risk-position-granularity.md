@@ -52,7 +52,8 @@ class RiskPosition:
 
 ### 4. `engine.es95` — ネットゼロの後処理
 
-- weights 集計後、**ネット結果が 0 の銘柄を weights から落とす**(現行は行単位の `pos.value != 0` ガードのみで、合算後ゼロが `included`/除外判定・共通観測日の計算に混入し得る)
+- 銘柄合算は **Decimal 段で行い、合算後に float 化**する: instrument_id ごとに `Decimal` の value を符号付きで合算 → 合算結果が 0 の銘柄を落とす → 残りを `float(v / nav)` で weights に変換
+- float 加算で合算してはならない。同一銘柄3行以上(4ポッド構成で到達可能)のネットゼロは float では残差 ~1e-16 が残り、偽の判定保留(no_common_days)を招く(独立役員審査 2026-08-04 条件1で実測 — 乱択20万試行中23.5%で再現)
 - それ以外のロジックは変更しない
 
 ## テスト(tests/risk/)

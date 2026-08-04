@@ -273,17 +273,22 @@ def es95(
     if nav <= 0:
         return ESResult(None, None, 0.0, 0)
     # 銘柄単位でネット(行=fm×instrument 入力を許容 — A-12 F-6・T-021)。ES は同一銘柄の
-    # 逆ポジション P&L が厳密に相殺するため、weights は符号付き加算のまま。
-    weights: dict[int, float] = {}
+    # 逆ポジション P&L が厳密に相殺するため、符号付き合算でネットする。
+    # 合算は **Decimal 段**で行い、ネット後に float 化する(独立役員審査 2026-08-04
+    # 条件1): 行ごとに float 化してから加算すると同一銘柄3行以上のネットゼロが
+    # 丸め残差(~1e-16)で消えず、偽の判定保留(no_common_days)を招く。
+    signed: dict[int, Decimal] = {}
     for pos in positions:
         if pos.value != 0:
-            weights[pos.instrument_id] = weights.get(pos.instrument_id, 0.0) + float(
-                pos.value / nav
+            signed[pos.instrument_id] = (
+                signed.get(pos.instrument_id, Decimal(0)) + pos.value
             )
     # ネット後に厳密ゼロになった銘柄は落とす(両建てが `included` や共通観測日の計算に
-    # 混入して余計に判定保留を招くのを防ぐ — T-021)。行単位の pos.value != 0 ガードだけ
-    # では合算後ゼロを掬えなかった。
-    weights = {i: w for i, w in weights.items() if w != 0.0}
+    # 混入して余計に判定保留を招くのを防ぐ — T-021)。Decimal 同士の合算なので
+    # ゼロ判定は厳密に決まる。
+    weights: dict[int, float] = {
+        i: float(v / nav) for i, v in signed.items() if v != 0
+    }
     if not weights:
         return ESResult(None, None, 0.0, 0)
 

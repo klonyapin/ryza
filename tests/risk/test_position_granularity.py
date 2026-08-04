@@ -107,6 +107,32 @@ def test_es95_drops_net_zero_instrument_after_weight_aggregation():
     assert not result.deferred
 
 
+def test_es95_three_row_net_zero_is_dropped_without_float_residual():
+    """3行ネットゼロ(4ポッド構成で到達可能)でも weights から確実に落ちる。
+
+    独立役員審査 2026-08-04 条件1: float 段で合算すると weights が
+    0.1 + 0.2 − 0.3 = 5.55e-17 型の残差を残し、ネットゼロ銘柄が included に
+    生き残って偽の判定保留(no_common_days)を招く(乱択20万試行中23.5%で再現)。
+    Decimal 段で銘柄合算→float 化すること(T-021 §4)。値は nav=10M に対して
+    weights がちょうど 0.1 / 0.2 / −0.3 になるよう選び、残差を決定的に再現する。
+    """
+    nav = Decimal(10_000_000)
+    positions = [
+        RiskPosition(1, "equity_jp", Decimal(1_000_000), fm="ben"),   # w=0.1
+        RiskPosition(1, "equity_jp", Decimal(2_000_000), fm="jim"),   # w=0.2
+        RiskPosition(1, "equity_jp", Decimal(-3_000_000), fm="pam"),  # w=-0.3
+        RiskPosition(2, "equity_us", Decimal(5_000_000), fm="ben"),
+    ]
+    # 銘柄 1 と 2 は観測日が交わらない。銘柄 1 が weights に残ると
+    # common_days が空になり no_common_days で保留してしまう。
+    rets = _returns_map(1, [0.0] * 30, start=date(2029, 1, 1))
+    rets.update(_returns_map(2, [0.0] * 30, start=date(2029, 6, 1)))
+    result = es95(positions, nav, rets, min_obs=20)
+    assert 1 not in result.excluded
+    assert result.n_obs == 30
+    assert not result.deferred
+
+
 def test_es95_all_positions_net_to_zero_returns_flat_zero():
     """全銘柄が両建てで消えるとポジション無しと同じ(判定保留にしない)。"""
     positions = [
