@@ -6,8 +6,9 @@
 2. 各リマインダーの conditions(OR)を評価し、``only_if``(AND ゲート)も満たせば action を発火
 3. 発火後は reminders.yaml の status を ``"fired: <ISO日付>"`` に更新し contents API でコミット
 4. 直近7日の commits / Issue 状態を集計し「週次ダイジェスト」Issue にコメント
-5. 冪等: 既発火(status が fired)はスキップ、当週ダイジェストは二重投稿しない
+5. 冪等: 終端 status(``fired: <日付>`` / ``done``)はスキップ、当週ダイジェストは二重投稿しない
 6. DRY_RUN=1 で書き込みせずログのみ
+6-2. 耐障害: 1エントリの失敗はループを止めず、件数と id を週次ダイジェストに載せる
 7. 形骸化の監査(決議精緻化審査 2026-08-03 の裁定による新設統制。05-governance §6-5 の
    趣旨に連なる): 批判を経ない決議の直近件数・連続数を1行載せる。**本番の判定主体は
    A-18(A-18-6)**であり、本ジョブ(Cloud Run Job)は DB に届かないため既定では
@@ -16,6 +17,11 @@
 
 条件エバリュエータ(reminders.yaml v2):
   date_after / issue_label_open / task_file_glob / bq_table_missing
+
+アクション(reminders.yaml v2):
+  issue_comment / issue_create / notify
+  notify は ``channel`` 宛の通知だが、本ジョブは Discord へ届かない(``_deliver_notify``
+  の docstring 参照)ため、週次ダイジェスト Issue のコメントとして宛先込みで配送する。
 
 環境変数:
   GITHUB_TOKEN  fine-grained PAT(DRY_RUN=1 以外では必須)
@@ -32,6 +38,7 @@ import os
 import posixpath
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -45,6 +52,13 @@ REMINDERS_PATH = "ops/reminders.yaml"
 DIGEST_LABEL = "digest"
 DIGEST_TITLE = "週次ダイジェスト"
 CO_AUTHOR = "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+
+# 発火対象から外す status(前方一致)。``fired: <日付>`` は本ジョブが書き、``done`` は
+# 人手で完了を記録したもの。reminders.yaml v2 に現れる終端 status はこの2種のみ。
+TERMINAL_STATUS_PREFIXES = ("fired", "done")
+
+# notify の channel 省略時の宛先(reminders.yaml の実在エントリはいずれも「運営」)。
+NOTIFY_CHANNEL_DEFAULT = "運営"
 
 # bq_table_missing(project, dataset, table|None) -> missing か
 BqChecker = Callable[[str, str, "str | None"], bool]
@@ -111,6 +125,21 @@ def evaluate_conditions(
 # ────────────────────────────────────────────────────────────────────────────
 # アクション実行
 # ────────────────────────────────────────────────────────────────────────────
+def build_notify_body(action: dict[str, Any]) -> str:
+    """``type: notify`` を GitHub コメント本文へ整形する。
+
+    ops/reminders.yaml の様式に合わせる(実在エントリ ``dashboard-iap-oauth-client`` /
+    ``ops-weekly-bq-acl-verify`` はいずれも ``channel`` と ``body`` のみを持つ)。
+    ``title`` は様式上任意で、あれば見出しに載せる。
+    """
+    channel = action.get("channel") or NOTIFY_CHANNEL_DEFAULT
+    head = f"### 🔔 通知(#{channel} 宛)"
+    title = action.get("title")
+    if title:
+        head = f"{head}: {title}"
+    return f"{head}\n\n{action.get('body', '')}"
+
+
 def execute_action(action: dict[str, Any], client: GitHubClient) -> None:
     """action を実行する(書き込み抑止は client 側の dry_run が担う)。"""
     atype = action.get("type")
@@ -118,8 +147,28 @@ def execute_action(action: dict[str, Any], client: GitHubClient) -> None:
         client.create_issue_comment(action["issue"], action["body"])
     elif atype == "issue_create":
         client.create_issue(action["title"], action.get("body", ""), action.get("labels"))
+    elif atype == "notify":
+        _deliver_notify(action, client)
     else:
         raise ValueError(f"未知の action type: {atype}")
+
+
+def _deliver_notify(action: dict[str, Any], client: GitHubClient) -> None:
+    """notify をダイジェスト Issue へのコメントとして配送する。
+
+    **配送先の選択理由**: reminders.yaml の notify は ``channel: 運営``(Discord)を
+    指すが、本ジョブ(Cloud Run Job)は GitHub Contents/Issues API しか持たない —
+    Discord への配送経路(``press.outbox``)は VM 内 PostgreSQL を要し、本ジョブの
+    実行環境(``ops/deploy-ops-weekly.sh`` が渡す env は GITHUB_REPO と GITHUB_TOKEN
+    のみ)からは届かない。そこで**本ジョブが既に持つ唯一の通知経路**=週次ダイジェスト
+    Issue へのコメントに載せ、宛先チャンネルを本文に明記する(代表が月曜に読む場所と
+    同じ)。Discord へ直接届けるには実行基盤の移設が要るため、それは本修正の範囲外。
+    """
+    issue = find_or_create_digest_issue(client)
+    if issue is None:  # DRY_RUN でダイジェスト Issue が未作成のとき
+        log.info("[DRY_RUN] notify 配送スキップ(ダイジェスト Issue 未作成)")
+        return
+    client.create_issue_comment(issue["number"], build_notify_body(action))
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -154,8 +203,31 @@ def set_reminder_status(text: str, reminder_id: str, status_value: str) -> str:
 # ────────────────────────────────────────────────────────────────────────────
 # リマインダー発火
 # ────────────────────────────────────────────────────────────────────────────
-def _is_fired(status: Any) -> bool:
-    return str(status or "").startswith("fired")
+def _is_terminal(status: Any) -> bool:
+    """終端 status(発火対象から外す)か。
+
+    ``fired: <日付>`` は本ジョブが発火時に書く status。``done`` は人手で完了を記録した
+    エントリで、reminders.yaml の過半を占める(2026-08-04 時点で 94 件中 53 件)。
+    done を除外しないと、完了済みエントリの conditions(多くは過去日の ``date_after``)が
+    真になった週に誤発火し、済んだ作業の Issue が量産される。
+
+    後続の日付・注記(``fired: 2026-08-02`` / ``done`` + 行末コメント)を許すため
+    前方一致で判定する。
+    """
+    return str(status or "").startswith(TERMINAL_STATUS_PREFIXES)
+
+
+@dataclass(frozen=True)
+class FireOutcome:
+    """発火結果。``fired`` は発火した id、``failures`` は ``(id, エラー要約)``。
+
+    実行に失敗したエントリの status は据え置く(翌週に再試行される)。ただし action は
+    成功したが status のコミットに失敗した場合は **両方に載る** — 発火した事実と
+    「記録できていない=翌週再発火しうる」事実の双方を隠さないため。
+    """
+
+    fired: list[str]
+    failures: list[tuple[str, str]]
 
 
 def fire_reminders(
@@ -167,44 +239,53 @@ def fire_reminders(
     *,
     bq_checker: BqChecker,
     reminders_path: str = REMINDERS_PATH,
-) -> list[str]:
-    """条件を満たす未発火リマインダーを発火し、発火した id 一覧を返す。
+) -> FireOutcome:
+    """条件を満たす未発火リマインダーを発火し、発火 id と失敗を返す。
 
     発火ごとに reminders.yaml の status を更新して contents API でコミットする
     (メッセージ: ``chore(ops): reminder <id> fired`` + Co-Authored-By 行)。
     DRY_RUN 時は action もコミットも実行されない(client / 本関数の両方でガード)。
+
+    **1件の失敗はループを止めない**(エントリ単位の try/except): 未知 action type や
+    GitHub API の一時失敗で例外が上がると、以降の全リマインダーが処理されなくなる。
+    失敗は黙殺せず ``FireOutcome.failures`` に積み、週次ダイジェストに件数と id を出す。
     """
     fired: list[str] = []
+    failures: list[tuple[str, str]] = []
     current_text, current_sha = reminders_text, sha
     for r in doc.get("reminders", []):
         rid = r.get("id")
-        if _is_fired(r.get("status")):
-            continue  # 冪等性: 既発火はスキップ(二重発火しない)
-        if not evaluate_conditions(r["conditions"], client, now, bq_checker=bq_checker):
-            continue
-        only_if = r.get("action", {}).get("only_if")
-        if only_if and not evaluate_condition(only_if, client, now, bq_checker=bq_checker):
-            continue
+        if _is_terminal(r.get("status")):
+            continue  # 冪等性: 既発火・完了済みはスキップ(二重発火しない)
+        try:
+            if not evaluate_conditions(r["conditions"], client, now, bq_checker=bq_checker):
+                continue
+            only_if = r.get("action", {}).get("only_if")
+            if only_if and not evaluate_condition(only_if, client, now, bq_checker=bq_checker):
+                continue
 
-        log.info("リマインダー発火: %s", rid)
-        execute_action(r["action"], client)
-        fired.append(rid)
+            log.info("リマインダー発火: %s", rid)
+            execute_action(r["action"], client)
+            fired.append(rid)
 
-        current_text = set_reminder_status(
-            current_text, rid, f'"fired: {now.date().isoformat()}"'
-        )
-        if client.dry_run:
-            log.info("[DRY_RUN] reminders.yaml status 更新スキップ: %s", rid)
-            continue
-        resp = client.update_file(
-            reminders_path,
-            current_text,
-            f"chore(ops): reminder {rid} fired\n\n{CO_AUTHOR}",
-            current_sha,
-        )
-        if resp and isinstance(resp.get("content"), dict):
-            current_sha = resp["content"].get("sha", current_sha)
-    return fired
+            current_text = set_reminder_status(
+                current_text, rid, f'"fired: {now.date().isoformat()}"'
+            )
+            if client.dry_run:
+                log.info("[DRY_RUN] reminders.yaml status 更新スキップ: %s", rid)
+                continue
+            resp = client.update_file(
+                reminders_path,
+                current_text,
+                f"chore(ops): reminder {rid} fired\n\n{CO_AUTHOR}",
+                current_sha,
+            )
+            if resp and isinstance(resp.get("content"), dict):
+                current_sha = resp["content"].get("sha", current_sha)
+        except Exception as exc:  # noqa: BLE001 - 1件の失敗で週次処理全体を止めない
+            log.exception("リマインダーの処理に失敗(後続は継続): %s", rid)
+            failures.append((str(rid), f"{type(exc).__name__}: {exc}"))
+    return FireOutcome(fired=fired, failures=failures)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -258,6 +339,18 @@ A18_STATUS_UNWIRED = "スキップ(A18_REPO_PATH 未配線)"
 RESOLUTION_STATUS_DELEGATED = "A-18-6(週次監査・#運営)で報告 — 本ジョブでは判定しない"
 
 
+def build_failure_line(failures: list[tuple[str, str]] | None) -> str:
+    """失敗したリマインダーの1行。**失敗ゼロでも必ず出す**(沈黙を多義的にしない)。
+
+    A-18 行・決議行と同じ流儀。「失敗が無い」と「そもそも処理されていない」を同じ
+    無表示にしないため、件数と id・エラー要約を毎週載せる。
+    """
+    if not failures:
+        return "### 失敗したリマインダー: なし"
+    detail = " / ".join(f"{rid}: {err}" for rid, err in failures)
+    return f"### ⚠ 失敗したリマインダー: {len(failures)} 件 — {detail}"
+
+
 def build_digest(
     client: GitHubClient,
     now: datetime,
@@ -265,6 +358,7 @@ def build_digest(
     marker: str,
     a18_status: str = A18_STATUS_UNWIRED,
     resolution_status: str = RESOLUTION_STATUS_DELEGATED,
+    failures: list[tuple[str, str]] | None = None,
 ) -> str:
     """ダイジェスト本文(Markdown)を組み立てる。先頭に当週マーカーを埋める(冪等判定用)。"""
     since = (now - timedelta(days=7)).isoformat()
@@ -286,6 +380,9 @@ def build_digest(
     lines.append("")
     lines.append(f"### 発火したリマインダー: {', '.join(fired) if fired else 'なし'}")
     lines.append("")
+    # 実行に失敗したリマインダー(1件の失敗でループを止めない代わりに必ず可視化する)。
+    lines.append(build_failure_line(failures))
+    lines.append("")
     # A-18 監査の実行状態(実行/スキップ(未配線)/失敗)は必ず明記する(独立役員審査条件)。
     lines.append(f"### A-18 監査: {a18_status}")
     lines.append("")
@@ -301,6 +398,7 @@ def post_digest(
     fired: list[str],
     a18_status: str = A18_STATUS_UNWIRED,
     resolution_status: str = RESOLUTION_STATUS_DELEGATED,
+    failures: list[tuple[str, str]] | None = None,
 ) -> bool:
     """当週ダイジェストを投稿する。既に当週分があれば投稿しない(冪等)。投稿したら True。"""
     week = iso_week(now)
@@ -313,7 +411,7 @@ def post_digest(
         if marker in (c.get("body") or ""):
             log.info("当週ダイジェストは投稿済み: %s", week)
             return False
-    body = build_digest(client, now, fired, marker, a18_status, resolution_status)
+    body = build_digest(client, now, fired, marker, a18_status, resolution_status, failures)
     client.create_issue_comment(issue["number"], body)
     return True
 
@@ -329,17 +427,19 @@ def run_weekly(
     reminders_path: str = REMINDERS_PATH,
     a18_status: str = A18_STATUS_UNWIRED,
     resolution_status: str = RESOLUTION_STATUS_DELEGATED,
-) -> list[str]:
-    """週次ジョブ本体。発火したリマインダー id 一覧を返す。"""
+) -> FireOutcome:
+    """週次ジョブ本体。発火したリマインダー id と失敗を返す。"""
     now = now or datetime.now(UTC)
     reminders_text, sha = client.get_file(reminders_path)
     doc = yaml.safe_load(reminders_text) or {}
-    fired = fire_reminders(
+    outcome = fire_reminders(
         client, doc, reminders_text, sha, now,
         bq_checker=bq_checker, reminders_path=reminders_path,
     )
-    post_digest(client, now, fired, a18_status, resolution_status)
-    return fired
+    post_digest(
+        client, now, outcome.fired, a18_status, resolution_status, outcome.failures
+    )
+    return outcome
 
 
 def main() -> None:
@@ -359,10 +459,13 @@ def main() -> None:
     # A-18 はダイジェストより先に実行し、実行状態をダイジェストに必ず1行載せる。
     a18_status = run_a18_if_configured(dry_run=dry_run)
     resolution_status = resolution_audit_status()
-    fired = run_weekly(client, a18_status=a18_status, resolution_status=resolution_status)
+    outcome = run_weekly(client, a18_status=a18_status, resolution_status=resolution_status)
     log.info(
-        "ops-weekly 完了。発火: %s / A-18: %s / 決議の批判経由: %s",
-        fired or "なし", a18_status, resolution_status,
+        "ops-weekly 完了。発火: %s / 失敗: %s / A-18: %s / 決議の批判経由: %s",
+        outcome.fired or "なし",
+        [rid for rid, _ in outcome.failures] or "なし",
+        a18_status,
+        resolution_status,
     )
 
 
