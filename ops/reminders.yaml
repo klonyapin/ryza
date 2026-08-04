@@ -204,7 +204,19 @@ reminders:
       type: issue_create
       title: "reviewed_sha を独立審査エージェントの出力から記録する(起票者の申告をやめる)"
       labels: [impl]
-      body: "decision-reviewed-sha は照合先(migrations/0029 の `governance.decisions.reviewed_sha` / `review_ref`)と突合(A-18-8)まで実装したが、**値の書き手は依然として発効を起票した設計リードである**。`--deemed-for-pr` が gh から head SHA を取るのは手入力の排除であって、審査主体の証言ではない —— 起票者がトレーラと記録の両方に同じ嘘を書けば A-18-8 は一致で通る。したがって現状の統制は『片側だけの改変・取り違えの検出』であり、『独立審査が実際にその SHA を見たことの証明』ではない。実装内容: ①独立審査エージェント(プロンプト分離で走る審査ジョブ)が意見書を出すときに、審査対象コミット SHA を機械可読な形(docs/reviews の front matter か専用テーブル)で出力する、②`--deemed-for-pr` / `announce_deemed_approval` はその出力を読んで `reviewed_sha` / `review_ref` を埋め、**起票者が渡した値と食い違えば発効を止める**(ここは fail-safe にできる — 起票者の申告ではなく審査側の記録が正になるため)、③A-18-8 を『審査記録に由来する reviewed_sha の割合』の開示に拡張する。判断材料: 発火時点の A-18 報告で `compared_reviewed_shas` と `trailer_only_reviewed` の推移(突合が実際に働いている件数)を確認すること。前提: 審査エージェントの実行が現状ワークツリー内の手動起動であるため、②の自動化には審査ジョブの成果物置き場の確定が要る。出典: docs/reviews/g-a18-protect-independent-review.md 重要-3、ops/reminders.yaml decision-reviewed-sha の完了注記。"
+      body: "decision-reviewed-sha は照合先(migrations/0029 の `governance.decisions.reviewed_sha` / `review_ref`)と突合(A-18-8)まで実装したが、**値の書き手は依然として発効を起票した設計リードである**。`--deemed-for-pr` が gh から head SHA を取るのは手入力の排除であって、審査主体の証言ではない —— 起票者がトレーラと記録の両方に同じ嘘を書けば A-18-8 は一致で通る。したがって現状の統制は『片側だけの改変・取り違えの検出』であり、『独立審査が実際にその SHA を見たことの証明』ではない。実装内容: ①独立審査エージェント(プロンプト分離で走る審査ジョブ)が意見書を出すときに、審査対象コミット SHA を機械可読な形(docs/reviews の front matter か専用テーブル)で出力する、②`--deemed-for-pr` / `announce_deemed_approval` はその出力を読んで `reviewed_sha` / `review_ref` を埋め、**起票者が渡した値と食い違えば発効を止める**(ここは fail-safe にできる — 起票者の申告ではなく審査側の記録が正になるため)、③A-18-8 を『審査記録に由来する reviewed_sha の割合』の開示に拡張する。判断材料: 発火時点の A-18 報告で `compared_reviewed_shas` と `trailer_only_reviewed` の推移(突合が実際に働いている件数)を確認すること。前提: 審査エージェントの実行が現状ワークツリー内の手動起動であるため、②の自動化には審査ジョブの成果物置き場の確定が要る。出典: docs/reviews/g-a18-protect-independent-review.md 重要-3、ops/reminders.yaml decision-reviewed-sha の完了注記。(完了 2026-08-04 — 期限 2026-09-01 を前倒し。①意見書の新様式(先頭の YAML front matter: `reviewed_sha`(40桁hex)・`review_date`・`verdict`)を確定し、パーサ `src/ryza/reviews.py` を新設。仕様は docs/design/07-development.md §3-1 に追記。**既存の意見書は遡及改変せず**、front matter 無し = 旧様式として従来動作に落とす(過去の審査に後から front matter を足せると『審査側の記録』が起票者の申告と区別できなくなるため)。②`decisions` CLI(`--deemed` / `--deemed-for-pr`)は `--review` がリポジトリ内の新様式意見書を指す場合に `reviewed_sha` を**審査側の記録から採用**し、起票者の `--reviewed-sha` と食い違えば `ReviewedShaConflictError` で**発効を中止**(fail-safe・exit 1)。**PR の head SHA との相違は中止しない**(注記のみ)—— 意見書のコミット自身が head を進めるため審査対象 SHA と head は通常一致せず、ここを致命にすると front matter を書いた PR が軒並み発効不能になる。front matter の様式不備(閉じフェンス欠落・YAML 破損・短縮 SHA)は『旧様式』に読み替えず中止する(壊すことが回避策にならないように)。由来ラベル(`review_artifact` / `argument` / `pr_head`)を meta.runs の params に記録。③A-18-8 に `from_review_artifact`(突合済みのうち、決定の `review_ref` が指す意見書の front matter が同じ SHA を宣言している件数)を追加し、embed の A-18-8 行に『うち審査記録由来 N 件』として分母と同じ行に出す+注記で『残りは起票者が両側に書いた申告どうしの一致であり証明ではない』を開示。**残る限界**: 意見書はリポジトリ内の平文で審査エージェントの署名は無く、起票者が front matter を書き換える・消す・front matter の無いファイルを `--review` に指す経路は残る。したがって本実装が足すのは『食い違えば止まる』ことと『由来の割合が毎週見える』ことであり、署名(審査エージェントの鍵)は将来課題。②の前提だった『審査ジョブの成果物置き場の確定』は docs/reviews + front matter という形で確定した)"
+    status: done # 2026-08-04 ①②③ 実装。署名(審査主体の暗号的証明)は未達 — 残る限界を body に記載
+
+  - id: reviews-parser-protect
+    what: "`src/ryza/reviews.py`(意見書 front matter パーサ)を protected_areas に登録するか判断する"
+    conditions:
+      - type: date_after
+        date: "2026-08-18"
+    action:
+      type: issue_create
+      title: "src/ryza/reviews.py の保護領域登録の要否(発効 fail-safe の判定コード)"
+      labels: [governance]
+      body: "2026-08-04 に新設した `src/ryza/reviews.py` は、みなし承認 CLI が『審査側の記録と起票者の申告が食い違うか』を判定する経路そのものである(食い違えば発効を中止)。パーサを緩めれば fail-safe は黙って無効化でき、統制上は `src/ryza/governance/**`(governance_engine)と同格に見える。一方で本モジュールは判定を持たない読み取り専用のパーサであり、保護領域を増やすと承認手続の対象が広がる(定款第5条の運用コスト)。判断材料: ①本パーサの変更が実際に発効可否を変えうる範囲(現状は例外を投げるか否かの2択)、②`config/universe/**` を『マンデート変更と同格』として登録した先例(t017-fm-agents 審査 C-24)との整合、③A-18-8 の `from_review_artifact` が実運用で機能しているか(件数 > 0 か)。登録する場合は config/governance.yaml の変更であり、独立役員審査+みなし承認の L1 手続を要する。"
     status: pending
 
   - id: reviewed-sha-mismatch-fail-safe

@@ -48,9 +48,13 @@
                           なので、片側だけの改変・取り違えは不一致として出る。**不一致のとき
                           A-18-1 の承継範囲は記録側を採用する**(:func:`resolve_reviewed_scope`
                           — 記録側は発効通知の時点に固定され追記オンリーで改変困難)。
-                          **証明ではない** — どちらも起票者の申告であり審査エージェント自身の
-                          署名は無い(同じ嘘を両方に書けば一致する)。件数は決定単位で数え、
-                          緑には必ず分母(突合できた決定数)を出す。片側しか無い決定の件数
+                          **由来のない一致は証明ではない** — どちらも起票者の申告であり
+                          審査エージェント自身の署名は無い(同じ嘘を両方に書けば一致する)。
+                          そこで突合済みのうち**審査記録(意見書 front matter —
+                          :mod:`ryza.reviews`)に由来する件数**(``from_review_artifact``)を
+                          分子として毎回出し、緑の意味を割合で限定する。
+                          件数は決定単位で数え、緑には必ず分母(突合できた決定数)を出す。
+                          片側しか無い決定の件数
                           (``trailer_only`` / ``record_only``)も開示する —— 特に後者は
                           ``reviewed=`` を落とすだけで承継が無制限に戻り本検査が無音になる
                           経路である。不一致は訂正不能なので ``acknowledged_findings``
@@ -223,7 +227,8 @@ STANDARD_DISCLOSURES: tuple[str, ...] = (
     "限定され、無ければ PR マージ時点のブランチ全体に及ぶ(v1 経過措置 — 件数を開示する)",
     "A-18-8 の一致は「トレーラと承認記録という2つの申告が食い違っていない」ことのみを意味する。"
     "どちらも発効を起票した側が書く値であり、審査エージェント自身の署名は無い"
-    "(同じ値を両方に書けば一致する)",
+    "(同じ値を両方に書けば一致する)。審査記録(意見書 front matter)に由来する件数だけが"
+    "独立審査の裏付けを持つため、突合件数と併せて毎回開示する",
     "承継範囲は、トレーラと承認記録の双方に SHA があり食い違う場合に**記録側**を採用する"
     "(記録側は発効通知の時点で固定・追記オンリー)。記録側のみ・トレーラ側のみの決定は"
     "従来どおりで、件数を注記に開示する",
@@ -2032,6 +2037,13 @@ class ReviewedShaScan:
     compared: int
     trailer_only: int
     record_only: int = 0
+    #: ``compared`` のうち、記録側 ``reviewed_sha`` が**審査記録に由来する**決定数。
+    #: 決定の ``review_ref`` が指す意見書(``docs/reviews/*.md``)の front matter が同じ
+    #: ``reviewed_sha`` を宣言している場合に数える(:mod:`ryza.reviews`)。
+    #: **これが本検査の意味を決める分子である**: 由来のない一致は「起票者が書いた2つの値が
+    #: 揃っている」ことしか意味せず、由来のある一致だけが「独立審査が実際にその SHA を見た」
+    #: という主張の裏付けを持つ(reminders ``reviewed-sha-from-review-agent`` ③)。
+    from_review_artifact: int = 0
 
 
 def _log_messages(repo: str | Path, since: str | None) -> list[tuple[str, str]]:
@@ -2081,10 +2093,19 @@ def check_reviewed_sha_agreement(
     所見も 1 件にまとめて ``commits`` に列挙する。ただし**同一決定に別々の SHA を申告する
     コミットがある**場合は申告値ごとに別の所見にする(食い違いの種類が違うため)。
 
-    **限界の開示**: 一致は「2つの申告が食い違っていない」ことしか意味しない。どちらの値も
-    発効を起票した側が書くため、**審査エージェント自身の署名は無く**、同じ値を両方に書けば
-    一致する。本検査が捕まえるのは片側だけの改変・取り違え(別 PR の SHA の複写、マージ後に
-    トレーラだけ書き換えた履歴、承認記録と無関係な SHA の申告)である。
+    **由来の開示**(``from_review_artifact`` — reminders ``reviewed-sha-from-review-agent``):
+    突合できた決定のうち、記録側の値が**審査記録(意見書の front matter)に由来する**件数を
+    数える。決定の ``review_ref`` がリポジトリ内の意見書を指し、その front matter の
+    ``reviewed_sha`` が記録側と一致する場合だけ分子に入る。一致件数だけでは「起票者が書いた
+    2つの値が揃っている」のか「独立審査の記録に裏打ちされている」のかを読み分けられないため、
+    緑の意味を割合で限定する。
+
+    **限界の開示**: 由来のない一致は「2つの申告が食い違っていない」ことしか意味しない。
+    どちらの値も発効を起票した側が書くため、**審査エージェント自身の署名は無く**、同じ値を
+    両方に書けば一致する。本検査が捕まえるのは片側だけの改変・取り違え(別 PR の SHA の複写、
+    マージ後にトレーラだけ書き換えた履歴、承認記録と無関係な SHA の申告)である。由来判定も
+    平文のリポジトリ内ファイルに対する照合であり、front matter 自体の改変は検出できない
+    —— 検出できるのは「由来のある一致がどれだけ増えたか」という**割合の推移**である。
     """
     repo = str(repo_path)
     if since_commit and not _git_ok(repo, "cat-file", "-e", f"{since_commit}^{{commit}}"):
@@ -2095,6 +2116,7 @@ def check_reviewed_sha_agreement(
     compared_ids: set[Any] = set()
     trailer_only_ids: set[Any] = set()
     record_only_ids: set[Any] = set()
+    artifact_ids: set[Any] = set()
     mismatches: dict[tuple[Any, str], dict[str, Any]] = {}
     for sha, message in _log_messages(repo, since_commit):
         for line in approval_trailers(message, trailer):
@@ -2117,7 +2139,10 @@ def check_reviewed_sha_agreement(
             if not recorded:
                 trailer_only_ids.add(decision_id)
                 continue
-            compared_ids.add(decision_id)
+            if decision_id not in compared_ids:
+                compared_ids.add(decision_id)
+                if _review_artifact_sha(repo, row.get("review_ref")) == recorded:
+                    artifact_ids.add(decision_id)
             if recorded == declared:
                 continue
             key = (decision_id, declared)
@@ -2146,7 +2171,33 @@ def check_reviewed_sha_agreement(
         compared=len(compared_ids),
         trailer_only=len(trailer_only_ids),
         record_only=len(record_only_ids),
+        from_review_artifact=len(artifact_ids),
     )
+
+
+def _review_artifact_sha(repo: str | Path, review_ref: Any) -> str | None:
+    """決定の ``review_ref`` が指す意見書の front matter が宣言する ``reviewed_sha``。
+
+    読めない場合(参照が URL / ファイルが無い / 旧様式 / front matter が壊れている)は
+    ``None`` を返す —— **由来ありには数えない**方向へ倒す。由来件数は開示であって所見では
+    ないので、読めないものを楽観的に数えると「割合が高い=裏付けがある」という報告の意味が
+    崩れる。様式不備で発効を止めるのは CLI 側の責務であり(``governance.decisions``)、
+    監査は事後の観測に徹する。
+
+    照合先は**監査時点の作業ツリー**のファイルである。意見書を後から削除・改名すると由来が
+    消える(件数が下がる)が、それは可視化として正しい方向であり、逆(消して増える)には
+    ならない。
+    """
+    from ryza.reviews import ReviewArtifactError, load_review_artifact
+
+    ref = str(review_ref).strip() if review_ref else ""
+    if not ref:
+        return None
+    try:
+        artifact = load_review_artifact(ref, repo_root=repo)
+    except (ReviewArtifactError, OSError, UnicodeDecodeError):
+        return None
+    return artifact.reviewed_sha if artifact is not None else None
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -2249,6 +2300,9 @@ def run_a18(
         "compared_reviewed_shas": reviewed_scan.compared if reviewed_scan else 0,
         "trailer_only_reviewed": reviewed_scan.trailer_only if reviewed_scan else 0,
         "record_only_reviewed": reviewed_scan.record_only if reviewed_scan else 0,
+        # 突合済みのうち審査記録(意見書 front matter)に由来する決定数。緑の意味を
+        # 「起票者の申告どうしの一致」と「審査記録の裏付けがある一致」に分ける分子。
+        "reviewed_from_artifact": reviewed_scan.from_review_artifact if reviewed_scan else 0,
         # 既知の限界は毎回開示する(独立役員審査条件)+ 個別の注記(登録漏れ・鮮度)。
         "notes": [
             *_coverage_notes(gov),
@@ -2270,6 +2324,19 @@ def run_a18(
                 f"トレーラに reviewed= はあるが承認記録に reviewed_sha が無い決定 "
                 f"{reviewed_scan.trailer_only} 件 — A-18-8 の突合が働かない記録"
                 "(0029 以前の記録、または --deemed-for-pr 以外の経路での発効)"
+            ]),
+            # ③ 由来の開示。突合が働いていても、その値が起票者の申告どうしの一致に過ぎない
+            # 決定が残っている限り「独立審査が見た SHA の証明」にはなっていない。
+            *([] if reviewed_scan is None or not reviewed_scan.compared else [
+                f"突合できた決定 {reviewed_scan.compared} 件のうち審査記録"
+                f"(意見書 front matter)に由来する reviewed_sha は "
+                f"{reviewed_scan.from_review_artifact} 件"
+                + (
+                    "(残りは起票者が両側に書いた申告どうしの一致であり、"
+                    "独立審査が実際にその SHA を見たことの証明ではない)"
+                    if reviewed_scan.from_review_artifact < reviewed_scan.compared
+                    else "(全件が審査記録に由来)"
+                )
             ]),
             # SHA-2: 逆側(記録にはあるがトレーラが v1)。**承継が無制限に戻る側**なので、
             # 件数 0 でない限り必ず出す(reviewed= を落とすだけで A-18-8 が無音になる経路)。
@@ -2592,6 +2659,10 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
     reviewed_mismatches = result.get("reviewed_sha_mismatches") or []
     reviewed_acked = result.get("acknowledged_reviewed") or []
     compared_shas = result.get("compared_reviewed_shas") or 0
+    # 由来(審査記録に裏打ちされた件数)は分母と**同じ行**に出す。注記だけに置くと、
+    # 「不一致なし N 件」の緑が独立審査の証明として読まれる(③ の狙いが届かない)。
+    from_artifact = result.get("reviewed_from_artifact") or 0
+    artifact_suffix = f" / うち審査記録由来 {from_artifact} 件" if compared_shas else ""
     if reviewed_mismatches:
         lines = [
             f"- 決定 id={m['decision_id']} {m['ref']}: トレーラ "
@@ -2603,7 +2674,7 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
             {
                 "name": (
                     f"⚠️ A-18-8 審査対象 SHA の不一致 "
-                    f"{len(reviewed_mismatches)}/{compared_shas} 決定"
+                    f"{len(reviewed_mismatches)}/{compared_shas} 決定{artifact_suffix}"
                     "(トレーラ reviewed= ⇔ 記録 reviewed_sha。承継は記録側を採用済み)"
                 ),
                 "value": "\n".join(lines)[:1024],
@@ -2615,7 +2686,7 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
             {
                 "name": "A-18-8 審査対象 SHA の突合",
                 "value": (
-                    f"✅ 不一致なし(突合できた決定 {compared_shas} 件)"
+                    f"✅ 不一致なし(突合できた決定 {compared_shas} 件{artifact_suffix})"
                     if compared_shas
                     else "突合対象なし(トレーラの reviewed= と承認記録の reviewed_sha が"
                          "揃った決定が 0 件 — 一致の確認ではない)"

@@ -2853,3 +2853,133 @@ def test_a18_1_acknowledgement_ignores_a18_8_entries(repo, conn):
     result = _run_a18_deemed(r, since, conn)
     assert [v["commit"] for v in result["violations"]] == [sha[:12]]
     conn.rollback()
+
+
+# ── ③ 由来の開示: 突合済みのうち審査記録(意見書 front matter)に由来する件数 ─────
+#
+# reminder ``reviewed-sha-from-review-agent``: 一致件数だけでは「起票者が両側に同じ値を
+# 書いた」のか「独立審査の記録に裏打ちされている」のかを読み分けられない。緑の意味を
+# 割合で限定する。
+def _deemed_with_review(conn, run_id, proposal_ref: str, reviewed_sha: str | None, review_ref: str):
+    from ryza.governance import notices
+
+    return notices.announce_deemed_approval(
+        conn, proposal_ref, "pr", "保護領域の変更", run_id,
+        reviewed_sha=reviewed_sha, review_ref=review_ref,
+    ).decision.id
+
+
+def _write_review(r: Path, path: str, sha: str | None) -> str:
+    """意見書(新様式 = front matter 付き)を一時リポジトリに置く。``sha=None`` は旧様式。"""
+    body = "# 独立役員意見書\n\n判定: 条件付き承認\n"
+    text = body if sha is None else (
+        f"---\nreviewed_sha: {sha}\nreview_date: 2026-08-04\nverdict: conditional_approve\n---\n\n"
+        + body
+    )
+    _commit(r, path, text, f"docs(reviews): 意見書 {path}")
+    return path
+
+
+def test_a18_8_counts_the_shas_that_come_from_the_review_record(repo, conn, run_id):
+    """審査記録に由来する reviewed_sha は分子に入る(独立審査の裏付けがある一致)。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/820"
+    ref = _write_review(r, "docs/reviews/a-review.md", REVIEWED_A)
+    _deemed_with_review(conn, run_id, url, REVIEWED_A, ref)
+    _commit_reviewed_trailer(r, url, REVIEWED_A)
+    scan = _scan_a188(r, since, conn)
+    assert scan.compared == 1 and scan.from_review_artifact == 1 and scan.findings == []
+    conn.rollback()
+
+
+def test_a18_8_declaration_without_a_review_record_is_not_counted(repo, conn, run_id):
+    """意見書が実在しない参照は由来ゼロ(突合は成立しても裏付けは無い)。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/821"
+    _deemed_reviewed(conn, run_id, url, REVIEWED_A)  # review_ref は実在しないパス
+    _commit_reviewed_trailer(r, url, REVIEWED_A)
+    scan = _scan_a188(r, since, conn)
+    assert scan.compared == 1 and scan.from_review_artifact == 0
+    conn.rollback()
+
+
+def test_a18_8_old_style_review_is_not_counted_as_provenance(repo, conn, run_id):
+    """front matter の無い旧様式の意見書は由来にならない(遡及改変しない方針の裏返し)。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/822"
+    ref = _write_review(r, "docs/reviews/old-review.md", None)
+    _deemed_with_review(conn, run_id, url, REVIEWED_A, ref)
+    _commit_reviewed_trailer(r, url, REVIEWED_A)
+    scan = _scan_a188(r, since, conn)
+    assert scan.compared == 1 and scan.from_review_artifact == 0
+    conn.rollback()
+
+
+def test_a18_8_review_record_with_a_different_sha_is_not_provenance(repo, conn, run_id):
+    """意見書が別の SHA を宣言しているなら、その記録は当該 reviewed_sha の裏付けではない。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/823"
+    ref = _write_review(r, "docs/reviews/b-review.md", REVIEWED_B)
+    _deemed_with_review(conn, run_id, url, REVIEWED_A, ref)
+    _commit_reviewed_trailer(r, url, REVIEWED_A)
+    scan = _scan_a188(r, since, conn)
+    assert scan.compared == 1 and scan.from_review_artifact == 0
+    conn.rollback()
+
+
+def test_a18_8_broken_front_matter_is_not_counted_as_provenance(repo, conn, run_id):
+    """様式不備の意見書は由来に数えない(監査は楽観に倒さない — 止めるのは CLI の責務)。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/824"
+    _commit(
+        r, "docs/reviews/broken-review.md",
+        f"---\nreviewed_sha: {REVIEWED_A}\n\n閉じフェンスが無い\n",
+        "docs(reviews): 様式不備の意見書",
+    )
+    _deemed_with_review(conn, run_id, url, REVIEWED_A, "docs/reviews/broken-review.md")
+    _commit_reviewed_trailer(r, url, REVIEWED_A)
+    scan = _scan_a188(r, since, conn)
+    assert scan.compared == 1 and scan.from_review_artifact == 0
+    conn.rollback()
+
+
+def test_a18_8_provenance_reaches_the_result_and_the_green_line(repo, conn, run_id):
+    """**緑の行に割合を出す**(注記だけに置くと ✅ が独立審査の証明として読まれる)。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/825"
+    ref = _write_review(r, "docs/reviews/c-review.md", REVIEWED_A)
+    _deemed_with_review(conn, run_id, url, REVIEWED_A, ref)
+    _commit_reviewed_trailer(r, url, REVIEWED_A)
+    result = _run_a18_deemed(r, since, conn)
+    assert result["compared_reviewed_shas"] == 1 and result["reviewed_from_artifact"] == 1
+    field = next(f for f in a18.build_alert_embed(result)["fields"] if "A-18-8" in f["name"])
+    assert "うち審査記録由来 1 件" in field["value"]
+    assert any("全件が審査記録に由来" in n for n in result["notes"])
+    conn.rollback()
+
+
+def test_a18_8_unbacked_agreement_is_disclosed_in_the_notes(repo, conn, run_id):
+    """裏付けの無い一致が残る限り「独立審査が見た SHA の証明」ではないと毎回書く。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/826"
+    _deemed_reviewed(conn, run_id, url, REVIEWED_A)
+    _commit_reviewed_trailer(r, url, REVIEWED_A)
+    result = _run_a18_deemed(r, since, conn)
+    assert result["reviewed_from_artifact"] == 0
+    assert any("証明ではない" in n for n in result["notes"])
+    field = next(f for f in a18.build_alert_embed(result)["fields"] if "A-18-8" in f["name"])
+    assert "うち審査記録由来 0 件" in field["value"]
+    conn.rollback()
+
+
+def test_a18_8_provenance_is_shown_on_the_mismatch_line_too(repo, conn, run_id):
+    """不一致の見出しにも分母・由来を出す(⚠️ の読み手が突合の実効性を測れるように)。"""
+    r, since = repo
+    url = "https://github.com/x/y/pull/827"
+    ref = _write_review(r, "docs/reviews/d-review.md", REVIEWED_A)
+    _deemed_with_review(conn, run_id, url, REVIEWED_A, ref)
+    _commit_reviewed_trailer(r, url, REVIEWED_B)
+    result = _run_a18_deemed(r, since, conn)
+    field = next(f for f in a18.build_alert_embed(result)["fields"] if "A-18-8" in f["name"])
+    assert "1/1 決定 / うち審査記録由来 1 件" in field["name"]
+    conn.rollback()

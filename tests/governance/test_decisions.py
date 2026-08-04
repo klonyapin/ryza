@@ -901,3 +901,164 @@ def test_review_ref_check_is_disabled_when_the_root_is_unknown(monkeypatch):
     """
     monkeypatch.setattr(decisions_mod, "_repo_root", lambda: None)
     assert decisions_mod.missing_review_ref_warning("docs/reviews/does-not-exist.md") is None
+
+
+# ── 審査記録(意見書 front matter)からの reviewed_sha 採用 ────────────────────
+# reminder ``reviewed-sha-from-review-agent``: 0029 + A-18-8 の突合は「起票者が書いた2つの
+# 値」の比較でしかなく、同じ嘘を両方に書けば通る。審査側が独立に書いた reviewed_sha が
+# 手元にある場面だけが、その申告性を外から検証できる地点である。
+REVIEW_PATH = "docs/reviews/sample-review.md"
+
+
+@pytest.fixture
+def review_artifact(monkeypatch, tmp_path):
+    """一時リポジトリに意見書を置き、``_repo_root`` をそこへ向ける。
+
+    実リポジトリの docs/reviews を書き換えずに front matter の有無を切り替えるため。
+    """
+
+    def _install(text: str, path: str = REVIEW_PATH):
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        monkeypatch.setattr(decisions_mod, "_repo_root", lambda: tmp_path)
+        return path
+
+    return _install
+
+
+def _front_matter(sha: str, *, verdict: str = "conditional_approve") -> str:
+    return f"---\nreviewed_sha: {sha}\nreview_date: 2026-08-04\nverdict: {verdict}\n---\n\n本文\n"
+
+
+def test_cli_adopts_the_reviewed_sha_recorded_by_the_review(review_artifact):
+    """**突合の成立**: 起票者が SHA を渡さなくても、審査記録の値が reviewed_sha になる。"""
+    ref = review_artifact(_front_matter(SHA_A))
+    target = decisions_mod._resolve_deemed_args(
+        _build_args([
+            "--deemed", "--proposal-ref", "https://x/pull/1", "--kind", "pr",
+            "--notice", "保護領域の変更", "--review", ref,
+        ])
+    )
+    assert target.reviewed_sha == SHA_A
+    assert target.reviewed_sha_source == decisions_mod.SHA_SOURCE_ARTIFACT
+    assert SHA_A in target.notice  # 通知本文にも審査対象として出る
+
+
+def test_cli_stops_the_effectuation_when_the_declared_sha_contradicts_the_review(review_artifact):
+    """**fail-safe**: 起票者の申告と審査側の記録が食い違えば発効しない(例外で止める)。"""
+    ref = review_artifact(_front_matter(SHA_A))
+    with pytest.raises(decisions_mod.ReviewedShaConflictError, match="発効を中止"):
+        decisions_mod._resolve_deemed_args(
+            _build_args([
+                "--deemed", "--proposal-ref", "https://x/pull/1", "--kind", "pr",
+                "--notice", "保護領域の変更", "--review", ref, "--reviewed-sha", SHA_B,
+            ])
+        )
+
+
+def test_cli_returns_a_failure_code_on_the_conflict(review_artifact, capsys):
+    """CLI としても異常終了する(黙って片方を採らない — 何が起きたかを stderr に出す)。"""
+    ref = review_artifact(_front_matter(SHA_A))
+    rc = main([
+        "--deemed", "--proposal-ref", "https://x/pull/1", "--kind", "pr",
+        "--notice", "保護領域の変更", "--review", ref, "--reviewed-sha", SHA_B, "--dry-run",
+    ])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "発効を中止" in err and SHA_A[:12] in err
+
+
+def test_cli_accepts_a_declared_sha_that_agrees_with_the_review(review_artifact):
+    """一致する明示指定は通る(検査対象は食い違いであって、指定そのものではない)。"""
+    ref = review_artifact(_front_matter(SHA_A))
+    target = decisions_mod._resolve_deemed_args(
+        _build_args([
+            "--deemed", "--proposal-ref", "https://x/pull/1", "--kind", "pr",
+            "--notice", "保護領域の変更", "--review", ref, "--reviewed-sha", SHA_A.upper(),
+        ])
+    )
+    assert target.reviewed_sha == SHA_A
+    assert target.reviewed_sha_source == decisions_mod.SHA_SOURCE_ARTIFACT
+
+
+def test_cli_review_record_wins_over_the_pr_head_sha(review_artifact, fake_gh):
+    """審査記録 > PR の head。head との相違は**止めず**注記で開示する。
+
+    意見書のコミット自身が head を進めるため、審査対象 SHA と head は通常一致しない。
+    ここを致命にすると front matter を書いた PR が軒並み発効できなくなる。
+    """
+    fake_gh(PR_JSON_WITH_HEAD)  # head = SHA_B
+    ref = review_artifact(_front_matter(SHA_A))
+    target = decisions_mod._resolve_deemed_args(
+        _build_args(["--deemed-for-pr", "99", "--review", ref])
+    )
+    assert target.reviewed_sha == SHA_A
+    assert target.reviewed_sha_source == decisions_mod.SHA_SOURCE_ARTIFACT
+    assert any(SHA_B[:12] in n and "head" in n for n in target.reviewed_notes)
+
+
+def test_cli_old_style_review_keeps_the_previous_behaviour(review_artifact, fake_gh):
+    """**後方互換**: front matter の無い旧様式では従来どおり head SHA が入る(遡及改変しない)。"""
+    fake_gh(PR_JSON_WITH_HEAD)
+    ref = review_artifact("# 独立役員意見書(旧様式)\n\n- 審査日: 2026-08-03\n")
+    target = decisions_mod._resolve_deemed_args(
+        _build_args(["--deemed-for-pr", "99", "--review", ref])
+    )
+    assert target.reviewed_sha == SHA_B
+    assert target.reviewed_sha_source == decisions_mod.SHA_SOURCE_PR_HEAD
+    assert target.reviewed_notes == ()
+
+
+def test_cli_old_style_review_keeps_the_declared_sha(review_artifact):
+    """旧様式 + 明示指定は従来どおり起票者の申告(由来ラベルがそれを開示する)。"""
+    ref = review_artifact("# 旧様式\n")
+    target = decisions_mod._resolve_deemed_args(
+        _build_args([
+            "--deemed", "--proposal-ref", "https://x/pull/2", "--kind", "pr",
+            "--notice", "保護領域の変更", "--review", ref, "--reviewed-sha", SHA_B,
+        ])
+    )
+    assert target.reviewed_sha == SHA_B
+    assert target.reviewed_sha_source == decisions_mod.SHA_SOURCE_ARGUMENT
+
+
+def test_cli_broken_front_matter_stops_the_effectuation(review_artifact, capsys):
+    """様式不備を「旧様式」に読み替えない — YAML を壊すことが回避策にならないようにする。"""
+    ref = review_artifact(f"---\nreviewed_sha: {SHA_A}\n\n本文(閉じフェンス無し)\n")
+    rc = main([
+        "--deemed", "--proposal-ref", "https://x/pull/3", "--kind", "pr",
+        "--notice", "保護領域の変更", "--review", ref, "--dry-run",
+    ])
+    assert rc == 1
+    assert "閉じフェンス" in capsys.readouterr().err
+
+
+def test_cli_reports_front_matter_warnings_without_stopping(review_artifact, capsys):
+    """語彙外の verdict 等は発効を止めない(判定名の揺れで様式が忌避されないように)。"""
+    ref = review_artifact(_front_matter(SHA_A, verdict="とても良い"))
+    rc = main([
+        "--deemed", "--proposal-ref", "https://x/pull/4", "--kind", "pr",
+        "--notice", "保護領域の変更", "--review", ref, "--dry-run",
+    ])
+    assert rc == 0
+    assert "語彙外" in capsys.readouterr().err
+
+
+def test_reviewed_sha_source_is_recorded_in_the_run_parameters(review_artifact, monkeypatch):
+    """由来は meta.runs に残す — A-18-8 の一致が審査記録の裏付けを持つかを事後に判別する。"""
+    ref = review_artifact(_front_matter(SHA_A))
+    captured: dict = {}
+
+    def _fake_start_run(job_name, params=None, **kw):
+        captured.update(params or {})
+        raise RuntimeError("記録経路は本テストの対象外")
+
+    monkeypatch.setattr("ryza.provenance.start_run", _fake_start_run)
+    with pytest.raises(RuntimeError):
+        main([
+            "--deemed", "--proposal-ref", "https://x/pull/5", "--kind", "pr",
+            "--notice", "保護領域の変更", "--review", ref,
+        ])
+    assert captured["reviewed_sha"] == SHA_A
+    assert captured["reviewed_sha_source"] == decisions_mod.SHA_SOURCE_ARTIFACT
