@@ -20,6 +20,17 @@ def _force_gce(value: bool) -> None:
     secrets._gce_cache = value
 
 
+@pytest.fixture(autouse=True)
+def _restore_gce_cache():
+    """各テスト後に GCE 判定キャッシュをテスト既定(False)へ戻す。
+
+    ``_force_gce(True)`` が他テストへ漏れると本番ガードが誤発火するため、
+    tests/conftest.py の pytest_configure と同じ値に毎回リセットする。
+    """
+    yield
+    secrets._gce_cache = False
+
+
 def test_gce_and_env_unset_raises_before_writing_any_evidence(conn, monkeypatch):
     """GCE 検出 + ``RYZA_EVIDENCE_DIR`` 未設定 → 記帳前に RuntimeError。
 
