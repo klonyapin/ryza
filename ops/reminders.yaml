@@ -1562,3 +1562,27 @@ reminders:
       labels: [governance]
       body: "メタ監査規程(docs/design/08-meta-audit.md、PR #140 で新設)は監査部門を監査する制度の正であり、規程を緩めて EQA を骨抜きにする経路(同規程 §6 が自認する形骸化の一形態)を審査なしで通せてしまうため、05-governance.md の先例どおり area: governance_doc で protected_areas に登録する。governance.yaml は L1 のため次回 L1 バッチで処理(protect-equivalence-tests 査-1 の先例)。出典: PR #140 独立審査 所見 中-1・設計リード裁定 2026-08-04。"
     status: pending
+
+  - id: t029-backfill-execution
+    what: "T-029 J-Quants 財務サマリの初回バックフィル実行(T-030 statements 取込配線マージ後)"
+    conditions:
+      - type: date_after
+        date: "2026-08-05"
+    action:
+      type: issue_create
+      title: "T-029: J-Quants 財務サマリの初回バックフィル実行"
+      labels: [ops]
+      body: "T-030(J-Quants /v2/fins/statements の取込配線)マージ後、`python -m ryza.preprocess.fundamentals --backfill` を実行して docs.documents(source_name='J-Quants', meta.kind='financial_statement')の既取込分を market.indicators に一括昇格する。実行後、処理件数(processed)・書込点数(written)・skip 集計(not_statement/no_basis/no_period_kind/no_end_date/no_value)・error 内訳を Discord #dev に報告すること。冪等マーカ(meta.fundamentals_version)により再実行は安全。出典: PR #147 独立審査 C-6・設計リード裁定 2026-08-04。"
+    status: pending
+
+  - id: t029-initial-intake-verification
+    what: "T-029 初回実取込後の実 payload 検証(NC* マッピング・予想修正開示・skip 集計診断)"
+    conditions:
+      - type: date_after
+        date: "2026-08-12"
+    action:
+      type: issue_create
+      title: "T-029: 初回実取込後の実 payload 検証(NC*・予想修正・skip 集計)"
+      labels: [design]
+      body: "T-029 初回バックフィル(t029-backfill-execution)完了後、実 payload に対して以下を検証する。①**NonConsolidated 開示のフィールド所在**: DocType が `..._NonConsolidated_...` の開示で、仕様どおりトップレベル Sales/OP 等が空で NC*(NCSales/NCOP/NCOdP/NCNP/NCEPS/NCDEPS)側に値が入るかを確認する。単体開示のみの企業(小型株 — GARP の主猟場)の系列が丸ごと no_value skip になっていた場合、config/jquants_fields.yaml に NC* マッピングを bucket=actuals 追補する(基本料金は現行と対称)。②**予想修正開示(EarnForecastRevision / DividendForecastRevision)の扱い再検討**: 現状は `_basis_from_doctype` が not_statement で全 skip する。fail-closed としては安全だが、GARP(T-019)の核である予想成長率が期中改定を失う。対応案(a: 予想修正開示に限り FSales/FOP 等の会社予想フィールドを抽出、b: 現状維持で四半期本決算のみ、c: 別ソース併用)を評価。③**skip 集計の診断**: fundamentals_stats.skip を SELECT 集計し、no_value・no_end_date・no_basis・not_statement の内訳を確認、想定外の欠落があれば根本原因を特定して修正する。出典: PR #147 独立審査 C-3/C-4・設計リード裁定 2026-08-04。"
+    status: pending

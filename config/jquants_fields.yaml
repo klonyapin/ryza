@@ -1,0 +1,99 @@
+# config/jquants_fields.yaml — J-Quants /v2/fins/summary の実フィールド名 → 正規化名
+#
+# preprocess.fundamentals が docs.documents(source_name='J-Quants',
+# meta.kind='financial_statement')にひもづく証憑 payload を読み、ここに定義された
+# フィールドだけを market.indicators に昇格する(fail-closed: 未定義フィールドは
+# 書かない/config にあるが payload に欠測のものは黙って skip でなく集計する)。
+#
+# 実フィールド名の出典: J-Quants API Reference "/v2/fins/summary"
+#   https://jpx-jquants.com/en/spec/fin-summary
+# V2 は V1 の DisclosedDate → DiscDate 等の短縮命名(モジュール docstring 参照)。
+#
+# 各行の "reason" は「なぜこのフィールドをこの正規化名に写すか」の根拠(CLAUDE.md
+# の「値のハードコード禁止 — 閾値・マッピングは config に根拠コメント付きで」に従う)。
+#
+# 単位換算はしない(J-Quants は円建て。EPS/DEPS は円/株)。
+# 会社予想は実績とは別 field 名を割り当てる(look-ahead 混入を防ぐ — T-029 §1-2)。
+
+# ── 実績(当期)─ payload の Sales/OP/OdP/NP/EPS/DEPS を写す ─────────────────
+actuals:
+  - source: Sales
+    normalized: NetSales
+    reason: |
+      J-Quants の "Sales" は Net Sales(売上高)。Peter 第一段の売上成長率算出の入力。
+  - source: OP
+    normalized: OperatingProfit
+    reason: |
+      J-Quants の "OP" は Operating Profit(営業利益)。営業利益率・利益質の入力。
+  - source: OdP
+    normalized: OrdinaryProfit
+    reason: |
+      J-Quants の "OdP" は Ordinary Profit(経常利益)。JP-GAAP 特有だが JP 銘柄で
+      Peter 判定の分母として使う開示ソースがあるため取り込む(IFRS/US-GAAP 銘柄では
+      欠測 skip)。
+  - source: NP
+    normalized: Profit
+    reason: |
+      J-Quants の "NP" は Profit(親会社株主帰属当期純利益)。EPS の分子と対応する
+      純利益。
+  - source: EPS
+    normalized: EarningsPerShare
+    reason: |
+      J-Quants の "EPS" は 円/株。Peter 第一段の PER 算出(株価÷EPS)の入力。
+  - source: DEPS
+    normalized: DilutedEarningsPerShare
+    reason: |
+      J-Quants の "DEPS" は Diluted EPS(希薄化後 EPS)。潜在株考慮の PER 用。
+      EDGAR 側は EarningsPerShareDiluted に対応。
+
+# ── 会社予想(当期末)─ payload の FSales/FOP/FOdP/FNP/FEPS を写す ───────────
+# 予想は「実績と別 field 名」+ as_of=開示日時で分離(T-029 §1-2 / §6 反対意見書3)。
+# ts は「予想対象期」の期末(CurFYEn)。
+forecasts_current:
+  - source: FSales
+    normalized: FcstNetSales
+    reason: |
+      J-Quants の "FSales" は Forecast Net Sales(当期末予想売上)。GARP の予想成長率
+      算出に必要(T-019 の PER÷予想成長率)。
+  - source: FOP
+    normalized: FcstOperatingProfit
+    reason: |
+      J-Quants の "FOP" は Forecast Operating Profit(当期末予想営業利益)。
+  - source: FOdP
+    normalized: FcstOrdinaryProfit
+    reason: |
+      J-Quants の "FOdP" は Forecast Ordinary Profit(当期末予想経常利益)。
+  - source: FNP
+    normalized: FcstProfit
+    reason: |
+      J-Quants の "FNP" は Forecast Profit(当期末予想当期純利益)。
+  - source: FEPS
+    normalized: FcstEarningsPerShare
+    reason: |
+      J-Quants の "FEPS" は Forecast EPS(当期末予想 EPS、円/株)。予想 PER の分母。
+
+# ── 会社予想(翌期末)─ payload の NxFSales/NxFOP/NxFOdP/NxFNp/NxFEPS ────────
+# 一部の期末(FY 決算)開示では翌期予想も同時に出る。予想対象期は NxtFYEn(翌 FY 期末)。
+forecasts_next:
+  - source: NxFSales
+    normalized: NxFcstNetSales
+    reason: |
+      J-Quants の "NxFSales" は Forecast Net Sales for Next Fiscal Year End。
+      通年予想を早期に得られる開示のみで満たされる。
+  - source: NxFOP
+    normalized: NxFcstOperatingProfit
+    reason: |
+      J-Quants の "NxFOP" は Forecast Operating Profit for Next Fiscal Year End。
+  - source: NxFOdP
+    normalized: NxFcstOrdinaryProfit
+    reason: |
+      J-Quants の "NxFOdP" は Forecast Ordinary Profit for Next Fiscal Year End。
+  - source: NxFNp
+    normalized: NxFcstProfit
+    reason: |
+      J-Quants の "NxFNp" は Forecast Profit for Next Fiscal Year End(仕様書表記のまま。
+      当期予想 FNP の "P" が小文字 "p" になっている点に注意)。
+  - source: NxFEPS
+    normalized: NxFcstEarningsPerShare
+    reason: |
+      J-Quants の "NxFEPS" は Forecast EPS for Next Fiscal Year End(円/株)。
