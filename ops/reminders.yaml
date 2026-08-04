@@ -1608,5 +1608,17 @@ reminders:
       type: issue_create
       title: "curated ユニバース: 2026年10月定期入替後の構成突き合わせ"
       labels: [ops]
-      body: "TOPIX ニューインデックスシリーズの定期入替(2026年10月最終営業日適用)と日経225 定期見直し(2026年10月)の公表後に、config/universe/ の3ファイル(jim-curated / stan-index-etf / peter-jp-midcap)の entries を当時の公式構成と突き合わせる。とくに peter-jp-midcap は Mid400→TOPIX 100 昇格銘柄(もう midcap でない)の撤回、stan-index-etf は JPX レバレッジ型・インバース型一覧の新規掲載有無と上場廃止/償還を確認する。差分があれば version 更新+content_sha256 再計算+再承認(protected_areas: mandates — Approved: トレーラ)。出典: 各ファイルの運用上の注意・JPX「TOPIXニューインデックスシリーズ」定期選定。"
+      body: "TOPIX ニューインデックスシリーズの定期入替(2026年10月最終営業日適用)と日経225 定期見直し(2026年10月)の公表後に、config/universe/ の3ファイル(jim-curated / stan-index-etf / peter-jp-midcap)の entries を当時の公式構成と突き合わせる。とくに peter-jp-midcap は Mid400→TOPIX 100 昇格銘柄(もう midcap でない)の撤回、stan-index-etf は JPX レバレッジ型・インバース型一覧の新規掲載有無(コードは4桁数字と英数字 ####A の両形式を数えること — 独立審査 t031 中-1)と上場廃止/償還を確認する。差分があれば version 更新+content_sha256 再計算+再承認(protected_areas: mandates — Approved: トレーラ)。完了時に翌年分(2027年入替)の本リマインダーを再登録すること(独立審査 t031 軽微-3)。出典: 各ファイルの運用上の注意・JPX「TOPIXニューインデックスシリーズ」定期選定。"
+    status: pending
+
+  - id: fm-midcap-measured-quantile
+    what: "peter-jp-midcap: 代理基準(TOPIX Mid400 手選びサブセット)から時価総額・流動性の実測分位への移行"
+    conditions:
+      - type: date_after
+        date: "2026-12-01"
+    action:
+      type: issue_create
+      title: "jp_equity_midcap_cash を実測分位ベースの供給に移行する"
+      labels: [design]
+      body: "config/universe/peter-jp-midcap.yaml v1 は TOPIX Mid400 構成×東証プライムの手選び28銘柄(著名・大型寄りに偏るサブセット — 独立審査 t031 中-2 が指摘した選定バイアス)である。market.bars の履歴が概ね4ヶ月蓄積する本期日以降に、時価総額・売買代金の実測分位(例: プライム内の時価総額分位帯かつ売買代金下限)で midcap を定義し直し、curated 手選びから決定論供給へ移行する設計を起案する。GARP の本来の猟場(カバレッジの薄い中堅)を構造的に外している現状の緩和が目的。jim の fm-liquid-equity-measured-turnover(liquid_equity の実測化)と統一設計にできるか併せて検討。移行までは curated 手選び(fail-closed)を維持する。出典: 独立審査 t031 中-2・peter-jp-midcap.yaml ヘッダの移行約束。"
     status: pending
