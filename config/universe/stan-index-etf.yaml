@@ -1,0 +1,110 @@
+# curated ユニバース: Stan の指数連動 ETF タグ(index_etf)
+#
+# 用途: config/mandates/stan.yaml の universe([index_futures, index_etf, fx, rates])のうち
+#       **index_etf** に属する銘柄を明示列挙する。決定論ルール
+#       (src/ryza/risk/classify.py)は index_etf タグを付けない — レバレッジ/インバース
+#       該当(IPS §5 の禁止フラグ)を銘柄マスタから決定論で**否定**できないため。タグが
+#       供給されるまで Stan のユニバースは空であり、それは fail-closed の設計どおりの
+#       挙動である(タグを緩めて埋めてはならない — T-019 §1-2)。
+# 反映: daily の curated 段が自動照合する(手動 CLI は初回・緊急時のみ)。付与は
+#       market.instrument_classification(+0026 履歴)へ書かれ、point-in-time で
+#       「いつからその銘柄が index_etf だったか」を再現できる。
+# 手順の正: docs/ops/fm-curated-universe.md
+#
+# ── 選定基準(criterion の根拠)────────────────────────────────────────────────
+# jim-curated.yaml が etf タグの供給を見送った理由は「レバ/インバース該当を銘柄マスタ
+# から決定論で否定できない=『フラグなし』の主張が fail-open になる」だった。curated
+# 方式はこの問題を**構造で**解く: 明示ホワイトリストは「掲載した銘柄だけがタグを持つ」
+# であり、レバ/インバース商品を含む**掲載外の銘柄には永遠にタグが付かない**(fail-closed)。
+# 否定の根拠は銘柄マスタではなく、掲載する1銘柄ごとに人手で確認して rationale に残す。
+#
+# レバレッジ型・インバース型の否定は二重に行う(いずれも rationale に記載):
+#   (1) JPX が公表する「レバレッジ型・インバース型商品 銘柄一覧」
+#       (https://www.jpx.co.jp/equities/products/etfs/leveraged-inverse/01.html
+#       2026-08-04 閲覧・全33銘柄)に**掲載されていない**こと
+#   (2) 各ファンドの交付目論見書・運用会社公表の商品性が**倍率 1.0 の指数連動**
+#       (原指数の日々の値動きの n 倍/逆数倍を目標としない)であること
+#
+# 「同一指数連動 ETF の中で最上位級」の判定に使った純資産総額は、運用会社公表値
+# (nextfunds.jp・blackrock.com、いずれも 2026-08-04 時点)を第一次情報源とし、
+# 比較対象(不採用側)は Yahoo!ファイナンス(同日閲覧)で確認した。
+#
+# ── この版でカバーしないもの ──────────────────────────────────────────────────
+# - **index_futures / fx / rates タグは供給しない**。T-019 §1-2 のとおり第一版の Stan は
+#   現物 ETF(index_etf)のみを対象とする — FX・金利は建玉経路(instruments 登録・
+#   証拠金記帳)が無く、先物は原資産クラスの情報源が未定(reminder:
+#   fm-etf-futures-curated-classification)。マンデートは狭める方向のみ有効なので、
+#   これは違反ではない
+# - **金・商品連動(1540 純金上場信託 等)は見送る**。これらは市場指数への連動ではなく
+#   金地金等の**価格連動の商品信託**であり、criterion(a)「広範な市場指数に連動」を
+#   満たさない。商品エクスポージャーが必要になったら基準ごと再起案する
+# - 為替ヘッジあり型(2512・2630 等)は同一指数の重複供給になるため入れない
+#   (ヘッジなし型を採用 — 円建てポートフォリオに為替の視点を残す Stan の用途に合う)
+#
+# ── 運用上の注意 ──────────────────────────────────────────────────────────────
+# - JPX のレバ/インバース一覧は**新規上場で増える**。承認時と定期見直し時に、entries の
+#   全銘柄が同一覧に非掲載のままであること・上場廃止/償還が無いことを必ず突き合わせる
+#   こと。本ファイルはその時点の写しであり、JPX 一覧の正ではない
+# - approved_at が null の間、ローダは読み込みを拒否する(未承認のリストでユニバースを
+#   広げない)。承認は投資委員会(代表)。本ファイルは config/governance.yaml の
+#   protected_areas(area: mandates)に登録された config/universe/** に属し、変更
+#   コミットには `Approved:` トレーラが要る(承認の正はそちら — 審査 C-24)
+# - **銘柄を1行足すことは「Stan が売買できる銘柄を1つ増やす」こと**である。rationale の
+#   無いエントリはローダが拒否する
+# - content_sha256 は criterion + 全エントリ(symbol・tags・rationale)の正規化ハッシュ。
+#   内容を変えたら version と併せて更新し、再承認する(審査 C-25)。
+#   再計算: uv run python -c "import yaml,pathlib;from ryza.risk.classify import
+#   curated_content_digest as d;r=yaml.safe_load(pathlib.Path('config/universe/stan-index-etf.yaml')
+#   .read_text());print(d(r['criterion'], r['entries']))"
+
+name: stan-index-etf
+version: "1"
+criterion: >-
+  東証上場の指数連動型 ETF(内国 ETF)であって、(a)広範な市場指数(国内株・米国株・
+  全世界株・先進国株・国内債券・外国債券・東証REIT)に連動し、(b)レバレッジ型・
+  インバース型に該当せず(JPX 公表「レバレッジ型・インバース型商品 銘柄一覧」に非掲載、
+  かつ交付目論見書の商品性が倍率 1.0 の指数連動であること)、(c)受益権残高(純資産総額)が
+  同一指数連動 ETF の中で最上位のもの。同一指数には最も残高の大きい1本のみを入れる。
+manages_tags: [index_etf]
+
+# 承認記録(null の間は反映されない)。approved_at は ISO 日付、approved_by は
+# 'representative' 固定(起草者が自分で名乗れない — 審査 C-24)。
+# **本ファイルは未承認のまま起案されている** — 承認は投資委員会(代表)。
+approved_at: null
+approved_by: null
+
+# criterion + entries の正規化 sha256(内容と版の紐付け — 審査 C-25)。
+content_sha256: "e9dc10cbf1c11d5c95bf034094d9238d614f2717fbf7055ebb081626df0e28fe"
+
+entries:
+  # 国内株
+  - symbol: "1306.T"
+    tags: [index_etf]
+    rationale: "TOPIX(配当込み)連動の内国ETF(野村AM・NEXT FUNDS)。倍率1.0の指数現物連動で、JPXレバレッジ型・インバース型商品一覧(2026-08-04閲覧・全33銘柄)に非掲載。純資産総額33.3兆円は国内ETF最大(nextfunds.jp 2026-08-04)"
+  - symbol: "1321.T"
+    tags: [index_etf]
+    rationale: "日経平均株価(日経225)連動の内国ETF(野村AM・NEXT FUNDS)。倍率1.0・JPXレバ/インバース一覧非掲載。純資産総額17.0兆円で日経225連動ETF中最大(nextfunds.jp 2026-08-04、最大表記は2026年6月末時点)"
+  - symbol: "1591.T"
+    tags: [index_etf]
+    rationale: "JPX日経インデックス400(配当込み)連動の内国ETF(野村AM・NEXT FUNDS)。倍率1.0・JPXレバ/インバース一覧非掲載。純資産総額2.30兆円で同指数連動ETF中最大(nextfunds.jp 2026-08-04)"
+  # 東証REIT
+  - symbol: "1343.T"
+    tags: [index_etf]
+    rationale: "東証REIT指数(配当込み)連動の内国ETF(野村AM・NEXT FUNDS)。倍率1.0・JPXレバ/インバース一覧非掲載。純資産総額5,393億円で東証REIT指数連動ETF中最大(野村AM 2026-06-30時点表記・nextfunds.jp 2026-08-04)"
+  # 米国株・全世界株・先進国株
+  - symbol: "1655.T"
+    tags: [index_etf]
+    rationale: "S&P500(税引後配当込み・円換算・為替ヘッジなし)連動の内国ETF(ブラックロック・iシェアーズ)。倍率1.0・JPXレバ/インバース一覧非掲載。純資産総額1,839億円(blackrock.com 2026-08-04)で東証のS&P500連動(ヘッジなし)ETF中最大(2558=1,184億円・2633=309億円を上回る。いずれも2026-08-04閲覧)"
+  - symbol: "2559.T"
+    tags: [index_etf]
+    rationale: "MSCI ACWI(配当込み・円換算)連動の内国ETF(三菱UFJアセット・MAXIS)。倍率1.0・JPXレバ/インバース一覧非掲載。純資産総額1,256億円(Yahoo!ファイナンス 2026-08-04)で東証のACWI連動ETF中最大(他のACWI連動は新規小型の537Aのみ)"
+  - symbol: "2513.T"
+    tags: [index_etf]
+    rationale: "MSCI-KOKUSAI(配当込み・円換算・為替ヘッジなし)連動の内国ETF(野村AM・NEXT FUNDS)。倍率1.0・JPXレバ/インバース一覧非掲載。純資産総額1,164億円(nextfunds.jp 2026-08-04)で同指数連動ETF中最大(1657=494億円を上回る)"
+  # 国内債券・外国債券
+  - symbol: "2510.T"
+    tags: [index_etf]
+    rationale: "NOMURA-BPI総合(国内公募債券の広範指数)連動の内国ETF(野村AM・NEXT FUNDS)。倍率1.0・JPXレバ/インバース一覧非掲載。純資産総額2,082億円(nextfunds.jp 2026-08-04)。同指数連動の東証ETFは本銘柄のみ"
+  - symbol: "2511.T"
+    tags: [index_etf]
+    rationale: "FTSE世界国債インデックス(除く日本・為替ヘッジなし・円ベース)連動の内国ETF(野村AM・NEXT FUNDS)。倍率1.0・JPXレバ/インバース一覧非掲載。純資産総額601億円(nextfunds.jp 2026-08-04)で同指数連動ETF中最大(1677=193億円を上回る)"
