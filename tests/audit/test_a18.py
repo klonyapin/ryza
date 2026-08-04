@@ -784,17 +784,19 @@ def test_pr_verifier_caches_and_counts():
     assert err_calls.count(f"repos/{SLUG}/pulls/9") == 1
 
 
-def test_repo_reachability_temporary_error_is_not_permanently_cached():
+def test_repo_reachability_temporary_error_is_not_permanently_cached(monkeypatch):
     """**A-12 是正 F-2**: ``repos/<slug>`` の一時障害(rate limit・ネットワーク断)は
     ``_reachable`` に永続キャッシュしない。従来実装は初回 error を到達不能として固定し、
     プロセス生存中の全 PR 照合を unverifiable(fail-open)に縮退させていた
     (= トークンを一度失うだけで週次全体が緑を失う経路)。
 
-    1回目 error(rate limit)→ 2回目 ok で回復し、以後は通常照合ができること。
+    1回目 error(rate limit)→ interval 経過後は再試行して回復し、以後は通常照合ができること。
+    **#131 軽微-2 の backoff** により、interval 未満の連続呼び出しは API を叩かず前回理由を
+    返すため、時計を進めた上で再問い合わせが起きることを確認する。
     """
     responses: list[tuple[str, object]] = [
         ("error", "GitHub API 不達: URLError"),  # 1回目 repos/<slug>: 一時障害
-        ("ok", {"full_name": SLUG}),               # 2回目 repos/<slug>: 回復
+        ("ok", {"full_name": SLUG}),               # 2回目 repos/<slug>: 回復(interval 経過後)
         ("ok", _merged("a" * 40)),                 # 3回目 pulls/9: 通常応答
     ]
     calls: list[str] = []
@@ -803,12 +805,16 @@ def test_repo_reachability_temporary_error_is_not_permanently_cached():
         calls.append(path)
         return responses.pop(0)
 
+    # backoff 経過後の再試行を確定的に起こすため、time.monotonic を段階的に進める。
+    ticks = iter([0.0, a18._REACH_RETRY_INTERVAL_SEC + 1.0])
+    monkeypatch.setattr(a18.time, "monotonic", lambda: next(ticks))
+
     verifier = a18.PRVerifier(slug=SLUG, api_get=api_get)
     # 1回目: 一時障害 → unverifiable(縮退)。_reachable は None のまま残る。
     state, reason = verifier.check(9)
     assert state == "unverifiable"
     assert "一時障害" in (reason or "")
-    # 2回目: 回復。repos/<slug> を再度叩き、その先の pulls/9 も叩ける。
+    # 2回目(interval 経過後): 回復。repos/<slug> を再度叩き、その先の pulls/9 も叩ける。
     state, _reason = verifier.check(9, "a" * 40)
     assert state == "ok"
     # repos/<slug> は 2 回(再試行)、pulls/9 は 1 回だけ叩かれている。
@@ -2397,7 +2403,9 @@ def test_a18_7_borrowed_pr_number_is_not_counted_as_checked(repo, conn, run_id):
 
 def test_a18_7_verification_degraded_is_excluded_and_disclosed(repo, conn):
     """**A-12 是正 F-3**: 実在照合が縮退(API 不達等)した保護領域 PR は分母から除外し、
-    ``unverified`` に計上する。報告 embed のタイトルに「照合縮退」を明示する。
+    ``unverified`` に計上する。この照合制限は報告 embed の A-18-7 field の value で
+    「照合縮退 N 件を分母から除外」として開示される(タイトルではなく field 内。
+    タイトル側の開示は PR 実在照合の縮退経路が担う — #131 軽微-1)。
     """
     r, since = repo
     _merge_protected_pr(r, 555)
@@ -2413,6 +2421,38 @@ def test_a18_7_verification_degraded_is_excluded_and_disclosed(repo, conn):
     assert scan.checked == 0
     assert scan.unverified == 1
     assert scan.findings == []
+
+    # A-18-7 field の value に照合縮退の開示が出ることを固定する(#131 軽微-1)。
+    # scan 結果と同じ形状の result dict を組み、build_alert_embed の A-18-7 分岐を検証する。
+    # decision_refs_verified=True の緑側 elif 分岐(a18.py L2835-2851 系)で開示が出る。
+    result = {
+        "violations": [],
+        "mismatches": [],
+        "direct_pushes": [],
+        "notes": [],
+        "unnotified_deemed": [],
+        "unrecorded_prs": [],
+        "resolution_bypass": None,
+        "reviewed_sha_mismatches": [],
+        "acknowledged_reviewed": [],
+        "reminder_tamper": [],
+        "acknowledged_reminder_tamper": [],
+        "trailer_findings": [],
+        "checked_protected_prs": 0,
+        "unverified_protected_prs": 1,
+        "compared_reviewed_shas": 0,
+        "reviewed_from_artifact": 0,
+        "decision_refs_verified": True,
+        "db_connected": True,
+        "prs_verified": True,
+        "pr_verification": {"verified": 0, "failed_open": 1, "reasons": {"一時障害": 1}},
+    }
+    embed = a18.build_alert_embed(result)
+    a187_field = next(
+        (f for f in embed["fields"] if "A-18-7" in f["name"]), None
+    )
+    assert a187_field is not None
+    assert "照合縮退 1 件を分母から除外" in a187_field["value"]
     conn.rollback()
 
 
@@ -2463,9 +2503,52 @@ def test_normal_run_title_has_no_dry_run_marker(repo, conn):
         deemed_since_commit=since, verify_prs=False, conn=conn,
     )
     assert result["decision_refs_verified"] is True
+    assert result["db_connected"] is True
     embed = a18.build_alert_embed(result)
     assert "DRY-RUN" not in embed["title"]
     conn.rollback()
+
+
+def test_dry_run_title_uses_db_connected_key(repo):
+    """**#131 軽微-3**: dry-run 判定は ``db_connected`` に一本化されており、
+    ``decision_refs_verified`` の値には依存しない。
+
+    build_alert_embed に手組みの result dict を渡して、
+    (a) db_connected=False なら DRY-RUN プレフィクスが付く、
+    (b) db_connected=True なら付かない、
+    (c) 判定は decision_refs_verified の値に依存しない、
+    を固定する。
+    """
+    base = {
+        "violations": [],
+        "mismatches": [],
+        "direct_pushes": [],
+        "notes": [],
+        "unnotified_deemed": [],
+        "unrecorded_prs": [],
+        "resolution_bypass": None,
+        "reviewed_sha_mismatches": [],
+        "acknowledged_reviewed": [],
+        "reminder_tamper": [],
+        "acknowledged_reminder_tamper": [],
+        "trailer_findings": [],
+        "checked_protected_prs": 0,
+        "unverified_protected_prs": 0,
+        "compared_reviewed_shas": 0,
+        "reviewed_from_artifact": 0,
+        "prs_verified": True,
+        "pr_verification": {"verified": 0, "failed_open": 0, "reasons": {}},
+    }
+    # (a) db_connected=False: 判定キーは db_connected のみ。
+    r_disconnected = dict(base, db_connected=False, decision_refs_verified=False)
+    assert "DRY-RUN(照合制限あり)" in a18.build_alert_embed(r_disconnected)["title"]
+    # (b) db_connected=True: DRY-RUN プレフィクスは付かない。
+    r_connected = dict(base, db_connected=True, decision_refs_verified=True)
+    assert "DRY-RUN" not in a18.build_alert_embed(r_connected)["title"]
+    # (c) decision_refs_verified の値に依存しないことを固定する:
+    #     db_connected=False かつ decision_refs_verified=True(不整合)でも DRY-RUN が付く。
+    r_mixed = dict(base, db_connected=False, decision_refs_verified=True)
+    assert "DRY-RUN(照合制限あり)" in a18.build_alert_embed(r_mixed)["title"]
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -3736,3 +3819,130 @@ def test_a18_9_acknowledged_finding_does_not_alert(repo):
     )
     assert ack_field is not None
     assert "r-alpha" in ack_field["value"]
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# #131 軽微-2: repos/<slug> 再問い合わせの in-process backoff
+#
+# F-2 是正で「一時障害を永続キャッシュしない」挙動は維持しつつ、直近の一時障害から
+# ``_REACH_RETRY_INTERVAL_SEC`` 未満の呼び出しは API を叩かずに前回のエラー理由を
+# 返す(障害継続中の自己増悪防止)。interval 経過後は必ず再試行する。
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def test_repo_reachability_error_has_in_process_backoff(monkeypatch):
+    """**#131 軽微-2**: 直近の一時障害から ``_REACH_RETRY_INTERVAL_SEC`` 未満の check は
+    ``repos/<slug>`` を再問い合わせせず、前回のエラー理由をそのまま返す。
+    """
+    calls: list[str] = []
+
+    def api_get(path: str) -> tuple[str, object]:
+        calls.append(path)
+        # 常に一時障害を返す(継続障害の状況)。
+        return ("error", "GitHub API 不達: URLError")
+
+    # 時計は 0.0 → 1.0(interval 60 未満)で固定。
+    ticks = iter([0.0, 1.0])
+    monkeypatch.setattr(a18.time, "monotonic", lambda: next(ticks))
+
+    verifier = a18.PRVerifier(slug=SLUG, api_get=api_get)
+    # 1回目: repos/<slug> を1回叩き、error → unverifiable。
+    s1, r1 = verifier.check(9)
+    assert s1 == "unverifiable"
+    assert "一時障害" in (r1 or "")
+    # 2回目(interval 未満): API を叩かず前回理由を返す(backoff 発動)。
+    s2, r2 = verifier.check(10)
+    assert s2 == "unverifiable"
+    assert r2 == r1
+    # repos/<slug> は 1回だけ、pulls/* は一切叩かれていない。
+    assert calls == [f"repos/{SLUG}"]
+
+
+def test_repo_reachability_error_retries_after_backoff_interval(monkeypatch):
+    """**#131 軽微-2**: ``_REACH_RETRY_INTERVAL_SEC`` 経過後は必ず再問い合わせする
+    (F-2 是正の「永続キャッシュしない」性質は保つ)。
+    """
+    responses: list[tuple[str, object]] = [
+        ("error", "GitHub API 不達: URLError"),  # 1回目 repos/<slug>
+        ("error", "GitHub API 不達: URLError"),  # 2回目(interval 経過)repos/<slug> 再試行
+    ]
+    calls: list[str] = []
+
+    def api_get(path: str) -> tuple[str, object]:
+        calls.append(path)
+        return responses.pop(0)
+
+    ticks = iter([0.0, a18._REACH_RETRY_INTERVAL_SEC + 0.1])
+    monkeypatch.setattr(a18.time, "monotonic", lambda: next(ticks))
+
+    verifier = a18.PRVerifier(slug=SLUG, api_get=api_get)
+    assert verifier.check(9)[0] == "unverifiable"
+    assert verifier.check(10)[0] == "unverifiable"
+    # interval 経過後は repos/<slug> を再度叩いている。
+    assert calls == [f"repos/{SLUG}", f"repos/{SLUG}"]
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# #131 中-1: verify_prs=False の開示を回帰テストで固定
+#
+# 現行実装は `prs_verified=False` → `pr_verification_degraded` が True → `has_findings`
+# True → タイトル ⚠️+専用 field で明示開示する経路が既に通っている。この経路が将来
+# 緩められた場合に即赤になるよう assertion で固定する。
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def _minimal_result(**overrides: Any) -> dict[str, Any]:
+    """build_alert_embed に渡す最小限の result dict(緑ベース)。"""
+    base: dict[str, Any] = {
+        "violations": [],
+        "mismatches": [],
+        "direct_pushes": [],
+        "notes": [],
+        "unnotified_deemed": [],
+        "unrecorded_prs": [],
+        "resolution_bypass": None,
+        "reviewed_sha_mismatches": [],
+        "acknowledged_reviewed": [],
+        "reminder_tamper": [],
+        "acknowledged_reminder_tamper": [],
+        "trailer_findings": [],
+        "checked_protected_prs": 0,
+        "unverified_protected_prs": 0,
+        "compared_reviewed_shas": 0,
+        "reviewed_from_artifact": 0,
+        "decision_refs_verified": True,
+        "db_connected": True,
+        "prs_verified": True,
+        "pr_verification": {"verified": 0, "failed_open": 0, "reasons": {}},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_pr_verification_degraded_true_when_prs_verified_false():
+    """**#131 中-1 の固定点**: ``prs_verified=False`` は
+    ``pr_verification_degraded`` を True にする(緑の分岐に落ちない)。
+    """
+    result = _minimal_result(prs_verified=False)
+    assert a18.pr_verification_degraded(result) is True
+    assert a18.has_findings(result) is True
+
+
+def test_verify_prs_false_embed_discloses_disabled_verification():
+    """**#131 中-1**: ``verify_prs=False`` 相当の result(``prs_verified=False``)は
+    (a) タイトルが ⚠️(所見あり=緑でない)、
+    (b) fields に「⚠️ GitHub PR 実在照合が成立していない」の field があり、
+        value に「照合が無効化された実行」を含む、
+    ことを固定する(この経路が将来緩められたら即赤になる回帰テスト)。
+    """
+    result = _minimal_result(prs_verified=False)
+    embed = a18.build_alert_embed(result)
+    assert "⚠️" in embed["title"]
+    assert "所見なし" not in embed["title"]
+    disc_field = next(
+        (f for f in embed["fields"]
+         if f["name"] == "⚠️ GitHub PR 実在照合が成立していない"),
+        None,
+    )
+    assert disc_field is not None
+    assert "照合が無効化された実行" in disc_field["value"]
