@@ -3503,7 +3503,13 @@ def test_a18_9_runs_through_run_a18_and_reaches_embed(repo):
     _seed_reminders(r)
     changed = _REMINDER_BASE.replace('date: "2026-09-01"', 'date: "2027-06-01"')
     _rt_write(r, _REMINDERS_PATH, changed, "ops: alpha の期日を後ろ倒し(証跡なし)")
-    result = a18.run_a18(r, since_commit=since, pr_since_commit=since, verify_prs=False)
+    result = a18.run_a18(
+        r,
+        since_commit=since,
+        pr_since_commit=since,
+        reminder_tamper_since_commit=since,
+        verify_prs=False,
+    )
     assert len(result["reminder_tamper"]) == 1
     assert result["reminder_tamper_checked"] == 1
     assert a18.has_findings(result)
@@ -3520,9 +3526,213 @@ def test_a18_9_runs_through_run_a18_and_reaches_embed(repo):
     _git(r2, "config", "user.email", "test@example.com")
     since_clean = _commit(r2, "config/governance.yaml", GOV_YAML, "governance: 批准コミット")
     result_clean = a18.run_a18(
-        r2, since_commit=since_clean, pr_since_commit=since_clean, verify_prs=False
+        r2,
+        since_commit=since_clean,
+        pr_since_commit=since_clean,
+        reminder_tamper_since_commit=since_clean,
+        verify_prs=False,
     )
     field_clean = next(
         f for f in a18.build_alert_embed(result_clean)["fields"] if "A-18-9" in f["name"]
     )
     assert "✅" in field_clean["value"]
+
+
+# ── F-11 再提出時の追加テスト(独立役員審査 2026-08-04 §6・R-1 再提出裁定) ────
+def test_a18_9_hunk_attribution_isolates_entries(repo):
+    """同一コミットで複数エントリを変更したとき、エントリ A の判定にエントリ B のハンクが
+    混入しないこと(行番号ベースのハンク帰属が正しく分離される)。probe で確認済みの
+    実装の要 — 回帰テストを固定する(F-11)。"""
+    r, since = repo
+    _seed_reminders(r)
+    changed = _REMINDER_BASE.replace(
+        "    status: pending\n\n  - id: r-beta",
+        "    status: done\n\n  - id: r-beta",
+    ).replace(
+        '      body: "beta 発火"',
+        '      body: "beta 発火 (see https://example.com/beta and b4f21b6abc12)"',
+    )
+    _rt_write(r, _REMINDERS_PATH, changed, "ops: alpha done + beta に証跡を書く")
+    scan = a18.check_reminder_tampering(r, since_commit=since)
+    # r-beta 側のハンクに証跡があっても r-alpha の終端遷移は所見になるべき。
+    assert [f["entry_id"] for f in scan.findings] == ["r-alpha"]
+    assert scan.findings[0]["kind"] == "terminal_without_evidence"
+
+
+def test_a18_9_pending_to_nonterminal_status_is_detected(repo):
+    """F-3: pending → 非終端 status(paused 等)への遷移も証跡なしなら所見になる
+    (終端ホワイトリスト廃止 — 未知の status 語彙による fail-open を閉じる)。"""
+    r, since = repo
+    _seed_reminders(r)
+    changed = _REMINDER_BASE.replace(
+        "    status: pending\n\n  - id: r-beta",
+        "    status: paused\n\n  - id: r-beta",
+    )
+    _rt_write(r, _REMINDERS_PATH, changed, "ops: alpha を paused に(証跡なし)")
+    scan = a18.check_reminder_tampering(r, since_commit=since)
+    findings = scan.findings
+    assert len(findings) == 1
+    assert findings[0]["kind"] == "terminal_without_evidence"
+    assert findings[0]["entry_id"] == "r-alpha"
+    assert findings[0]["to_status"] == "paused"
+
+
+def test_a18_9_merge_commit_tampering_is_detected(repo):
+    """F-4: マージコミット自身で持ち込む reminders 改変(evil merge)も検査される。
+    ``diff-tree``(-c/--cc なし)はマージにパス名を出さないため blob 直接比較に切り替えた。"""
+    r, since = repo
+    _seed_reminders(r)
+    # ブランチとメインで無関係ファイルを変更し、マージコミット自身で reminders を改ざんする。
+    _git(r, "checkout", "-q", "-b", "feat")
+    _commit(r, "docs/a.md", "a\n", "feat: 無関係な変更")
+    _git(r, "checkout", "-q", "main")
+    _commit(r, "docs/b.md", "b\n", "main: 無関係な変更")
+    _git(r, "merge", "--no-ff", "--no-commit", "feat")
+    tampered = _REMINDER_BASE.replace(
+        "    status: pending\n\n  - id: r-beta",
+        "    status: done\n\n  - id: r-beta",
+    )
+    (r / _REMINDERS_PATH).write_text(tampered, encoding="utf-8")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-m", "Merge branch 'feat'(解消と称して改ざん)")
+    scan = a18.check_reminder_tampering(r, since_commit=since)
+    # マージ自身で持ち込んだ pending→done(証跡なし)が検出されるべき。
+    kinds = [f["kind"] for f in scan.findings]
+    assert "terminal_without_evidence" in kinds
+    assert any(f.get("entry_id") == "r-alpha" for f in scan.findings)
+
+
+def test_a18_9_unquoted_date_deferral_is_detected(repo):
+    """F-5(i): YAML 非クオート日付(``datetime.date``)の後ろ倒しも検出する
+    (``str(d)`` 正規化 — クオート外しと同時の後ろ倒しで検査を外れていた)。"""
+    r, since = repo
+    _seed_reminders(r)
+    changed = _REMINDER_BASE.replace('date: "2026-09-01"', "date: 2027-12-01")
+    _rt_write(r, _REMINDERS_PATH, changed, "ops: alpha の期日を後ろ倒し(非クオート)")
+    scan = a18.check_reminder_tampering(r, since_commit=since)
+    findings = scan.findings
+    assert len(findings) == 1
+    assert findings[0]["kind"] == "deadline_deferred"
+    assert findings[0]["entry_id"] == "r-alpha"
+    assert findings[0]["before"] == "2026-09-01"
+    assert findings[0]["after"] == "2027-12-01"
+
+
+def test_a18_9_deadline_condition_removal_is_detected(repo):
+    """F-5(ii): date_after 条件そのものの削除も所見(発火条件の削除は期日変更より強い改変)。"""
+    r, since = repo
+    _seed_reminders(r)
+    # r-alpha の date_after 条件を消して、type を bq_row_exists に書き換える。
+    changed = _REMINDER_BASE.replace(
+        "      - type: date_after\n"
+        '        date: "2026-09-01"',
+        "      - type: bq_row_exists\n"
+        "        query: SELECT 1",
+    )
+    _rt_write(r, _REMINDERS_PATH, changed, "ops: alpha の date_after 条件を削除")
+    scan = a18.check_reminder_tampering(r, since_commit=since)
+    findings = [f for f in scan.findings if f.get("entry_id") == "r-alpha"]
+    assert len(findings) == 1
+    assert findings[0]["kind"] == "deadline_removed"
+    assert findings[0]["before"] == "2026-09-01"
+
+
+def test_a18_9_weekly_fired_notation_is_recognized_as_evidence(repo):
+    """F-1: 週次ジョブが書く ``"fired: <ISO日付>"`` の記法は正当な発火として証跡と認められる
+    (weekly.py の set_reminder_status が唯一この形で書く — 一般の日付までは広げない)。"""
+    r, since = repo
+    _seed_reminders(r)
+    # weekly.py の set_reminder_status が書く実際の形式を再現する: `status: "fired: 2026-08-05"`。
+    changed = _REMINDER_BASE.replace(
+        '    status: pending\n\n  - id: r-beta',
+        '    status: "fired: 2026-08-05"\n\n  - id: r-beta',
+    )
+    _rt_write(
+        r, _REMINDERS_PATH, changed,
+        "chore(ops): reminder r-alpha fired",
+    )
+    scan = a18.check_reminder_tampering(r, since_commit=since)
+    # weekly.py 由来の fired 遷移は無音であるべき(証跡として認める)。
+    assert scan.findings == []
+    assert scan.checked == 1
+
+
+def test_a18_9_trailered_count_is_disclosed(repo):
+    """F-2: Approved トレーラで対象外にしたコミット数(``trailered``)が戻り値と embed に
+    分母として出る(0 件でも見える形で開示)。"""
+    r, since = repo
+    _seed_reminders(r)
+    changed = _REMINDER_BASE.replace('date: "2026-09-01"', 'date: "2027-06-01"')
+    _commit(
+        r, _REMINDERS_PATH, changed,
+        "ops: alpha の期日を後ろ倒し\n\nApproved: https://github.com/x/y/issues/2",
+    )
+    scan = a18.check_reminder_tampering(r, since_commit=since)
+    # 初期化コミット(_seed_reminders)も Approved トレーラ付きで書かれているので、
+    # 期日後ろ倒しコミットと合わせて trailered は 2 件になる(分母として明示)。
+    assert scan.trailered == 2
+    assert scan.checked == 0
+    assert scan.findings == []
+    # embed の 0 件時の緑行に trailered が分母として出ることを確認。
+    result = a18.run_a18(
+        r,
+        since_commit=since,
+        pr_since_commit=since,
+        reminder_tamper_since_commit=since,
+        verify_prs=False,
+    )
+    field = next(
+        f for f in a18.build_alert_embed(result)["fields"] if "A-18-9" in f["name"]
+    )
+    assert "Approved トレーラ付きで対象外 2 件" in field["value"]
+
+
+def test_a18_9_acknowledged_finding_does_not_alert(repo):
+    """F-8: ``kind: a18-9`` の受容が効き、has_findings を立てない(所見は履歴の再走査で
+    毎週再現するため、受容が無いと1件で週次が恒常 ⚠️ 化する — A-18-8 受容拡張と同じ規律)。"""
+    r, since = repo
+    _seed_reminders(r)
+    changed = _REMINDER_BASE.replace(
+        "    status: pending\n\n  - id: r-beta",
+        "    status: done\n\n  - id: r-beta",
+    )
+    sha = _rt_write(r, _REMINDERS_PATH, changed, "ops: alpha を done に(証跡なし)")
+
+    # governance.yaml に受容記録(kind: a18-9)を追加する。
+    gov_with_ack = GOV_YAML + (
+        "acknowledged_findings:\n"
+        f"  - kind: a18-9\n"
+        f"    commit: {sha}\n"
+        f"    kind_finding: terminal_without_evidence\n"
+        f"    entry_id: r-alpha\n"
+        "    acknowledged_on: 2026-08-04\n"
+        "    approval_ref: https://github.com/x/y/pull/135\n"
+        "    reason: 独立役員審査 F-8 の受容テスト\n"
+    )
+    _commit(
+        r, "config/governance.yaml", gov_with_ack,
+        "governance: A-18-9 受容を追加\n\nApproved: https://github.com/x/y/issues/3",
+    )
+    result = a18.run_a18(
+        r,
+        since_commit=since,
+        pr_since_commit=since,
+        reminder_tamper_since_commit=since,
+        verify_prs=False,
+    )
+    # 所見は受容側に落ちる。
+    assert result["reminder_tamper"] == []
+    assert len(result["acknowledged_reminder_tamper"]) == 1
+    acked = result["acknowledged_reminder_tamper"][0]
+    assert acked["entry_id"] == "r-alpha"
+    assert acked["kind"] == "terminal_without_evidence"
+    assert acked["ack_reason"] == "独立役員審査 F-8 の受容テスト"
+    # A-18-9 は has_findings を立てない(他の検査が緑なら全体緑)。
+    # 受容済みは embed の別枠に出る。
+    ack_field = next(
+        (f for f in a18.build_alert_embed(result)["fields"]
+         if "受容済みの A-18-9" in f["name"]),
+        None,
+    )
+    assert ack_field is not None
+    assert "r-alpha" in ack_field["value"]
