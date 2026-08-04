@@ -989,6 +989,190 @@ def test_incomplete_acknowledgement_entry_is_disclosed():
     assert sum("commit / paths のいずれかが欠落" in n for n in notes) == 2
 
 
+# ── 受容の承継(supersedes — reminder ack-supersede-mechanism)────────────────
+#
+# 保護領域を後から足すと違反のパス集合が変わり、完全一致キーの受容が自動的に外れる。
+# 受容記録は追記オンリーなので paths の書換もできず、「受容済み evil merge が触れたファイルを
+# 含む tree は以後 protected_areas に追加できない」ラチェットになっていた。承継はこれを外す。
+# ────────────────────────────────────────────────────────────────────────────
+def _ack_entries(r: Path, entries: list[dict]) -> None:
+    """一時リポジトリの governance.yaml に受容エントリ列をそのまま書き込む。"""
+    gov = yaml.safe_load(GOV_YAML)
+    gov["acknowledged_findings"] = entries
+    (r / "config" / "governance.yaml").write_text(
+        yaml.safe_dump(gov, allow_unicode=True), encoding="utf-8"
+    )
+
+
+def _ack_entry(commit: str, paths: list[str], **extra) -> dict:
+    return {
+        "commit": commit,
+        "paths": paths,
+        "reason": "是正不能な歴史的 evil merge(テスト)",
+        "approval_ref": "https://github.com/x/y/pull/1",
+        "acknowledged_on": "2026-08-04",
+        **extra,
+    }
+
+
+def _two_path_violation(r: Path) -> str:
+    """2つの保護パス(docs/protected.md・src/prot/ks.py)に触れる無承認コミットを作る。"""
+    (r / "docs").mkdir(exist_ok=True)
+    (r / "docs" / "protected.md").write_text("v2\n", encoding="utf-8")
+    return _commit(r, "src/prot/ks.py", "x = 1\n", "chore: 2つの保護パスに触れる無承認変更")
+
+
+PATHS_2 = ["docs/protected.md", "src/prot/ks.py"]
+
+
+def test_supersede_inherits_acknowledgement_and_suppresses_stale_note(repo):
+    """拡張された新エントリが旧エントリを承継する: 違反は受容され、陳腐化警告は出ない。"""
+    r, since = repo
+    sha = _two_path_violation(r)
+    # 旧エントリ(保護領域追加の前に登録されたもの)はパス1件のまま残す(追記オンリー)。
+    _ack_entries(
+        r,
+        [
+            _ack_entry(sha, ["docs/protected.md"]),
+            _ack_entry(
+                sha, PATHS_2,
+                supersedes={"commit": sha, "paths": ["docs/protected.md"]},
+            ),
+        ],
+    )
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert result["violations"] == []
+    assert [a["commit"] for a in result["acknowledged"]] == [sha[:12]]
+    # 承継された旧エントリは陳腐化として鳴らさない。
+    assert not any("エントリが一致する違反を持たない" in n for n in result["notes"])
+    # ただし承継の事実は必ず notes に出る(履歴を残す)。
+    note = next(n for n in result["notes"] if n.startswith("受容の承継"))
+    assert "src/prot/ks.py" in note and sha[:12] in note
+
+
+def test_supersede_with_shrinking_paths_is_rejected(repo):
+    """パス集合の縮小は承継として認めない(受容の隠蔽と区別できない)。"""
+    r, since = repo
+    sha = _two_path_violation(r)
+    _ack_entries(
+        r,
+        [
+            _ack_entry(sha, PATHS_2),
+            # 「src/prot/ks.py への言及だけ落とす」形の差し替え。
+            _ack_entry(
+                sha, ["docs/protected.md"], supersedes={"commit": sha, "paths": PATHS_2}
+            ),
+        ],
+    )
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    # 旧エントリは有効なままなので違反自体は受容されるが、承継は成立していない。
+    assert [a["commit"] for a in result["acknowledged"]] == [sha[:12]]
+    assert result["acknowledged"][0]["files"] == PATHS_2
+    assert any("supersedes が無効" in n and "拡張になっていない" in n for n in result["notes"])
+    assert not any(n.startswith("受容の承継") for n in result["notes"])
+
+
+def test_rejected_supersede_entry_does_not_acknowledge(repo):
+    """不当な承継宣言を持つエントリは受容として効かない(fail-safe: 違反は出たまま)。"""
+    r, since = repo
+    sha = _two_path_violation(r)
+    _ack_entries(
+        r,
+        [
+            # 承継先が存在しない(旧エントリを書かずに承継を主張する)。
+            _ack_entry(sha, PATHS_2, supersedes={"commit": sha, "paths": ["migrations/x.sql"]}),
+        ],
+    )
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [v["commit"] for v in result["violations"]] == [sha[:12]]
+    assert result["acknowledged"] == []
+    assert any("承継先の受容エントリが" in n for n in result["notes"])
+
+
+def test_supersede_of_other_commit_is_rejected(repo):
+    """別コミットの受容は承継できない(差し替えによる別違反の巻き込みを塞ぐ)。"""
+    r, since = repo
+    other = _commit(r, "docs/protected.md", "v2\n", "docs: 別の無承認変更")
+    sha = _commit(r, "src/prot/ks.py", "x = 1\n", "feat: 承継したい側の無承認変更")
+    _ack_entries(
+        r,
+        [
+            _ack_entry(other, ["docs/protected.md"]),
+            _ack_entry(
+                sha, ["src/prot/ks.py"],
+                supersedes={"commit": other, "paths": ["docs/protected.md"]},
+            ),
+        ],
+    )
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [v["commit"] for v in result["violations"]] == [sha[:12]]
+    assert any("同一コミットの受容に限る" in n for n in result["notes"])
+
+
+def test_forward_supersede_is_rejected(repo):
+    """承継先は自分より前になければならない(追記オンリーの順序 = 循環の封鎖)。"""
+    r, since = repo
+    sha = _two_path_violation(r)
+    _ack_entries(
+        r,
+        [
+            _ack_entry(sha, PATHS_2, supersedes={"commit": sha, "paths": ["docs/protected.md"]}),
+            _ack_entry(sha, ["docs/protected.md"]),  # 承継先が後ろにある
+        ],
+    )
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert [v["commit"] for v in result["violations"]] == [sha[:12]]
+    assert any("承継先の受容エントリが" in n for n in result["notes"])
+
+
+def test_supersede_without_reason_is_rejected():
+    """理由なき差し替えは承継として扱わない。"""
+    sha = "a" * 40
+    old = _ack_entry(sha, ["CLAUDE.md"])
+    new = _ack_entry(sha, ["CLAUDE.md", "config/ips.yaml"],
+                     supersedes={"commit": sha, "paths": ["CLAUDE.md"]})
+    new["reason"] = "  "
+    _index, notes, superseded = a18.acknowledged_index({"acknowledged_findings": [old, new]})
+    assert superseded == set()
+    assert any("reason が無い" in n for n in notes)
+
+
+def test_malformed_supersede_declaration_is_disclosed():
+    """スカラの supersedes は旧エントリを一意に指せないので無効(黙って落とさない)。"""
+    sha = "a" * 40
+    entries = [
+        _ack_entry(sha, ["CLAUDE.md"]),
+        _ack_entry(sha, ["CLAUDE.md", "config/ips.yaml"], supersedes=sha),
+    ]
+    index, notes, superseded = a18.acknowledged_index({"acknowledged_findings": entries})
+    assert superseded == set() and len(index) == 1
+    assert any("commit / paths を持つマップで書く" in n for n in notes)
+
+
+def test_supersede_chain_is_transitive(repo):
+    """三世代の承継(A ← B ← C)でも中間・初代とも陳腐化として鳴らない。"""
+    r, since = repo
+    (r / "docs").mkdir(exist_ok=True)
+    (r / "docs" / "protected.md").write_text("v2\n", encoding="utf-8")
+    (r / "migrations").mkdir(exist_ok=True)
+    (r / "migrations" / "0001_x.sql").write_text("-- x\n", encoding="utf-8")
+    sha = _commit(r, "src/prot/ks.py", "x = 1\n", "chore: 3つの保護パスに触れる無承認変更")
+    three = ["docs/protected.md", "migrations/0001_x.sql", "src/prot/ks.py"]
+    _ack_entries(
+        r,
+        [
+            _ack_entry(sha, ["docs/protected.md"]),
+            _ack_entry(sha, PATHS_2, supersedes={"commit": sha, "paths": ["docs/protected.md"]}),
+            _ack_entry(sha, three, supersedes={"commit": sha, "paths": PATHS_2}),
+        ],
+    )
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert result["violations"] == []
+    assert result["acknowledged"][0]["files"] == three
+    assert not any("エントリが一致する違反を持たない" in n for n in result["notes"])
+    assert sum(n.startswith("受容の承継") for n in result["notes"]) == 2
+
+
 # ── 実リポジトリの受容記録(承認手続の固定)────────────────────────────────────
 def _real_governance() -> dict:
     root = Path(__file__).resolve().parents[2]
@@ -1020,14 +1204,45 @@ def test_acknowledgement_registration_requires_approval():
 
 
 def test_real_repo_acknowledged_findings_are_matched():
-    """実リポジトリの受容エントリが実在の違反に一致している(陳腐化していない)。"""
+    """実リポジトリの受容エントリが実在の違反に一致している(陳腐化していない)。
+
+    承継(supersedes)された旧エントリは一致する違反を持たないのが正常なので分母から外す。
+    分母を「承継されていないエントリ」に取ることで、承継を口実にした受容の空振り
+    (新エントリが実在の違反に当たっていない)は従来どおり落ちる。
+    """
     root = Path(__file__).resolve().parents[2]
     # verify_prs=False: テストは GitHub API に触れない(ネットワーク・トークンに依存させない)。
     # PR 実在照合そのものは注入した api_get で下の専用テスト群が検証する。
     result = a18.run_a18(root, verify_prs=False)
-    assert len(result["acknowledged"]) == len(_real_governance()["acknowledged_findings"])
+    index, _notes, superseded = a18.acknowledged_index(_real_governance())
+    live = [k for k in index if k not in superseded]
+    assert len(result["acknowledged"]) == len(live)
     assert not any("acknowledged_findings のエントリが一致する違反を持たない" in n
                    for n in result["notes"])
+
+
+def test_real_repo_execution_engine_is_protected():
+    """執行層(発注 → 記帳の唯一の経路・コストモデルの実体)が保護領域である。
+
+    受容ラチェット(supersedes 機構で解消)のために phase-2 が見送った登録。
+    ここが外れると config/execution.yaml のコスト率を無視する改変が無審査で通る。
+    """
+    gov = _real_governance()
+    by_path = {str(e["path"]): str(e["area"]) for e in gov["protected_areas"]}
+    assert by_path.get("src/ryza/execution/**") == "execution_engine"
+    assert by_path.get("config/execution.yaml") == "execution_engine"
+
+
+def test_real_repo_supersede_is_recorded_not_rewritten():
+    """承継は旧エントリを残したまま行われている(追記オンリーの維持)。"""
+    entries = _real_governance()["acknowledged_findings"]
+    chained = [e for e in entries if e.get("supersedes")]
+    assert chained, "承継エントリが消えている(supersedes 機構の導線の確認)"
+    keys = {a18._ack_key(str(e["commit"]), e["paths"]) for e in entries}
+    for e in chained:
+        target = a18._ack_key(str(e["supersedes"]["commit"]), e["supersedes"]["paths"])
+        assert target in keys, f"承継先の旧エントリが削除されている: {target[0][:12]}"
+        assert set(e["paths"]) > set(e["supersedes"]["paths"])
 
 
 # ────────────────────────────────────────────────────────────────────────────
