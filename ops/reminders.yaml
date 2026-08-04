@@ -1380,6 +1380,47 @@ reminders:
       body: "月曜の ops-weekly 実行後、BQ コスト行が正しく出ていること・誤った『テーブル欠落』起票が無いことを確認する(gcp-iam-inventory.md §8.4/§11)。問題があれば §9.5 のロールバック(bigquery.dataViewer の再付与)ではなくデータセット ACL の修正を先に試す。"
     status: pending
 
+  - id: curated-universe-daily-reconcile
+    what: "承認済み curated ユニバース config の DB 反映が人手の一回きり操作で、実行漏れが無言のドリフトになる(2026-08-04 の fm.jim universe=0)"
+    # 起票前に是正済みのため発火条件は空(conditions は OR 評価 → 空なら常に False)。
+    # 既発火判定 _is_fired は status が "fired" で始まる場合のみ真であり、`done` は素通り
+    # する。ここに過去日の date_after を書くと、完了済みの本項目が週次ジョブで Issue を
+    # 起票してしまう(既存の done 項目はいずれも date_after が未来日のため露見していない)。
+    conditions: []
+    action:
+      type: issue_create
+      title: "daily に curated ユニバースの冪等な自動照合を入れる"
+      labels: [impl]
+      body: "2026-08-04 09:00 JST の日次サイクル初回実運用で fm.jim の universe が 0 だった。PR #99 で承認済み(Approved トレーラあり)の config/universe/jim-curated.yaml が market.instrument_classification へ反映されておらず、docs/ops/fm-curated-universe.md の CLI を人が一度実行する運用ステップが抜けていた(設計リードが 09:28 に手動反映・granted=35)。問題の本質は個別の実行漏れではなく、『config が正』と宣言しながら config と DB の一致を保証する機構が無いことである。承認・マージ・CI はすべて緑で、どの統制もこの状態を検出しない。とくに撤回(config から銘柄を消す=売買母集団を狭める)の未反映はリスク側に倒れる。是正: daily(FM 段の前)に config/universe/*.yaml の冪等な自動照合を配線し、承認検査に落ちたファイルは反映せずスキップして実行サマリと専用 embed で警告する。"
+    # 判断と是正(2026-08-04):
+    #   原因 — 反映が「手順書の CLI を人が一度実行する」運用だった。fail-closed の設計が
+    #          沈黙を深くしている(タグが無ければユニバースは空になり、空のユニバースは
+    #          発注ゼロという設計どおりの挙動を返すため、異常として現れない)
+    #   是正 — src/ryza/jobs/daily.py に curated 段(reconcile_curated_universes)を新設。
+    #          config/universe/*.yaml を毎日照合し、差分ゼロの日は unchanged のみ。
+    #          冪等性は upsert_classification の「as_of 時点の有効行と内容同一なら履歴に
+    #          追記しない」挙動に乗せ、tests/jobs/test_curated.py が 6 日ぶんの再実行で
+    #          履歴行数が増えないことを固定する(risk/classify.py の変更は不要だった)
+    #   段順 — 初版は risk 段の直前(FM の後ろ)に置いたが、それでは当日の撤回が当日の Jim
+    #          提案に効かず、本項目の動機(撤回の未反映はリスク側に倒れる)を果たさない。
+    #          **設計リード裁定 2026-08-04 により FM 段の前へ移動済み**。付与も当日有効に
+    #          なるが、curated 定義の変更は Approved トレーラつき PR マージを経ているため
+    #          当日有効で問題ない。回帰は tests/jobs/test_curated.py の
+    #          test_same_day_revocation_narrows_the_fm_universe が固定する
+    #          (段を FM の後ろへ戻すと universe=1 のまま落ちる)
+    status: done # 2026-08-04 実装: daily の curated 段 + 冪等性テスト + 手順書の書き換え(branch daily-curated-reconcile)
+
+  - id: estat-appid-registration
+    what: "e-Stat の appId が未登録で、daily の estat 取込が毎日 skipped になっている(user-action)"
+    conditions:
+      - type: date_after
+        date: "2026-08-18"
+    action:
+      type: notify
+      channel: 運営
+      body: "【代表アクション】e-Stat(日本政府統計の総合窓口)API の appId が未登録のため、日次サイクルの estat 取込が毎日『資格情報未設定』で skipped になっている(実行サマリの ingest 行 estat:skipped)。https://www.e-stat.go.jp/api/ でユーザー登録し appId を発行して提供いただければ、Secret Manager の `estat-app-id` に登録して配線する(Secret 名・accessor 付与は ops/deploy-daily.sh に宣言済み。docs/tasks/T-012-ingestion-batch2.md)。Discord での依頼は 2026-08-04 に送付済み。期限までに提供が無ければ再度依頼する。"
+    status: pending
+
   - id: t019-fm-second-gen-impl
     what: "FM 第二陣(Stan=グローバルマクロ・Peter=GARP)のシグナル実装本体 — 役職資産と指示書は 2026-08-04 に先行整備済み"
     conditions:
