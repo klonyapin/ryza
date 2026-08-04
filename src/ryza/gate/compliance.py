@@ -488,9 +488,19 @@ def _g6_cash_floor(ctx: _Ctx) -> list[Reason]:
     — ショート自体は殺さず、現金が下限未満のときにだけ止める。
     sell(ロング解消の売り・現金増)と cover(買い戻し・現金減)は従来どおり。
 
+    **既知の非対称(フリップ売り・独立役員審査 2026-08-04 O-1)**: ``side == "sell"``
+    で保有ロング数量を超える qty を出すと約定後は実質ネットショート
+    (``post_pod_qty < 0``)になるが、本関数は side 文字列でしか分岐しないため
+    売却代金全額を自由現金と数えて早期リターンする(担保拘束を見ない)。
+    現状このフリップは G-9 が ``side == "short" or ctx.post_pod_qty < 0``
+    (:func:`_g9_short`)で全て block するため無防備な経路は存在しないが、
+    ショート解禁(G-9 緩和)の際に G-6 だけこの非対称が残ると穴になる。
+    完全な対称化(``or ctx.post_pod_qty < 0`` で担保拘束扱い)は
+    g6-short-margin-model のスコープに含めて G-9 緩和と同時に実装する。
+
     TODO(g6-short-margin-model / ops/reminders.yaml):
       担保モデル導入時に精緻化する(必要担保・維持証拠金・クローズ売りの
-      avg_cost 考慮など)。
+      avg_cost 考慮・フリップ売りの対称化など)。
     """
     assert ctx.state.nav is not None and ctx.state.cash is not None
     # ショートの売却代金は担保拘束 → 自由現金には加算しない(fail-closed 近似)。
