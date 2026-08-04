@@ -335,6 +335,11 @@ def test_decision_signal_rank_matches_detection_and_weights_by_topic():
     assert decision_signal_rank("今日は天気が良い。") == RANK_NONE
     # 3専決の語と数量表記が同居する発言は3専決として扱う(審査の実測ケース)。
     assert decision_signal_rank("実弾に切り替えて¥100万を入れたい。") == RANK_RESERVED_MATTER
+    # 科学的記数法(A-12-16 の是正 — F-13-4)。従来は 1e6 円 が数量として拾われず、
+    # 「金額の表記」による兆候検出が抜けた。単位を持つ場合は拾う。
+    assert decision_signal_rank("¥1e6 を検討したい。") == RANK_AMOUNT_ONLY
+    assert decision_signal_rank("1e6 円を投じる。") == RANK_AMOUNT_ONLY
+    assert decision_signal_rank("1.5e3% は攻めすぎ。") == RANK_AMOUNT_ONLY
 
 
 def test_guard_scope_spans_turns_since_last_critic_speech():
