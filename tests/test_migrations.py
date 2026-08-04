@@ -267,6 +267,83 @@ def test_journal_lines_delete_rejected(conn):
     conn.rollback()
 
 
+# ── 0035: TRUNCATE ガード(A-12 F-4 / Issue #119)────────────────────────────
+# 行トリガ(BEFORE UPDATE OR DELETE)は TRUNCATE では発火しない — PostgreSQL の仕様。
+# したがって `test_journal_lines_delete_rejected` は「TRUNCATE で全削除される」経路を
+# 見ておらず、0035 まではその一撃で仕訳証跡を全消しできた(A-12 pass1b-3)。
+# 0035 は文トリガ+REVOKE で塞いだので、両表の TRUNCATE が拒否されることを固定する。
+@pytest.mark.parametrize(
+    ("stmt", "why"),
+    [
+        # journal_lines 単独 — 追記オンリー明細の全消しを塞ぐ
+        ("TRUNCATE ledger.journal_lines", "journal_lines 単独"),
+        # journal_entries には journal_lines からの FK があるため CASCADE 経由でしか
+        # TRUNCATE できない。CASCADE で親と子の両方に文トリガが発火することを見る
+        # (どちらか一方でも通ればガードが空いている)。
+        ("TRUNCATE ledger.journal_entries CASCADE", "CASCADE で親子連鎖"),
+    ],
+)
+def test_ledger_append_only_truncate_rejected(conn, stmt, why):
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.RaiseException):
+            cur.execute(stmt)  # noqa: S608 - パラメタは固定リスト
+    conn.rollback()
+
+
+def test_ledger_truncate_guard_triggers_exist_and_are_enabled(conn):
+    """0035 の文トリガが両表に存在し、有効(tgenabled='O')であること。
+
+    0024 dev_chat / 0026 分類履歴と同基準 —— トリガの存在だけでは足りない。所有ロール
+    は ``ALTER TABLE ... DISABLE TRIGGER USER`` 1 行で無音化でき、'D' のまま戻し忘れれば
+    追記オンリーは空手形になる。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT tgrelid::regclass::text, tgname, tgenabled
+            FROM pg_trigger
+            WHERE tgrelid IN (
+                'ledger.journal_entries'::regclass,
+                'ledger.journal_lines'::regclass
+            )
+              AND tgname LIKE '%_no_truncate'
+              AND NOT tgisinternal
+            ORDER BY tgrelid::regclass::text, tgname
+            """
+        )
+        rows = cur.fetchall()
+    assert rows == [
+        ("ledger.journal_entries", "journal_entries_no_truncate", "O"),
+        ("ledger.journal_lines",   "journal_lines_no_truncate",   "O"),
+    ], rows
+
+
+# ── 0035: journal_lines 行レベル CHECK(非負・両建て禁止 — A-12 pass1-3)────
+# アプリ層(posting.post_entry)の検査を DB 側でも要求する。DB を直接叩く経路
+# (psql・別実装のジョブ)にも防壁を効かせるため、CHECK 制約単体で拒否されることを見る。
+@pytest.mark.parametrize(
+    ("debit", "credit", "why"),
+    [
+        (-1, 0, "debit 負"),
+        (0, -1, "credit 負"),
+        (100, 50, "両建て(両方非零)"),
+    ],
+)
+def test_journal_lines_amounts_check_rejects(conn, debit, credit, why):
+    with conn.cursor() as cur:
+        entry_id = _new_entry(cur)
+        with pytest.raises(psycopg.errors.CheckViolation):
+            cur.execute(
+                """
+                INSERT INTO ledger.journal_lines
+                    (entry_id, line_no, book_id, account_id, debit, credit, currency)
+                VALUES (%s, 1, 'DEMO_FUND', 'cash', %s, %s, 'JPY')
+                """,
+                (entry_id, debit, credit),
+            )
+    conn.rollback()
+
+
 # ── 受け入れ基準 7: シード後の DEMO_FUND 試算表残高 ────────────────────────
 def test_seed_trial_balance(conn):
     with conn.cursor() as cur:
