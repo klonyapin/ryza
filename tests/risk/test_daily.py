@@ -238,6 +238,82 @@ def test_load_nav_series_pending_flow_after_last_snapshot(conn, run_id):
     ]
 
 
+def test_f14a_future_entry_date_goes_to_pending(conn, run_id):
+    """F-14a 異常系(1): 系列最終日より**未来**の entry_date は points に混入せず pending へ。
+
+    ``pending_flows_after_last_snapshot`` の意味論を **F-14a リグレッション固定**として明示。
+    仕訳日が測定系列の外(未来側)に落ちる場合、その額を **黙って points に混ぜる**
+    (= 直近スナップショットのフロー扱いにする)経路が復活しないことを固定する
+    (Issue #124 pass5-2 の是正点 — 「黙って落とさない/黙って混ぜない」)。
+    """
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 2): 1_000_000, date(2030, 1, 5): 1_000_000})
+    before = _net_flows(conn)
+    future_amount = Decimal(500_000)
+    _seed_capital_flow(conn, run_id, amount=int(future_amount), entry_date=date(2030, 1, 6))
+    loaded = load_nav_series(conn, "DEMO_FUND")
+    # points に混入していない: 各点の net_flow は仕訳前と同一。
+    assert {p.day: p.net_flow for p in loaded.points} == before
+    # pending に現れる。
+    assert [(p.entry_date, p.amount) for p in loaded.pending_flows] == [
+        (date(2030, 1, 6), future_amount)
+    ]
+
+
+def test_f14a_entry_before_series_start_attaches_to_first_point(conn, run_id):
+    """F-14a 異常系(2): 系列開始より**過去**の entry_date は先頭点に寄る(現行挙動の固定)。
+
+    「その日以降の最初の snap_date」の規約(``NAV_FLOW_SQL`` `attributed` CTE)に従い、
+    測定系列の始点より前の仕訳も**捨てずに**先頭点へ帰属させる — 帰属先の snap_date が
+    存在するため pending にはならない。**この経路が「黙って消える」に退化しないこと**を
+    F-14a として固定する(Issue #124 pass5-2 の是正点)。実測経路が既に固定されている
+    テスト(``test_load_nav_series_flow_before_series_start``)と同じ挙動を、**pending
+    に紛れ込まない**ことの検証と組み合わせて多重に留める。
+    """
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 5): 1_000_000, date(2030, 1, 6): 1_100_000})
+    before = _net_flows(conn)
+    past_amount = Decimal(400_000)
+    _seed_capital_flow(conn, run_id, amount=int(past_amount), entry_date=date(2030, 1, 1))
+    loaded = load_nav_series(conn, "DEMO_FUND")
+    # 先頭点に BOP/EOP のいずれかで寄る(現行実装は当日仕訳=EOP・以前=BOP)。
+    assert loaded.points[0].net_flow - before[date(2030, 1, 5)] == past_amount
+    # pending には出ない(帰属できる snap_date があるため)。
+    assert loaded.pending_flows == ()
+
+
+def test_f14a_sum_preservation_across_anomalies(conn, run_id):
+    """F-14a 異常系(3): 系列先頭より過去+最終より未来のフローがあっても**合計が保存**される。
+
+    F-14a リグレッション固定の総和不変量(Issue #124 pass5-2):
+    ``sum(points[i].net_flow) + sum(pending.amount)`` は投入したフロー総額に等しい。
+    先頭より前を「黙って落とす」経路や、最終より後を points に紛れ込ませて二重計上する
+    経路(どちらも歴史的なバグの典型)を、単一の総和 assert で同時に塞ぐ。
+
+    先頭点にはシード(0006/0011)由来の開始仕訳が寄るため、テストは投入前後の**増分**で
+    判定する。
+    """
+    _clear_nav(conn)
+    _seed_nav_days(conn, {date(2030, 1, 5): 1_000_000, date(2030, 1, 6): 1_100_000})
+    before = load_nav_series(conn, "DEMO_FUND")
+    before_total = sum((p.net_flow for p in before.points), start=Decimal(0)) + sum(
+        (p.amount for p in before.pending_flows), start=Decimal(0)
+    )
+    injected = [
+        (date(2030, 1, 1), Decimal(400_000)),   # 系列先頭より過去
+        (date(2030, 1, 5), Decimal(150_000)),   # 系列内(当日)
+        (date(2030, 1, 8), Decimal(-200_000)),  # 系列最終より未来(払戻)
+    ]
+    for d, amt in injected:
+        _seed_capital_flow(conn, run_id, amount=int(amt), entry_date=d)
+    after = load_nav_series(conn, "DEMO_FUND")
+    after_total = sum((p.net_flow for p in after.points), start=Decimal(0)) + sum(
+        (p.amount for p in after.pending_flows), start=Decimal(0)
+    )
+    expected = sum((amt for _, amt in injected), start=Decimal(0))
+    assert after_total - before_total == expected
+
+
 def test_run_risk_daily_reports_pending_flow(conn, run_id):
     """未反映フローは独立フィールドで注記し、締めを跨いでいれば urgent(重要-4・中-5)。"""
     _clear_nav(conn)

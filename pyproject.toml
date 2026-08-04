@@ -65,3 +65,10 @@ select = ["E", "F", "I", "W", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v"
+# 明示的なマーカー登録(未登録マーカーは pytest が PytestUnknownMarkWarning を出す)。
+# F-14b(Issue #124 pass5-4): commit を伴うテストを機械的に選別・直列化するための
+# マーカー。現状の実行構成は変更しないが、将来 xdist 等で並列化する際に
+# ``-m "not commits_shared_state"`` で分離できるようにする。
+markers = [
+    "commits_shared_state: テスト DB に対して commit を伴い共有状態(ops.trading_state 等)を変更するテスト。原状復帰は finally で行うが、並行実行では他テストと干渉し得るため直列化対象として明示する(F-14b / Issue #124)",
+]
