@@ -381,6 +381,127 @@ def test_g6_cash_raising_sell_passes_below_floor(ips, mandates):
     assert result.verdict == "pass"
 
 
+def _loose_short_mandate() -> Mandate:
+    """G-6 単独検証用のショート許可マンデート(G-9 の別条項に触れない緩い設定)。"""
+    return Mandate(
+        fm="loose", version="test", approved_at="2026-08-03",
+        universe=("jp_equity_cash",), capital_jpy=10_000_000,
+        pod_sigma_budget=0.5, pod_gross_leverage_limit=10.0, pod_dd_limit=0.5,
+        pod_concentration_limit=0.99, additional_prohibitions=(), short=True,
+        benchmark="none",
+    )
+
+
+def test_g6_new_short_below_floor_blocks(ips, mandates):
+    """新規ショート建ての売却代金は担保拘束で自由現金に加算しない(F-5・Issue #120)。
+
+    素朴実装(post_cash = cash − delta*price)だと ``delta`` が負になり
+    「現金が増える」と誤判定して G-6 を素通しする。担保モデル導入までの
+    fail-closed 近似として、ショートでは ``post_cash = cash`` で評価し、
+    現金が下限未満なら block する。
+    """
+    nav = Decimal(10_000_000)
+    floor = _dec(ips.guardrails.cash_nav_min) * nav
+    proposal = jp_stock_proposal(fm="loose", side="short", qty=Decimal(100))
+    result = evaluate(
+        proposal,
+        make_state(nav=nav, cash=floor - Decimal(1)),
+        ips,
+        {**mandates, "loose": _loose_short_mandate()},
+    )
+    assert result.verdict == "block"
+    assert "G-6" in rules_of(result)
+
+
+def test_g6_new_short_at_or_above_floor_passes(ips, mandates):
+    """現金が下限以上のときはショート自体を G-6 で殺さない(F-5・Issue #120)。"""
+    nav = Decimal(10_000_000)
+    floor = _dec(ips.guardrails.cash_nav_min) * nav
+    proposal = jp_stock_proposal(fm="loose", side="short", qty=Decimal(100))
+    result = evaluate(
+        proposal,
+        make_state(nav=nav, cash=floor),  # ちょうど下限
+        ips,
+        {**mandates, "loose": _loose_short_mandate()},
+    )
+    assert result.verdict == "pass"
+
+
+def test_g6_flip_sell_below_floor_blocks(ips, mandates):
+    """フリップ売り(保有超の sell → 実質ネットショート)も担保拘束扱いで評価する
+    (独立役員審査 2026-08-04 O-1/R-2)。
+
+    保有 100 に対し sell 300 → post_pod_qty = −200。side 文字列だけで分岐すると
+    売却代金全額を自由現金と数えて素通しし、同一建玉の side="short" と判定が
+    食い違う(IPS ショート許可のため G-9 はこの経路を止めない — 抜け穴は live)。
+    """
+    nav = Decimal(10_000_000)
+    floor = _dec(ips.guardrails.cash_nav_min) * nav
+    positions = (PositionState("loose", 1, "equity_jp", Decimal(100), Decimal(1000)),)
+    proposal = jp_stock_proposal(fm="loose", side="sell", qty=Decimal(300))
+    result = evaluate(
+        proposal,
+        make_state(nav=nav, cash=floor - Decimal(1), positions=positions),
+        ips,
+        {**mandates, "loose": _loose_short_mandate()},
+    )
+    assert result.verdict == "block"
+    assert "G-6" in rules_of(result)
+
+
+def test_g6_flip_sell_at_or_above_floor_passes(ips, mandates):
+    """現金が下限以上ならフリップ売り自体は G-6 で殺さない(side="short" と同じ扱い)。"""
+    nav = Decimal(10_000_000)
+    floor = _dec(ips.guardrails.cash_nav_min) * nav
+    positions = (PositionState("loose", 1, "equity_jp", Decimal(100), Decimal(1000)),)
+    proposal = jp_stock_proposal(fm="loose", side="sell", qty=Decimal(300))
+    result = evaluate(
+        proposal,
+        make_state(nav=nav, cash=floor, positions=positions),
+        ips,
+        {**mandates, "loose": _loose_short_mandate()},
+    )
+    assert result.verdict == "pass"
+
+
+def test_g6_full_liquidation_sell_passes_below_floor(ips, mandates):
+    """保有全量ちょうどの sell(post_pod_qty = 0)は従来どおり現金増として素通し(境界回帰)。"""
+    positions = (PositionState("loose", 1, "equity_jp", Decimal(100), Decimal(1000)),)
+    result = evaluate(
+        jp_stock_proposal(fm="loose", side="sell", qty=Decimal(100)),
+        make_state(cash=Decimal(400_000), positions=positions),
+        ips,
+        {**mandates, "loose": _loose_short_mandate()},
+    )
+    assert result.verdict == "pass"
+
+
+def test_g6_cover_evaluated_as_cash_decrease(ips, mandates):
+    """cover(買い戻し)は現金減 → 従来どおり通常評価(回帰)。"""
+    nav = Decimal(10_000_000)
+    floor = _dec(ips.guardrails.cash_nav_min) * nav
+    # ショート建玉(qty 負)を持つ状態で cover で 10万円分買い戻す。
+    positions = (PositionState("loose", 1, "equity_jp", Decimal(-500), Decimal(1000)),)
+    proposal = jp_stock_proposal(fm="loose", side="cover", qty=Decimal(100))
+    # 現金が floor + 5万 → 買い戻し後は floor − 5万 で block(回帰: cover は現金減)。
+    below = evaluate(
+        proposal,
+        make_state(nav=nav, cash=floor + Decimal(50_000), positions=positions),
+        ips,
+        {**mandates, "loose": _loose_short_mandate()},
+    )
+    assert below.verdict == "block"
+    assert "G-6" in rules_of(below)
+    # 現金が floor + 15万 → 買い戻し後 floor + 5万 で pass。
+    ok = evaluate(
+        proposal,
+        make_state(nav=nav, cash=floor + Decimal(150_000), positions=positions),
+        ips,
+        {**mandates, "loose": _loose_short_mandate()},
+    )
+    assert ok.verdict == "pass"
+
+
 # ── G-7 売買代金 ─────────────────────────────────────────────────────────────
 def test_g7_daily_turnover_boundary(ips, mandates):
     nav = Decimal(10_000_000)
