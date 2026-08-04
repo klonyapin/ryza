@@ -1539,6 +1539,18 @@ reminders:
       body: "docs/design/08-meta-audit.md の手順に従い、監査コードの起草・審査・A-12 実装監査のいずれにも関与していない別系統の AI が、監査部門(src/ryza/audit/**)の網羅性・実効性・形骸化を評価する。入力は同規程 §3(実施時点 HEAD の point-in-time スナップショット)、出力はレポート docs/reviews/meta/2026-q4-meta-audit.md(front matter: reviewed_sha / verdict = effective|degraded)を PR で保存し、是正所見は Issue 起票・設計リード裁定。結果は次回経営会議の監査報告に含める。完了時は本エントリを fired に更新し、次回分(+3ヶ月)を登録すること。出典: 00-system-design §6(EQA 移植・労働律速圧縮で年次→四半期)、docs/reviews/a12/00-adjudication.md F-11。"
     status: pending
 
+  - id: a12-2026q4-second-full-audit
+    what: "第2回フル実装監査(A-12 反復・四半期制)— 第1回(Issue #15・2026-08-04)の裁定 §5 引き継ぎ付き"
+    conditions:
+      - type: date_after
+        date: "2026-11-04"
+    action:
+      type: issue_create
+      title: "第2回フル実装監査(A-12)— 別系統モデルによるコード監査"
+      labels: [design]
+      body: "00-system-design §6 の A-12 を四半期で反復する(Issue #15 の制度化)。監査人は実装系 Claude と別系統のベンダー AI(第1回は GLM-5 — ランナー docs/reviews/a12/run_audit.py.txt を再利用可)。プロンプト分離: 設計文書と実装のみを渡し、実装者・設計リードの見解や過去の審査結論は渡さない。第1回裁定(docs/reviews/a12/00-adjudication.md §5)からの引き継ぎ3点: ①監査資料は領域の依存閉包(スキーマ DDL・シード・共有ユーティリティ・secrets.py・reminders.yaml)まで含めて渡す(第1回は渡し漏れで[重大]6件中4件が誤検出)、②第1回 F-1〜F-14 の是正(§6 完了記録)が後退していないかの追跡検査、③メタ監査(meta-audit-2026q4・別枠)と担い手を分ける。所見は設計リードが裁定書(同形式)で採否を裁定し、有効所見は Issue 起票。完了時は本エントリを fired に更新し、次回分(+3ヶ月)を登録すること。"
+    status: pending
+
   - id: l1-protect-meta-audit-doc
     what: "docs/design/08-meta-audit.md を保護領域(governance_doc)に登録する(次回 L1 バッチ)"
     conditions:
