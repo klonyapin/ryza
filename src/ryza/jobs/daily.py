@@ -2,9 +2,9 @@
 
 設計 30-press-discord §2・00-system-design §2/§10。1 日 1 回、以下を順に走らせる:
 
-  取込 → 前処理(縮退) → 分析エージェント → 市場観更新 → **FM(戦略)** → 執行(デモ)
-  → 締め(照合→NAV)→ リスク(T-015: limits_state 更新+リスクレポート)→ 朝刊生成
-  → outbox → 実行サマリ
+  取込 → 前処理(縮退) → 分析エージェント → 市場観更新 → curated ユニバース照合
+  → **FM(戦略)** → 執行(デモ) → 締め(照合→NAV)→ リスク(T-015: limits_state 更新+
+  リスクレポート)→ 朝刊生成 → outbox → 実行サマリ
 
 **FM 段(T-017)**: Jim(非 LLM・日次)を毎日、Ben(LLM・週次)を ``config/fm_ben.yaml``
 の実行曜日に走らせ、提案を ``gate_and_record`` へ通す。**FM ごとに別段**
@@ -12,8 +12,9 @@
 (独立役員審査 T-017 C-5)。**分析の後・執行の前**に置く
 (FM 提案 → ゲート → 執行の順 — 設計リード裁定 2026-08-03)。Kill Switch 中は提案自体を
 作らない(ゲートも G-0 で block するが、通らないと分かっている案を作らない)。
-※ 銘柄の決定論分類(``market.instrument_classification``)を作るのは risk 段(T-015)
-なので、新規に取り込まれた銘柄が FM の候補になるのは翌日以降になる。
+※ **ルール**による銘柄分類(``market.instrument_classification``)を作るのは risk 段
+(T-015)なので、新規に取り込まれた銘柄が FM の候補になるのは翌日以降になる。一方
+**curated タグ**は直前の curated 段が当日反映するため、config の付与・撤回は当日効く。
 
 **執行段(T-016)**: 00 §9 の「ゲート → 執行 → 会計記帳 → 照合 → NAV 確定」のうち
 ゲート以降を担う(ゲートは注文起票側 = FM 段が ``gate_and_record`` で通す)。
@@ -21,6 +22,15 @@
 締め(MTM・NAV 記帳 → risk.nav_daily)は毎日走らせて NAV 系列を絶やさない(risk 段の
 入力)。Kill Switch 中は新規執行のみスキップし、締め(内部会計)は走らせる。
 照合ブレイクは ops チャンネルへ embed で通知する。
+
+**curated 段(2026-08-04 の ``fm.jim`` universe=0 事象の是正)**: ``config/universe/*.yaml``
+(承認済みの curated ユニバース定義)を毎日 DB へ照合する。以前は「手順書の CLI を人が
+一度実行する」運用で、実行漏れが**無言のドリフト**になっていた(実際に承認済みリストが
+未反映のまま初回運用を迎え、ユニバースが空だった)。config を正と宣言する以上、config と
+DB の一致は機構で保証しなければならない。撤回(config から銘柄を消す)の反映漏れは
+売買母集団を広いまま残すため、付与の漏れより危険である。**FM 段の前**に置き、当日の
+撤回が当日の提案に効くようにする(設計リード裁定 2026-08-04)。詳細は
+``reconcile_curated_universes``。
 
 **risk 段(T-015)**: 00 §9 の順序どおり会計締めの直後に置く(設計リード裁定
 2026-08-03)— execution 段の締めが書いた当日の ``ledger.nav_snapshots``(NAV の正。
@@ -61,6 +71,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -91,6 +102,11 @@ from ryza.research import market_view
 from ryza.research.agents import editor, macro, micro, sentiment
 from ryza.research.llm import StructuredLLM
 from ryza.research.providers import AnthropicProvider, DryRunProvider, LLMConfig
+from ryza.risk.classify import (
+    CURATED_UNIVERSE_DIR,
+    apply_curated_universe,
+    load_curated_universe,
+)
 from ryza.risk.daily import run_risk_daily
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -465,6 +481,157 @@ def _build_residue_embed(
     }
 
 
+# ── curated ユニバースの自動照合(2026-08-04 事象の是正)──────────────────────
+# 段の名前。実行サマリの描画分岐と ops_summary からの参照に使う。
+CURATED_STAGE = "curated"
+
+# 実行サマリ・警告 embed に列挙する symbol / スキップ理由の上限(embed の 1024 字制限対策)。
+_CURATED_LIST_LIMIT = 10
+
+
+def reconcile_curated_universes(
+    conn: psycopg.Connection,
+    run: Run,
+    *,
+    as_of: datetime,
+    directory: Path | str | None = None,
+) -> dict[str, Any]:
+    """``config/universe/*.yaml`` を DB へ**冪等に照合**する(config が正)。
+
+    2026-08-04 の ``fm.jim`` universe=0 は、承認済みの ``jim-curated.yaml`` を DB へ
+    反映する操作が「手順書の CLI を人が一度実行する」運用だったために起きた。config を
+    正と宣言しながら、config と DB の一致を保証する機構が無かった — 反映漏れも反映忘れも
+    無言のドリフトになる。とくに**撤回**(config から銘柄を消す = 売買母集団を狭める)の
+    未反映はリスク側に倒れるため、照合は毎日走らせて差分をゼロに保つ。
+
+    **冪等**: 反映は ``apply_curated_universe`` → ``upsert_classification`` 経由で、内容が
+    その as_of 時点の有効行と同一なら**履歴表(0026)へ追記しない**。したがって差分の無い
+    日は ``unchanged`` が増えるだけで、追記オンリー履歴が毎日 35 行ずつ膨らむことはない
+    (膨らめば point-in-time 履歴が「いつ変わったか」を示せなくなる)。
+
+    **fail-closed の維持**: ローダの承認3段検査(``approved_at`` / ``approved_by`` /
+    ``content_sha256``)はそのまま。検査に落ちたファイルは**反映せずスキップ**し、理由を
+    ``skipped`` に残す。例外で daily 全体を止めないのは、未承認の 1 ファイルが朝刊・締め・
+    リスクまで巻き添えにするのは過剰だからである。ただし黙殺もしない — ``skipped`` が
+    非空の日は実行サマリが 🚨 になり、専用の警告 embed が #運営 へ出る。
+
+    ファイル単位で savepoint を張るのは、1 ファイルの反映失敗(DB エラー等)で他ファイルの
+    反映まで巻き戻さないため。返り値は
+    ``{files, granted, unchanged, revoked, unresolved, unclassifiable, skipped}``。
+    ``unresolved`` / ``unclassifiable`` は ``<ファイル名>:<symbol>`` の形で、どの config の
+    どの行が刺さっているかを summary だけで特定できるようにする。
+    """
+    base = Path(directory) if directory is not None else CURATED_UNIVERSE_DIR
+    result: dict[str, Any] = {
+        "files": 0,
+        "granted": 0,
+        "unchanged": 0,
+        "revoked": 0,
+        "unresolved": [],
+        "unclassifiable": [],
+        "skipped": [],
+    }
+    for path in sorted(base.glob("*.yaml")):
+        try:
+            universe = load_curated_universe(path)
+        except Exception as exc:  # noqa: BLE001 - 読めない/承認検査に落ちた = 反映しない
+            # 未承認・ハッシュ不一致・YAML 破損はすべて「反映しない」に倒す(fail-closed)。
+            # 例外を投げ直さないのは daily 全体を止めないため。理由は summary に必ず出る。
+            result["skipped"].append(f"{path.name}: {type(exc).__name__}: {exc}")
+            continue
+        try:
+            with conn.transaction():  # ファイル単位の savepoint(他ファイルを巻き込まない)
+                applied = apply_curated_universe(
+                    conn, universe, run_id=run.run_id, as_of=as_of
+                )
+        except Exception as exc:  # noqa: BLE001 - 1 ファイルの反映失敗は他を止めない
+            result["skipped"].append(f"{path.name}: 反映失敗 {type(exc).__name__}: {exc}")
+            continue
+        result["files"] += 1
+        for key in ("granted", "unchanged", "revoked"):
+            result[key] += applied[key]
+        for key in ("unresolved", "unclassifiable"):
+            result[key].extend(f"{path.name}:{s}" for s in applied[key])
+    return result
+
+
+def _curated_needs_attention(detail: dict[str, Any]) -> bool:
+    """人が見るべき日か。**未反映ファイル・未解決 symbol・撤回**のいずれかがあれば真。
+
+    撤回を含めるのは、母集団が狭まったこと自体が運用上の事件だからである(意図した撤回
+    でも、反映されたことを確認できなければ「config が正」を主張できない)。``unchanged``
+    だけの日は静かに通す — 毎日 🚨 が出る運用は警告を無効化する。
+    """
+    return bool(
+        detail.get("skipped") or detail.get("unresolved") or detail.get("revoked")
+    )
+
+
+def _curated_summary_value(detail: dict[str, Any]) -> str:
+    """実行サマリの curated 段フィールド値(差分ゼロの日でも必ず件数を出す)。"""
+    mark = "🚨" if _curated_needs_attention(detail) else "✅"
+    parts = [
+        f"{mark} files={detail.get('files', 0)} granted={detail.get('granted', 0)} "
+        f"unchanged={detail.get('unchanged', 0)} revoked={detail.get('revoked', 0)}"
+    ]
+    for key, label in (("unresolved", "未解決"), ("unclassifiable", "分類不能")):
+        items = detail.get(key) or []
+        if items:
+            shown = ", ".join(items[:_CURATED_LIST_LIMIT])
+            parts.append(f"{label} {len(items)} 件: {shown}")
+    for reason in (detail.get("skipped") or [])[:_CURATED_LIST_LIMIT]:
+        parts.append(f"⚠️ 未反映 {reason}")
+    return " / ".join(parts)[:1024]
+
+
+def _build_curated_alert(detail: dict[str, Any], *, as_of: datetime) -> dict[str, Any]:
+    """curated 照合の警告 embed(#運営)。照合ブレイク・残渣と同格の専用 embed。
+
+    実行サマリの 1 行に混ぜると ✅ 付きの列に埋もれて ``[:1024]`` で切られる(再-7 と
+    同じ欠陥)。**未反映ファイルは「承認済みの config が効いていない」ことそのもの**で
+    あり、2026-08-04 に起きた事象の再発である。
+    """
+    jst_str = as_of.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
+    fields: list[dict[str, Any]] = []
+    if detail.get("skipped"):
+        fields.append({
+            "name": f"未反映のファイル({len(detail['skipped'])} 件)",
+            "value": "\n".join(detail["skipped"][:_CURATED_LIST_LIMIT])[:1024],
+            "inline": False,
+        })
+    if detail.get("revoked"):
+        fields.append({
+            "name": "タグ撤回",
+            "value": (
+                f"{detail['revoked']} 銘柄から config 外のタグを剥がした"
+                "(売買母集団が狭まった — 意図した撤回か確認すること)"
+            )[:1024],
+            "inline": False,
+        })
+    if detail.get("unresolved"):
+        fields.append({
+            "name": f"銘柄マスタに無い symbol({len(detail['unresolved'])} 件)",
+            "value": (
+                ", ".join(detail["unresolved"][:_CURATED_LIST_LIMIT])
+                + "\n綴り間違いか、未取込の銘柄。毎回ゼロであるべき"
+            )[:1024],
+            "inline": False,
+        })
+    return {
+        "title": f"⚠️ curated ユニバース照合 {jst_str}",
+        "description": (
+            "config/universe/*.yaml と market.instrument_classification の照合で差分・"
+            "未反映が出た。**config が正**であり、未反映のファイルは承認済みのリストが"
+            "効いていないことを意味する(2026-08-04 の fm.jim universe=0 と同型の事象)。"
+            "手順は docs/ops/fm-curated-universe.md。"
+        ),
+        "color": COLOR_FLASH,
+        "author": org.author_for_role("audit"),
+        "fields": fields,
+        "footer": {"text": DISCLAIMER},
+    }
+
+
 def _build_quarantine_alert(stats: dict[str, int], *, as_of: datetime) -> dict[str, Any]:
     """mass-quarantine の警告 embed(#運営)。照合ブレイクと同じ扱いで別途投入する。"""
     jst_str = as_of.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
@@ -498,6 +665,8 @@ def _build_ops_embed(
         mark = "✅" if s.ok else "⚠️"
         if s.error:
             value = f"{mark} 失敗: {s.error}"[:1024]
+        elif s.name == CURATED_STAGE:  # curated 段: 差分ゼロの日でも件数を必ず出す。
+            value = _curated_summary_value(s.detail)
         elif "sources" in s.detail:  # 取込段: ソース別ステータスを compact に。
             per = ", ".join(f"{n}:{v['status']}" for n, v in s.detail["sources"].items())
             value = (
@@ -519,7 +688,10 @@ def _build_ops_embed(
     title = "日次サイクル(dry-run)" if dry_run else "日次サイクル"
     return {
         "title": f"{title} {jst_str}",
-        "description": "日次サイクルの実行サマリ(取込→前処理→分析→FM→執行/締め→朝刊)。",
+        "description": (
+            "日次サイクルの実行サマリ(取込→前処理→分析→curated 照合→FM→執行/締め"
+            "→リスク→朝刊)。"
+        ),
         "color": COLOR_NORMAL,
         # 運用報告の発信者 = 監査部門のキャラクター(台帳 org.yaml から役職キーで解決)。
         "author": org.author_for_role("audit"),
@@ -543,6 +715,7 @@ def run_daily(
     channel_press: str = "press",
     channel_ops: str = "ops",
     dry_run: bool = False,
+    curated_dir: Path | str | None = None,
 ) -> DailyResult:
     """日次サイクルを 1 回実行する。
 
@@ -552,6 +725,9 @@ def run_daily(
 
     ``fm_llm`` は Ben(週次・LLM)用の ``StructuredLLM``(``dept_tag='fm.ben'``)。
     None なら Ben をスキップする(Jim は非 LLM のため常に走る)。
+
+    ``curated_dir`` は curated ユニバース定義の探索先(既定 ``config/universe``)。
+    本番では既定のまま。テストが同梱リストの内容に依存しないよう差し替え口を開けている。
     """
     as_of = as_of or datetime.now(UTC)
     jst_date = as_of.astimezone(JST).date()
@@ -595,7 +771,23 @@ def run_daily(
 
     stages.append(_run_stage(conn, "analysis", _analysis))
 
-    # ── 4. FM(戦略): Jim 日次 + Ben 週次 → ゲート → 注文案 — T-017 ────────────
+    # ── 4. curated ユニバースの照合(config → DB。2026-08-04 事象の是正)────────
+    # **FM 段の前**に置く(設計リード裁定 2026-08-04)。本タスクの動機は「撤回の未反映が
+    # リスク側に倒れる」ことであり、config から銘柄を消した当日に Jim が依然その銘柄を
+    # 提案できるなら目的を果たさない。付与も同時に当日有効になるが、curated 定義の変更は
+    # PR マージ(`Approved:` トレーラつき代表承認・A-18-1 が突合)を経ているため、
+    # 当日有効で問題ない。
+    stages.append(
+        _run_stage(
+            conn,
+            CURATED_STAGE,
+            lambda: reconcile_curated_universes(
+                conn, run, as_of=as_of, directory=curated_dir
+            ),
+        )
+    )
+
+    # ── 5. FM(戦略): Jim 日次 + Ben 週次 → ゲート → 注文案 — T-017 ────────────
     # **FM ごとに別段(別 savepoint)**にする(独立役員審査 T-017 C-5)。1段にまとめると
     # Ben(LLM・週次)の例外で同じ段の Jim(決定論・日次)の提案・注文まで巻き戻り、
     # 日次の決定論シグナルが週次の LLM 障害に巻き込まれる。段の失敗許容は FM 単位で効かせる。
@@ -633,7 +825,7 @@ def run_daily(
 
     stages.append(_run_stage(conn, "fm.ben", _fm_ben))
 
-    # ── 5. 執行(デモ)→ 締め(照合 → NAV 確定)— T-016 ──────────────────────
+    # ── 6. 執行(デモ)→ 締め(照合 → NAV 確定)— T-016 ──────────────────────
     def _execution() -> dict[str, Any]:
         detail: dict[str, Any] = {}
         breaks: list[dict[str, Any]] = []
@@ -689,7 +881,7 @@ def run_daily(
     execution_stage = _run_stage(conn, "execution", _execution)
     stages.append(execution_stage)
 
-    # ── 6. リスクエンジン(T-015)──────────────────────────────────────────────
+    # ── 7. リスクエンジン(T-015)──────────────────────────────────────────────
     # 00 §9 の順序どおり会計締め(execution 段の照合→NAV 確定)の直後に置く(設計
     # リード裁定 2026-08-03)。execution 段が書いた当日 NAV を読んで limits_state を
     # 更新する。決定論・LLM 不関与のため dry-run でもそのまま実行する。
@@ -710,7 +902,7 @@ def run_daily(
         )
     )
 
-    # ── 7. 朝刊生成(冪等・Kill Switch ゲート)───────────────────────────────
+    # ── 8. 朝刊生成(冪等・Kill Switch ゲート)───────────────────────────────
     def _morning() -> dict[str, Any]:
         kill = is_engaged(conn)
         state["kill_switch"] = kill
@@ -732,7 +924,7 @@ def run_daily(
 
     stages.append(_run_stage(conn, "morning", _morning))
 
-    # ── 8. 実行サマリを #運営 へ ──────────────────────────────────────────────
+    # ── 9. 実行サマリを #運営 へ ──────────────────────────────────────────────
     def _ops_summary() -> dict[str, Any]:
         # 検疫の件数は毎日必ず出す(解除できない封じ込めの検知可能化 — 審査 C-10)。
         stats = quarantine_stats(conn, as_of=as_of)
@@ -746,6 +938,13 @@ def run_daily(
         if _is_mass_quarantine(stats):
             detail["quarantine_alert_outbox_id"] = enqueue(
                 conn, channel_ops, _build_quarantine_alert(stats, as_of=as_of), run.run_id
+            )
+        # curated 照合の差分・未反映は専用 embed で出す(サマリ 1 行に埋もれさせない)。
+        curated = next((s for s in stages if s.name == CURATED_STAGE), None)
+        if curated is not None and curated.ok and _curated_needs_attention(curated.detail):
+            detail["curated_alert_outbox_id"] = enqueue(
+                conn, channel_ops,
+                _build_curated_alert(curated.detail, as_of=as_of), run.run_id,
             )
         return detail
 

@@ -14,6 +14,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from ryza.db.conn import connect
+from ryza.jobs import daily
 from ryza.provenance import start_run
 from ryza.research.llm import StructuredLLM
 from ryza.research.providers import DryRunProvider, LLMConfig
@@ -32,6 +33,26 @@ def conn(migrated_db):
 @pytest.fixture
 def run(conn):
     return start_run("test.jobs", {"task": "T-013"}, conn=conn)
+
+
+@pytest.fixture
+def curated_dir(tmp_path):
+    """curated ユニバース定義の探索先(テスト用の空ディレクトリ)。"""
+    d = tmp_path / "universe"
+    d.mkdir()
+    return d
+
+
+@pytest.fixture(autouse=True)
+def _isolate_curated_dir(monkeypatch, curated_dir):
+    """既定の探索先を空ディレクトリへ差し替える(同梱リストへの依存を切る)。
+
+    daily の curated 段は既定で ``config/universe/*.yaml`` を読む。テスト DB には
+    同梱リストの銘柄が存在しないため、差し替えないと全テストが ``unresolved`` 35 件で
+    警告を出し、テストの意図と無関係な差分に振り回される。**同梱リストが daily の
+    自動経路から実際に読めること**は tests/jobs/test_curated.py が既定パスのまま検証する。
+    """
+    monkeypatch.setattr(daily, "CURATED_UNIVERSE_DIR", curated_dir)
 
 
 @pytest.fixture
