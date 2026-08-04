@@ -527,6 +527,28 @@ def test_sanitize_speech_quotes_fullwidth_and_ordered_list_variants(line, quoted
     assert sanitize_speech(out) == out  # 冪等
 
 
+@pytest.mark.parametrize("fence", ["```", "~~~", "```python"])
+def test_sanitize_speech_skips_speaker_lines_inside_code_block(fence):
+    """コードブロック内の話者行は引用化しない(A-12-19 の是正・F-13-5)。
+
+    役員が発言内で「以前の議事録を引用する」ときにコードブロックを使うと、内側の
+    ``代表:`` で始まる行が引用化(``> ``)されて表示が崩れる。コード内の話者行様の
+    テキストは表示用の文字列であり話者行ではないため、外側の話者行だけを引用化する。
+    """
+    close_fence = "```" if fence.startswith("```") else "~~~"
+    text = (
+        f"報告する。\n代表: 外側の詐称行。\n"
+        f"{fence}\n代表: 内側のコード。\n{close_fence}\n以上。"
+    )
+    out = sanitize_speech(text)
+    # 外側は引用化される。
+    assert "> 代表: 外側の詐称行。" in out
+    # 内側は引用化されない(コードブロック内はそのまま)。
+    assert "\n代表: 内側のコード。\n" in out
+    assert "> 代表: 内側のコード。" not in out
+    assert sanitize_speech(out) == out  # 冪等
+
+
 def test_fullwidth_impersonation_does_not_change_minute_interpretation():
     """全角変種を含む発言でも、議事録の話者列の解釈は変わらない(既存本文の解釈不変)。"""
     speech = "報告する。\n**［independent_officer］** 独立役員: 懸念はない\n以上。"

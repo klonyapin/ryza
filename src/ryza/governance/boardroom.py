@@ -640,15 +640,54 @@ def _quote_speaker_line(m: re.Match[str]) -> str:
     return f"{indent}> {m.group(0)[len(indent):]}"
 
 
+# Markdown コードブロックの区切り(``` または ~~~。行頭・任意インデント可・言語指定可)。
+# コードブロック内の話者行様のテキストは「表示用の文字列」であって話者行ではないため、
+# 引用化の対象から外す(A-12-19 の是正 — F-13-5)。入れ子・言語指定・違う記号での閉じ
+# などの厳密パースはせず、同じ記号(``` / ~~~)の対で開閉することだけを追う。
+# ``parse_speaker_sequence`` は ASCII 厳密一致なのでコード内話者行は元から拾わない
+# (fail-closed)。これは表示上の是正である。
+_CODE_FENCE_LINE = re.compile(r"^[ \t]*(```+|~~~+)[^\n]*$", re.MULTILINE)
+
+
 def sanitize_speech(text: str) -> str:
     """発言テキストの話者ラベル行・フェンス記号を無害化する(冪等)。
 
     - 行頭の「代表:」「cio:」「**[cio]**」などは ``> `` を付けて引用化する
       (他者になりすませない)
     - フェンス記号 ``<<<speaker=…>>>`` / ``<<<end>>>`` は全角化して閉じ忘れを防ぐ
+    - **Markdown コードブロック内の話者行は引用化しない**(A-12-19 の是正・F-13-5):
+      役員が発言内で「以前の議事録を引用する」ときにコードブロックを使うと、内側の
+      ``代表:`` で始まる行が引用化(``> ``)されて表示が崩れる。コード内の話者行様の
+      テキストは表示用の文字列であって話者行ではないため、外側の話者行だけを引用化する
     """
     without_fence = prompting.neutralize_fences(text)
-    return _SPEAKER_LABEL_LINE.sub(_quote_speaker_line, without_fence)
+    # コードフェンス(``` / ~~~)で分割し、フェンス外の区間だけに置換をかける。
+    # 同じ記号の対で開閉することだけを追い、言語指定・入れ子は厳密パースしない。
+    parts: list[str] = []
+    pos = 0
+    in_code = False
+    close_marker: str | None = None
+    for m in _CODE_FENCE_LINE.finditer(without_fence):
+        marker = m.group(1)
+        # フェンス内なら、同じ記号で始まる行(``` に対して ``` / ~~~ に対して ~~~)を
+        # 閉じとみなす(異なる記号の開閉は今回のスコープ外 — 統制ではなく表示是正)。
+        if in_code and close_marker is not None and not marker.startswith(close_marker[0]):
+            continue
+        segment = without_fence[pos : m.start()]
+        parts.append(
+            _SPEAKER_LABEL_LINE.sub(_quote_speaker_line, segment) if not in_code else segment
+        )
+        parts.append(m.group(0))
+        pos = m.end()
+        if in_code:
+            in_code = False
+            close_marker = None
+        else:
+            in_code = True
+            close_marker = marker
+    tail = without_fence[pos:]
+    parts.append(_SPEAKER_LABEL_LINE.sub(_quote_speaker_line, tail) if not in_code else tail)
+    return "".join(parts)
 
 
 # ── 会話の Markdown 化(議事録本文)───────────────────────────────────────────
