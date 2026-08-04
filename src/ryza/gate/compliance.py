@@ -498,6 +498,12 @@ def _g7_turnover(ctx: _Ctx) -> list[Reason]:
     """G-7 売買代金: 当日累計+本注文 ≤ NAV の 30%(IPS §3.2 暴走ガード)。
 
     dd_soft(DD 15% ソフトリミット)中の新規建ては枠を半減して評価する(G-10 の解釈)。
+
+    事前評価は**注文時価格**(limit_price/ref_price)で行う近似であり、成行のスリッページ
+    で約定額面が事後に上限を跨ぐ TOCTOU がありうる(F-12)。事後の遮断はできない
+    (既に約定済み)ため、跨ぎ検知は ``gate.orders.turnover_breach_after_execution``
+    が約定ベースの累計で行い、跨いだ瞬間だけ ``#運営`` へ urgent 通知する。以後の
+    注文はここ(現行 G-7)が自動的に塞ぐ。
     """
     assert ctx.state.nav is not None and ctx.state.daily_turnover is not None
     limit = _dec(ctx.ips.hard_limits.daily_turnover_nav_max) * ctx.state.nav
