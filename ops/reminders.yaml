@@ -1501,3 +1501,15 @@ reminders:
       labels: [governance, impl]
       body: "T-022(migrations/0036)は ledger.evidence の UPDATE / TRUNCATE を封鎖したが、行 DELETE は封鎖しなかった。理由は Issue #128 本文と 0036 冒頭コメントに記す: (1) UPDATE 封鎖で sha256 / payload_ref の不変性は確立し改竄検知(A-1)の前提は満たす、(2) 参照済み行の DELETE は既に FK が拒否する、(3) 未参照行の DELETE 封鎖は tests/conftest.py `_CLEAR_EVIDENCE_SQL`(残留データ隔離の第二層)と衝突するため、テスト隔離戦略の再設計とセットでしか導入できない(Issue #23 は CLOSED だが、共有 DB 実行時=RYZA_TEST_DATABASE_URL 上書き時の残留データ隔離は依然この DELETE 経路に依存する)。**再評価では** 具体的には (i) 未参照行の DELETE を封鎖する行トリガと REVOKE DELETE を 0036 と同じ様式で追加できるか、(ii) conftest の evidence 掃除経路をテスト DB 分離だけで担保でき DELETE を残す必要が無いか、(iii) 取込ジョブ側で『記帳に至らなかった証憑』をどう処理するか(封鎖後は削除できないため、記帳側でダミー逆仕訳を切るなり、専用の quarantine スキーマへ隔離するなりの経路が要る)を判断する。保護領域(migrations・会計エンジン)のため、独立役員審査 → #承認 → みなし承認の手続を経ること。出典: T-022 実装指示書(docs/tasks/T-022-ledger-evidence-guard.md)、Issue #128、migrations/0036 冒頭コメント。"
     status: pending
+
+  - id: g6-short-margin-model
+    what: "G-6 現金下限のショート担保モデル導入 — F-5 の fail-closed 近似(担保拘束を数えない)を精緻化(実弾移行前提)"
+    conditions:
+      - type: date_after
+        date: "2026-09-15"
+    action:
+      type: issue_create
+      title: "G-6 現金下限: ショート担保モデル+クローズ売りの avg_cost 考慮"
+      labels: [impl]
+      body: "**現状(F-5 是正・Issue #120)**: src/ryza/gate/compliance.py `_g6_cash_floor` は新規ショート(side == \"short\")で `post_cash = ctx.state.cash`(売却代金を自由現金に加算しない)として現金下限を評価する — 担保拘束モデルを持たないための fail-closed 近似。**残課題**: (1) ブローカーの必要担保・維持証拠金モデル(例: 委託保証金率・維持保証金率・信用取引の建玉金額×一定率)を導入し、実際の担保拘束額を差し引いた自由現金で下限を判定する。(2) sell(ロング解消)で avg_cost と時価の乖離により実際の入金額が `qty*price` と異なるケース(税・手数料・信用返済の金利込み)を評価に含めるか判断する。(3) cover(買い戻し)の担保解放と当日決済の同時性を考慮した現金推移を評価する。(4) **フリップ売りのロング解消分代金の算入(独立役員審査 2026-08-04 O-1/R-2 の残課題)**: G-6 のショート性判定は side == \"short\" or post_pod_qty < 0 に対称化済み(F-5 是正で実装 — IPS ショート許可+stan short: true の発効 config 下で抜け穴が現に有効だったため即時 fail-closed 化)。ただし現近似はフリップ売りでロング解消分の代金(真に自由現金になる部分)も数えない過保守側 — 担保モデル導入時に約定をロング解消分と新規ショート分に分解し、前者のみ自由現金へ算入すること。ゲート・IPS 双方に触れるため保護領域手続で実装。実弾移行前に完成させること(担保無視の近似はデモ/紙面では安全側だが、実弾では機会損失が過大になる)。"
+    status: pending

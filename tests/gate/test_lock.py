@@ -4,6 +4,15 @@
 advisory lock で封鎖していることを確認する。前提行(trading_state・limits_state)は
 両接続から見える必要があるため一時的に commit し、teardown で原状復帰する
 (test_store.py の autouse フィクスチャとは独立の接続を使うため専用ファイルに置く)。
+
+**分離の明示**(F-14b / Issue #124 pass5-4)。このファイルのテストは他の DB テストと
+異なり、``committed_prereqs`` が **autocommit 接続で commit する**(advisory lock を
+複数接続で検証するには両接続から前提行が見える必要があるため)。他テストは通常
+「1 テスト = 1 トランザクション + 最後に rollback」で隔離するが、本ファイルは
+その原則を意図的に外している(原状復帰は finally で行う)。並行実行(pytest-xdist
+等)を導入する場合、このファイルは ``commits_shared_state`` マーカーで直列化対象と
+して選別できるようにしてある(pyproject.toml `markers`)。現状の実行構成は
+逐次実行のため変更不要だが、干渉リスクの存在をコード上に固定しておく。
 """
 
 from __future__ import annotations
@@ -19,13 +28,40 @@ from ryza.ledger import create_run
 
 from .conftest import jp_stock_proposal
 
+# ファイル全体を ``commits_shared_state`` として印字。将来 xdist 等を入れるときに
+# ``-m "not commits_shared_state"`` で並列テストから外し、単独ワーカーで直列に流せる。
+pytestmark = pytest.mark.commits_shared_state
+
 _NAV = Decimal(10_000_000)
 _CASH = Decimal(5_000_000)
 
 
 @pytest.fixture
 def committed_prereqs(migrated_db):
-    """trading_state=normal と limits_state を commit で用意し、終了時に原状復帰する。"""
+    """trading_state=normal と limits_state を commit で用意し、終了時に原状復帰する。
+
+    **commit を伴う理由**: 本ファイルのテストは並行する2接続(c1/c2)から同じ帳簿の
+    ``gate_and_record`` を呼び、advisory lock の直列化を観測する。両接続から前提行
+    (``ops.trading_state`` / ``risk.limits_state``)が見える必要があるため、通常の
+    「1 テスト = 1 トランザクション」隔離では検証できず、autocommit 接続で **一時的に
+    commit** する。この commit は同一 DB を使う他テスト・他セッションに漏れうる。
+
+    **干渉し得る対象**:
+
+    - ``ops.trading_state`` は **singleton**(migrations/0007 の ``singleton BOOLEAN
+      PRIMARY KEY DEFAULT TRUE`` — 1 行制約)。テスト中に ``state='normal'`` に固定
+      するため、同時に走る他テストが別の値(``halted`` 等)を要求しているとどちらか
+      が落ちる。本フィクスチャが finally で ``prior_state`` に戻すことで、通常の
+      「連続実行」では干渉しないが、**並行実行**では復元前に他ワーカーが読むと崩れる。
+    - ``risk.limits_state`` の ``DEMO_FUND`` 行は追記(INSERT ... ON CONFLICT DO
+      NOTHING)。本フィクスチャが挿入前に存在しなかった場合のみ finally で削除する
+      ため、既存行は温存される。
+
+    **原状復帰の仕組み**: try/finally で ``prior_state`` / ``prior_limits`` を保存し、
+    テスト成功・失敗いずれの経路でも復元する。例外時も finally は実行される(pytest の
+    fixture teardown 契約)。それでも並行実行では復元前の隙間があるため、**このファ
+    イルは ``commits_shared_state`` マーカーで直列化対象として印字してある**。
+    """
     admin = connect(autocommit=True)
     with admin.cursor() as cur:
         cur.execute("SELECT state FROM ops.trading_state")

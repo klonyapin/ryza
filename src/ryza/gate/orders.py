@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -444,10 +444,192 @@ def apply_execution(conn: psycopg.Connection, execution_id: int, *, run_id: int)
     return True
 
 
+# ── F-12: 約定ベース売買代金の跨ぎ検知(事後監視)─────────────────────────────
+@dataclass(frozen=True)
+class TurnoverBreach:
+    """G-7 上限を約定ベースの累計が跨いだ瞬間の詳細(通知本体で使う)。
+
+    ``before ≤ limit < after`` の**エッジトリガ**でのみ生成する — 超過状態が続く限り
+    毎約定で鳴らすと通知の意味が失われる(``navflow.urgent_pending`` と同じ設計判断)。
+    ``nav_source`` は上限計算に使った NAV の出所(``gate_log_id`` の state_ref スナップ
+    ショット)。事後監査で「どの NAV で上限を出したか」を再現できるようにする。
+    """
+
+    book_id: str
+    trade_date: date
+    execution_id: int
+    order_id: int
+    instrument_id: int
+    before: Decimal  # 当該約定を除いた約定ベース当日累計
+    after: Decimal  # 当該約定を含めた同累計
+    limit: Decimal  # daily_turnover_nav_max × NAV
+    nav: Decimal | None  # 上限計算に使った NAV(取れなければ None → fail-closed)
+    nav_source_gate_log_id: int | None
+    nav_missing_reason: str | None = None  # fail-closed 経路の理由
+
+
+def _executed_turnover_before_and_after(
+    conn: psycopg.Connection,
+    book_id: str,
+    trade_date: date,
+    execution_id: int,
+) -> tuple[Decimal, Decimal] | None:
+    """当日(JST)の約定ベース累計を **execution_id を含まない/含む**で返す。
+
+    ``_daily_turnover`` の約定側クエリと同じ式(Σ|qty|×price)。当該約定が対象日に
+    無ければ None(呼び出し側の前提違反)。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                COALESCE(sum(abs(e.qty) * e.price) FILTER (WHERE e.id <> %s), 0) AS before_amt,
+                COALESCE(sum(abs(e.qty) * e.price), 0) AS after_amt,
+                bool_or(e.id = %s) AS has_target
+            FROM trading.executions e
+            JOIN trading.orders o ON o.id = e.order_id
+            WHERE o.book_id = %s
+              AND (e.executed_at AT TIME ZONE 'Asia/Tokyo')::date = %s
+            """,
+            (execution_id, execution_id, book_id, trade_date),
+        )
+        row = cur.fetchone()
+    if row is None or not row[2]:
+        return None
+    return Decimal(row[0]), Decimal(row[1])
+
+
+def _nav_from_gate_log(
+    conn: psycopg.Connection, execution_id: int
+) -> tuple[Decimal | None, int | None, str | None]:
+    """当該約定に紐づくゲート判定スナップショット(``compliance.gate_log.state_ref``)
+    から NAV を取り出す。取れない場合は理由付きで None を返す(fail-closed)。
+
+    設計判断: NAV は**ゲート判定時に固定した値**を使う(``_state_snapshot`` が
+    ``state_ref.nav`` に文字列で保存している)。判定時の値を再利用することで:
+
+    - ゲートが適用した上限と同一基準で「跨ぎ」を判定できる(発注時の枠と事後累計の
+      比較が同じ NAV で行える)
+    - 判定時と事後監視時の間の NAV 変動(日中の再評価等)による非決定性を持ち込まない
+
+    dd_soft の枠半減は適用しない — 半減は「新規建て注文の抑制」の意味論であり、
+    事後監視は暴走ガード本体の 30%(``daily_turnover_nav_max``)に対して行う。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT g.id, g.state_ref
+            FROM trading.executions e
+            JOIN trading.orders o ON o.id = e.order_id
+            JOIN compliance.gate_log g ON g.id = o.gate_log_id
+            WHERE e.id = %s
+            """,
+            (execution_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None, None, "gate_log が紐づかない(執行手順違反 — A-3 の検知対象)"
+    gate_log_id, state_ref = row
+    if state_ref is None:
+        return None, gate_log_id, "gate_log.state_ref が NULL"
+    nav_raw = state_ref.get("nav") if isinstance(state_ref, dict) else None
+    if nav_raw is None:
+        return None, gate_log_id, "gate_log.state_ref に nav が無い"
+    try:
+        nav = Decimal(str(nav_raw))
+    except Exception as exc:  # noqa: BLE001 - 数値化できない値も fail-closed
+        return None, gate_log_id, f"nav を Decimal 化できない: {nav_raw!r}({exc})"
+    if nav <= 0:
+        return None, gate_log_id, f"nav が非正: {nav}"
+    return nav, gate_log_id, None
+
+
+def turnover_breach_after_execution(
+    conn: psycopg.Connection,
+    execution_id: int,
+    *,
+    ips: IPSConfig | None = None,
+) -> TurnoverBreach | None:
+    """約定適用後の G-7 上限跨ぎを検知する(F-12 事後監視)。
+
+    - 当該約定の JST 日付・book_id で **約定ベースのみ** の当日累計を計算し、
+      本約定を **含む額(after)と除いた額(before)** を求める
+    - 上限は ``ips.hard_limits.daily_turnover_nav_max × NAV``。NAV は当該注文のゲート
+      判定スナップショット(``compliance.gate_log.state_ref``)から取る
+    - 跨ぎ判定は ``before ≤ limit < after`` の**エッジトリガ**。既に超過中の追加約定
+      では鳴らさない
+    - NAV スナップショットが取れない異常系は **fail-closed** — after が有限値なら
+      「跨いだ」扱いで返し、呼び出し側で urgent 通知する(検知不能を黙殺しない)
+
+    返り値は ``TurnoverBreach``(跨ぎ or fail-closed)、それ以外は ``None``。ips は
+    未指定なら発効値をロードする。
+    """
+    if ips is None:
+        ips, _ = load_and_validate()
+    # 執行と book/trade_date/instrument/order を1回で読む(SELECT を減らす)。
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT o.book_id, o.id, o.instrument_id,
+                   (e.executed_at AT TIME ZONE 'Asia/Tokyo')::date
+            FROM trading.executions e
+            JOIN trading.orders o ON o.id = e.order_id
+            WHERE e.id = %s
+            """,
+            (execution_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"約定 {execution_id} が存在しない")
+    book_id, order_id, instrument_id, trade_date = row
+    before_after = _executed_turnover_before_and_after(
+        conn, book_id, trade_date, execution_id
+    )
+    if before_after is None:
+        # 対象日に当該約定が見つからない(理論上は上の SELECT と齟齬)。
+        return None
+    before, after = before_after
+    nav, gate_log_id, nav_reason = _nav_from_gate_log(conn, execution_id)
+    if nav is None:
+        # NAV が取れなければ判定不能 → fail-closed で urgent 側に倒す(A-3 と同じ姿勢)。
+        # after が有限値であればイベントとして上げる(呼び出し側は urgent 通知)。
+        return TurnoverBreach(
+            book_id=book_id,
+            trade_date=trade_date,
+            execution_id=execution_id,
+            order_id=order_id,
+            instrument_id=instrument_id,
+            before=before,
+            after=after,
+            limit=Decimal(0),
+            nav=None,
+            nav_source_gate_log_id=gate_log_id,
+            nav_missing_reason=nav_reason,
+        )
+    # 上限は IPS の hard_limits(発効値)。float → Decimal は str 経由で二進誤差を避ける。
+    limit = Decimal(str(ips.hard_limits.daily_turnover_nav_max)) * nav
+    if before <= limit < after:  # エッジトリガ
+        return TurnoverBreach(
+            book_id=book_id,
+            trade_date=trade_date,
+            execution_id=execution_id,
+            order_id=order_id,
+            instrument_id=instrument_id,
+            before=before,
+            after=after,
+            limit=limit,
+            nav=nav,
+            nav_source_gate_log_id=gate_log_id,
+        )
+    return None
+
+
 __all__ = [
     "OrderStatusError",
+    "TurnoverBreach",
     "advance_order_status",
     "apply_execution",
     "gate_and_record",
     "record_execution",
+    "turnover_breach_after_execution",
 ]
