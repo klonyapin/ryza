@@ -928,13 +928,23 @@ def run_daily(
     def _ops_summary() -> dict[str, Any]:
         # 検疫の件数は毎日必ず出す(解除できない封じ込めの検知可能化 — 審査 C-10)。
         stats = quarantine_stats(conn, as_of=as_of)
+        # risk 段の失敗は G-10 の限度状態鮮度検査(独立役員審査 2026-08-03 T-015 統合
+        # 条件)の**根っこ**に当たる: engine が update しない日が積み重なれば as_of が
+        # 古びて、いずれゲートが block を返し始める。実行サマリで見逃されると原因発見が
+        # 遅れるため、失敗した run は必ず urgent で上げる(サマリの ✅/⚠️ の一列に混ぜない)。
+        risk_stage = next((s for s in stages if s.name == "risk"), None)
+        risk_failed = risk_stage is not None and not risk_stage.ok
         embed = _build_ops_embed(
             stages, kill_switch=state["kill_switch"], posted=state["posted"],
             as_of=as_of, dry_run=dry_run, quarantine=stats,
         )
-        oid = enqueue(conn, channel_ops, embed, run.run_id)
+        oid = enqueue(conn, channel_ops, embed, run.run_id, urgent=risk_failed)
         state["ops_outbox_id"] = oid
-        detail = {"ops_outbox_id": oid, "quarantine_today": stats["today"]}
+        detail = {
+            "ops_outbox_id": oid,
+            "quarantine_today": stats["today"],
+            "risk_failed": risk_failed,
+        }
         if _is_mass_quarantine(stats):
             detail["quarantine_alert_outbox_id"] = enqueue(
                 conn, channel_ops, _build_quarantine_alert(stats, as_of=as_of), run.run_id

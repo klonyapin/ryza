@@ -27,7 +27,10 @@
 - G-8 レバレッジ: 約定後グロス/NAV が 2.0 超なら block。ポッド別レバ上限も評価
 - G-9 ショート: 個別銘柄ショートは NAV の 10% まで。マンデートで short 禁止の FM は block
 - G-10 リスク状態: dd_hard は全注文 block。vol/es 超過は新規建て block。
-  dd_soft は新規建てに warn(枠半減の実施は G-7)
+  dd_soft は新規建てに warn(枠半減の実施は G-7)。さらに **限度状態鮮度検査**
+  (独立役員審査 2026-08-03 T-015 統合条件): ``limits.as_of`` が判定時点から
+  2 営業日超古い/未来/NULL のいずれかなら fail-closed で block(リスクエンジンが
+  数日止まったまま古いフラグで判定し続けることの防止)
 
 実装上の判断(記録: docs/reviews/t014-design-decisions.md。独立役員審査 2026-08-03 反映):
 
@@ -53,9 +56,11 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from decimal import Decimal
 
 from ryza.ips import IPSConfig, Mandate
+from ryza.risk.calendar import business_days_between, to_jst_date
 
 _SIDES = ("buy", "sell", "short", "cover")
 _ORDER_TYPES = ("market", "limit")
@@ -131,14 +136,26 @@ class PositionState:
     avg_cost: Decimal
 
 
+#: G-10 鮮度検査の閾値(営業日)。この値**超**の経過で block(独立役員審査
+#: 2026-08-03 T-015 統合条件)。判定値ではなく設計値のため定数として持つ。
+LIMITS_STATE_FRESHNESS_MAX_BUSINESS_DAYS = 2
+
+
 @dataclass(frozen=True)
 class LimitsState:
-    """リスク状態(risk.limits_state の行。算出は T-015 リスクエンジン)。"""
+    """リスク状態(risk.limits_state の行。算出は T-015 リスクエンジン)。
+
+    ``as_of`` は行が最後に更新された時点(timestamptz)。G-10 はこの値と判定時刻を
+    比較して 2 営業日超なら fail-closed で block する(リスクエンジンが数日止まった
+    まま古いフラグで判定し続けることの防止 — 独立役員審査 2026-08-03 T-015 統合条件)。
+    ``None`` は行はあるが as_of が未記録 = 判定不能で block 側に倒す(fail-closed)。
+    """
 
     dd_soft: bool = False
     dd_hard: bool = False
     vol_exceeded: bool = False
     es_exceeded: bool = False
+    as_of: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +170,11 @@ class PortfolioState:
     limits: LimitsState | None  # リスク状態(行が無ければ None → fail-closed)
     prices: Mapping[int, Decimal] = field(default_factory=dict)
     # instrument_id → 時価。保有銘柄(発注銘柄を除く)の欠落は G-F で block(fail-closed)
+    now: datetime | None = None
+    # 判定時刻(timestamptz)。G-10 の限度状態鮮度検査に使う(``limits.as_of`` との差)。
+    # None は「時刻が測定できない」= 鮮度判定不能 → fail-closed で block(判定不能を
+    # 「新鮮」と主張しない)。呼び出し側(``gate.orders.gate_and_record``)が
+    # ``datetime.now(UTC)`` を必ず入れる。
 
 
 @dataclass(frozen=True)
@@ -602,10 +624,56 @@ def _hedge_futures_only(ctx: _Ctx, m: Mandate) -> list[Reason]:
 
 
 def _g10_risk_state(ctx: _Ctx) -> list[Reason]:
-    """G-10 リスク状態: dd_hard は全注文 block。vol/es は新規建て block。dd_soft は warn。"""
+    """G-10 リスク状態: dd_hard は全注文 block。vol/es は新規建て block。dd_soft は warn。
+
+    さらに **鮮度検査(独立役員審査 2026-08-03 T-015 統合条件)**: ``limits.as_of`` が
+    判定時点(``state.now``)から ``LIMITS_STATE_FRESHNESS_MAX_BUSINESS_DAYS``(2)営業日
+    **超**古い場合は fail-closed で block する。リスクエンジンが数日止まったまま古い
+    フラグで判定し続けることを防ぐ。``as_of=None`` は判定不能 → block 側に倒す
+    (行不存在時の挙動と整合 — 判定不能を「新鮮」と主張しない)。**未来 as_of**
+    (時計ずれ等)も判定不能扱いで block(``business_days_between`` が 0 を返すので
+    別途 ``as_of > now`` を明示的に fail-closed する)。
+    """
     limits = ctx.state.limits
     assert limits is not None  # G-F 通過済み
     reasons = []
+    # 鮮度検査は他のフラグ判定に先立つ — 古いフラグで dd_hard=false を「新鮮に安全」と
+    # 読ませないため、まず as_of の鮮度を落とす。now は G-F で存在保証済み。
+    now = ctx.state.now
+    assert now is not None
+    if limits.as_of is None:
+        reasons.append(
+            Reason(
+                "G-10",
+                "block",
+                "limits_state.as_of が NULL(鮮度判定不能 — fail-closed)",
+            )
+        )
+    else:
+        judge_day = to_jst_date(now)
+        as_of_day = to_jst_date(limits.as_of)
+        if as_of_day > judge_day:
+            reasons.append(
+                Reason(
+                    "G-10",
+                    "block",
+                    f"limits_state.as_of が判定時点より未来({as_of_day} > {judge_day})"
+                    " — 時計ずれの疑い(fail-closed)",
+                )
+            )
+        else:
+            elapsed = business_days_between(as_of_day, judge_day)
+            if elapsed > LIMITS_STATE_FRESHNESS_MAX_BUSINESS_DAYS:
+                reasons.append(
+                    Reason(
+                        "G-10",
+                        "block",
+                        f"limits_state.as_of が古い(経過 {elapsed} 営業日 > 上限 "
+                        f"{LIMITS_STATE_FRESHNESS_MAX_BUSINESS_DAYS} 営業日)"
+                        f" — as_of={as_of_day} 判定={judge_day}"
+                        "(リスクエンジン停止の疑い — fail-closed)",
+                    )
+                )
     if limits.dd_hard:
         reasons.append(
             Reason("G-10", "block", "DD ハードリミット到達中(全新規発注停止 — IPS §3.2)")
@@ -646,6 +714,11 @@ def _missing_inputs(proposal: OrderProposal, state: PortfolioState, ips: IPSConf
         missing.append("daily_turnover")
     if state.limits is None:
         missing.append("risk.limits_state")
+    # G-10 鮮度検査は判定時刻を必要とする — 呼び出し側は必ず現在時刻を入れる。
+    # 「時刻が測定できない」を「新鮮」と主張しないため fail-closed(独立役員審査
+    # 2026-08-03 T-015 統合条件と同じ姿勢)。
+    if state.now is None:
+        missing.append("now(G-10 鮮度検査に必要)")
     price = proposal.limit_price if proposal.order_type == "limit" else proposal.ref_price
     if price is None or price <= 0:
         missing.append("ref_price")

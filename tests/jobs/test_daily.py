@@ -219,6 +219,65 @@ def test_daily_close_success_leaves_risk_report_unchanged(
     assert not [f for f in embed["fields"] if f["name"] == "本日の締め"]
 
 
+# ── リスク段の失敗はサマリを urgent に昇格する(Issue #100 ②)─────────────────
+def test_daily_risk_stage_failure_escalates_ops_summary_urgent(
+    conn, run, llm_config, make_daily_llms, insert_enriched_doc, monkeypatch
+):
+    """risk 段が例外で落ちた日、実行サマリは urgent で上がる(サマリの一列に埋もれない)。
+
+    背景: G-10 の限度状態鮮度検査は risk エンジンが日次で ``limits_state`` を更新して
+    いることに依存する。エンジンが止まると as_of が古びていずれゲートが block する —
+    その根っこの失敗が緩い ✅/⚠️ 一覧に紛れると原因発見が遅れる。urgent=True で上げ、
+    Discord 側で優先配信(``bot.notifier`` のペース制御対象外)する。
+    """
+    _seed(insert_enriched_doc)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("risk boom")
+
+    monkeypatch.setattr(daily, "run_risk_daily", _boom)
+    result, _ = _run(conn, run, llm_config, make_daily_llms)
+
+    risk_stage = result.stage("risk")
+    assert risk_stage is not None and not risk_stage.ok
+    assert "risk boom" in (risk_stage.error or "")
+
+    ops = result.stage("ops_summary")
+    assert ops.ok  # 実行サマリ自体は失敗許容の下流で必ず走る
+    assert ops.detail["risk_failed"] is True
+
+    # press.outbox の実行サマリ embed が urgent で入っていること。
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT urgent FROM press.outbox WHERE id = %s",
+            (result.ops_outbox_id,),
+        )
+        (urgent,) = cur.fetchone()
+    assert urgent is True
+
+
+def test_daily_risk_stage_success_leaves_ops_summary_normal(
+    conn, run, llm_config, make_daily_llms, insert_enriched_doc
+):
+    """risk 段が成功した日は実行サマリを urgent にしない(赤の日常化を避ける — Issue #100 ②)。"""
+    _seed(insert_enriched_doc)
+    result, _ = _run(conn, run, llm_config, make_daily_llms)
+
+    risk_stage = result.stage("risk")
+    assert risk_stage is not None and risk_stage.ok
+
+    ops = result.stage("ops_summary")
+    assert ops.detail["risk_failed"] is False
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT urgent FROM press.outbox WHERE id = %s",
+            (result.ops_outbox_id,),
+        )
+        (urgent,) = cur.fetchone()
+    assert urgent is False
+
+
 # ── 冪等(同日再実行で二重投稿しない)──────────────────────────────────────────
 def test_daily_idempotent_no_double_post(
     conn, run, llm_config, make_daily_llms, insert_enriched_doc
