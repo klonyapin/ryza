@@ -126,12 +126,21 @@ def load_nav_series(conn: psycopg.Connection, book_id: str) -> NavSeries:
 def load_positions(
     conn: psycopg.Connection, book_id: str, *, as_of: datetime
 ) -> tuple[list[engine.RiskPosition], list[str], list[engine.Exclusion]]:
-    """帳簿の現在ポジション(全ポッド合算・銘柄単位)を時価評価する。
+    """帳簿の現在ポジションを**行=fm×instrument 単位**で時価評価する(A-12 F-6・T-021)。
+
+    以前は ``GROUP BY (instrument_id, asset_class) HAVING sum(qty) <> 0`` でポッド間を
+    ネットしてから時価評価していたが、これでは両建て(+q / −q)が保有ゼロとして
+    リスクエンジンに渡り、グロスレバ・資産クラスグロスが過小計上され、ネットゼロ
+    銘柄の時価欠落も検出されなかった。是正: 行(``fm``+``instrument_id``)単位で
+    そのまま返し、ネットするかどうかは各測度の意味論に従って測度側で決める
+    (``engine.guardrail_usage`` / ``engine.es95`` の docstring 参照)。
 
     時価は ``market.bars``(1d)の **as_of 以前の**最新終値×現行銘柄の乗数
     (point-in-time — 不変原則4。過去日付での再実行に未来バーを混入させない)。
     時価の無い銘柄は評価から除外し notes に明記する(fail-safe: 落とさず測れる
     範囲で測り、欠測は隠さない。発注時の欠測はゲート側が fail-closed で block する)。
+    **時価欠落の Exclusion / notes は銘柄単位で重複排除する**(同一銘柄を複数ポッドが
+    保有している場合に 2 重に出さない — T-021)。
 
     返り値の 3 つ目は同じ除外の**機械可読版**(``engine.Exclusion``)。ES とガード
     レールの採用値がどの銘柄を含まないかを、日本語の notes ではなく構造で残す
@@ -140,18 +149,18 @@ def load_positions(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT p.instrument_id, p.asset_class, sum(p.qty)
+            SELECT p.fm, p.instrument_id, p.asset_class, p.qty
             FROM trading.positions p
-            WHERE p.book_id = %s
-            GROUP BY p.instrument_id, p.asset_class
-            HAVING sum(p.qty) <> 0
+            WHERE p.book_id = %s AND p.qty <> 0
             """,
             (book_id,),
         )
         rows = cur.fetchall()
         if not rows:
             return [], [], []
-        ids = [r[0] for r in rows]
+        # 時価・乗数は銘柄単位で引く(同じ銘柄を複数ポッドが持つケースに備えて
+        # 重複排除する — T-021)。
+        ids = sorted({r[1] for r in rows})
         cur.execute(
             """
             SELECT DISTINCT ON (instrument_id) instrument_id, close
@@ -177,22 +186,28 @@ def load_positions(
     positions: list[engine.RiskPosition] = []
     notes: list[str] = []
     exclusions: list[engine.Exclusion] = []
-    for instrument_id, asset_class, qty in rows:
+    seen_missing: set[int] = set()  # 時価欠落の重複出力を抑止(T-021)
+    for fm, instrument_id, asset_class, qty in rows:
         price = prices.get(instrument_id)
         if price is None:
-            notes.append(f"時価欠落のため評価除外: instrument {instrument_id}")
-            exclusions.append(
-                engine.Exclusion(
-                    instrument_id=instrument_id,
-                    measure=engine.MEASURE_VALUATION,
-                    reason=engine.REASON_MISSING_PRICE,
+            if instrument_id not in seen_missing:
+                seen_missing.add(instrument_id)
+                notes.append(f"時価欠落のため評価除外: instrument {instrument_id}")
+                exclusions.append(
+                    engine.Exclusion(
+                        instrument_id=instrument_id,
+                        measure=engine.MEASURE_VALUATION,
+                        reason=engine.REASON_MISSING_PRICE,
+                    )
                 )
-            )
             continue
         value = Decimal(qty) * price * multipliers.get(instrument_id, Decimal(1))
         positions.append(
             engine.RiskPosition(
-                instrument_id=instrument_id, asset_class=asset_class, value=value
+                instrument_id=instrument_id,
+                asset_class=asset_class,
+                value=value,
+                fm=fm,
             )
         )
     return positions, notes, exclusions
