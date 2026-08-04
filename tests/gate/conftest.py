@@ -8,6 +8,7 @@ DB テスト(test_store.py)はテスト専用 DB(tests/conftest.py の ``migrate
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -81,7 +82,20 @@ def limits_row(conn):
 
 
 # ── 注文案・状態のビルダ(規則テスト用)──────────────────────────────────────
-_NO_FLAGS = LimitsState()  # リスクフラグ全て false(通常時)
+# 「今」は判定時刻の既定値。テストは基準形として ``_NOW`` を渡し、鮮度検査は
+# ``limits.as_of`` を「``_NOW`` からの相対」で組み立てる(境界の可読性のため)。
+_NOW = datetime(2026, 8, 4, 10, 0, tzinfo=UTC)
+# 通常時のリスクフラグは全て false かつ as_of は判定時点(=新鮮)。
+_NO_FLAGS = LimitsState(as_of=_NOW)
+
+
+def fresh_limits(**flags) -> LimitsState:
+    """``_NOW`` の as_of つきで ``LimitsState`` を組む(テスト補助)。
+
+    G-10 鮮度検査(``as_of`` が 2 営業日超で block)と、フラグ判定を独立に検証する
+    ため、フラグを立てるテストが as_of を明示せず「新鮮」を得られるようにしておく。
+    """
+    return LimitsState(as_of=_NOW, **flags)
 def jp_stock_proposal(**overrides) -> OrderProposal:
     """Ben の日本個別株の現物買い(全規則を通過する基準形)。"""
     defaults = dict(
@@ -112,9 +126,13 @@ def make_state(
     trading_state: str | None = "normal",
     prices: dict[int, Decimal] | None = None,
     auto_prices: bool = True,
+    now: datetime | None = _NOW,
 ) -> PortfolioState:
     """状態ビルダ。auto_prices=True なら保有銘柄の時価を avg_cost で明示補完する
     (エンジン側は時価欠落を fail-closed で block するため、テストで明示的に与える)。
+
+    ``now`` は判定時刻(既定は ``_NOW``)。G-10 鮮度検査は ``limits.as_of`` と ``now``
+    の営業日差で判定する。既定の ``_NO_FLAGS`` は ``as_of=_NOW`` なので新鮮扱い。
     """
     merged = dict(prices or {})
     if auto_prices:
@@ -128,6 +146,7 @@ def make_state(
         daily_turnover=daily_turnover,
         limits=limits,
         prices=merged,
+        now=now,
     )
 
 
