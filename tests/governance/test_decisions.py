@@ -1124,3 +1124,174 @@ def test_reviewed_sha_source_is_recorded_in_the_run_parameters(review_artifact, 
         ])
     assert captured["reviewed_sha"] == SHA_A
     assert captured["reviewed_sha_source"] == decisions_mod.SHA_SOURCE_ARTIFACT
+
+
+# ── --repo-root(Issue #132)───────────────────────────────────────────────────
+# メイン checkout ではなく PR ブランチの worktree にある意見書を CLI に読ませるための明示
+# オプション。省略時は従来経路(``_repo_root()`` 委譲)であり、指定時は fail-closed で検証する
+# (存在しないパス・目印なきパスは発効を止める — 沈黙して「リポジトリ外参照」に落とすと
+# reviewed_sha が PR head へフォールバックし、A-18-8 の sha_conflict 恒久ノイズを生む)。
+def _write_worktree_review(root, path: str, text: str) -> str:
+    """``root`` を Ryza の checkout に見立てて意見書を1本置く(config も一緒に作る)。"""
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    (root / "config" / "governance.yaml").write_text("# stub\n", encoding="utf-8")
+    target = root / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_cli_repo_root_resolves_review_from_a_worktree(tmp_path):
+    """**Issue #132 是正の主目的**: worktree を ``--repo-root`` に渡すと、そこにある意見書を
+    読んで reviewed_sha が審査記録から採用される(メイン checkout を見に行かない)。
+
+    ``_repo_root`` を monkeypatch せずに ``--repo-root`` の経路そのものを検証する
+    (fixture review_artifact との違い: 本テストは CLI オプションの受け渡しを見る)。
+    """
+    ref = _write_worktree_review(tmp_path, "docs/reviews/pr132-review.md", _front_matter(SHA_A))
+    target = decisions_mod._resolve_deemed_args(
+        _build_args([
+            "--deemed", "--proposal-ref", "https://x/pull/132", "--kind", "pr",
+            "--notice", "保護領域の変更", "--review", ref,
+            "--repo-root", str(tmp_path),
+        ]),
+        repo_root=decisions_mod._validated_repo_root(str(tmp_path)),
+    )
+    assert target.reviewed_sha == SHA_A
+    assert target.reviewed_sha_source == decisions_mod.SHA_SOURCE_ARTIFACT
+
+
+def test_cli_repo_root_nonexistent_path_aborts_before_db_write(migrated_db, capsys):
+    """**fail-closed**: 存在しないパスを ``--repo-root`` に渡すと発効せずエラーで返す。
+
+    DB に何も書かれないことを、記録用の proposal_ref を後から SELECT して確認する。
+    ``--dry-run`` は付けない(DB 書き込みの直前で止まったことを実体で見るため)。
+    """
+    ref = "https://github.com/klonyapin/ryza/pull/9032"
+    rc = main([
+        "--deemed", "--proposal-ref", ref, "--kind", "pr",
+        "--notice", "保護領域の変更",
+        "--review", "docs/reviews/anywhere.md",
+        "--repo-root", "/no/such/path/for/t027",
+    ])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "--repo-root" in err and "存在しない" in err
+    conn = connect()
+    try:
+        row = current_decision(conn, ref)
+        assert row is None  # 発効前に止まった = 記録は無い
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_cli_repo_root_missing_governance_yaml_aborts(tmp_path, migrated_db, capsys):
+    """**fail-closed**: ``config/governance.yaml`` が無い(= Ryza の checkout でない)パスは弾く。
+
+    存在するディレクトリでも、目印が無ければ意見書を沈黙して見失う可能性がある —— 中身の
+    確認を CLI で実体化する(``_repo_root()`` のフォールバックと同じ目印を使う)。
+    """
+    (tmp_path / "docs" / "reviews").mkdir(parents=True)
+    (tmp_path / "docs" / "reviews" / "x.md").write_text(_front_matter(SHA_A), encoding="utf-8")
+    # 意図的に config/governance.yaml は作らない
+    ref = "https://github.com/klonyapin/ryza/pull/9033"
+    rc = main([
+        "--deemed", "--proposal-ref", ref, "--kind", "pr",
+        "--notice", "保護領域の変更",
+        "--review", "docs/reviews/x.md",
+        "--repo-root", str(tmp_path),
+    ])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Ryza リポジトリの checkout に見えない" in err
+    conn = connect()
+    try:
+        assert current_decision(conn, ref) is None
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_cli_without_repo_root_keeps_the_default_behavior(review_artifact, monkeypatch):
+    """**未指定時の挙動は不変**: ``--repo-root`` を渡さなければ従来経路(``_repo_root()``
+    委譲)そのままで、Run の params にも ``repo_root=None`` が記録される
+    (既存テスト全体が green のままであることで担保される項目の、明示的な最小検証)。
+    """
+    ref_path = review_artifact(_front_matter(SHA_A))
+    captured: dict = {}
+
+    def _fake_start_run(job_name, params=None, **kw):
+        captured.update(params or {})
+        raise RuntimeError("記録経路は本テストの対象外")
+
+    monkeypatch.setattr("ryza.provenance.start_run", _fake_start_run)
+    with pytest.raises(RuntimeError):
+        main([
+            "--deemed", "--proposal-ref", "https://x/pull/9034", "--kind", "pr",
+            "--notice", "保護領域の変更", "--review", ref_path,
+        ])
+    # 未指定なら None が入る(既定経路の意味は _repo_root() 委譲であり、値としては空)。
+    assert captured["repo_root"] is None
+    # 既存経路の副産物は変わらない(reviewed_sha は審査記録から採る)。
+    assert captured["reviewed_sha"] == SHA_A
+    assert captured["reviewed_sha_source"] == decisions_mod.SHA_SOURCE_ARTIFACT
+
+
+def test_cli_repo_root_is_recorded_in_decision_note(migrated_db, monkeypatch, tmp_path):
+    """``--repo-root`` を使うと決定の ``note`` に絶対パスが残る(監査時に checkout を追える)。
+
+    DB 検証の流儀は既存 test_cli_records_and_notifies_on_a_fresh_connection に倣い、
+    ``commit`` を握り潰した薄い委譲で確定させず、SELECT で note を確かめてから rollback する。
+    """
+    import ryza.db.conn as db_conn
+
+    _write_worktree_review(tmp_path, "docs/reviews/repo-root-note.md", _front_matter(SHA_A))
+    inner = connect()
+
+    class _NoCommitConn:
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+        def __getattr__(self, name):
+            return getattr(inner, name)
+
+    monkeypatch.setattr(db_conn, "connect", lambda autocommit=False: _NoCommitConn())
+    ref = "https://github.com/klonyapin/ryza/pull/9035"
+    run_id = None
+    try:
+        rc = main([
+            "--deemed", "--proposal-ref", ref, "--kind", "pr",
+            "--notice", "保護領域の変更",
+            "--review", "docs/reviews/repo-root-note.md",
+            "--repo-root", str(tmp_path),
+        ])
+        assert rc == 0
+        with inner.cursor() as cur:
+            cur.execute(
+                "SELECT note, channel_msg_id FROM governance.decisions "
+                "WHERE proposal_ref = %s",
+                (ref,),
+            )
+            note, notice_ref = cur.fetchone()
+            cur.execute(
+                "SELECT run_id FROM press.outbox WHERE id = %s",
+                (int(notice_ref.removeprefix("outbox:")),),
+            )
+            run_id = cur.fetchone()[0]
+        assert note is not None
+        assert decisions_mod.REPO_ROOT_NOTE_PREFIX in note
+        # 絶対パス(resolve 済み)が入っている。tmp_path は既に絶対だが realpath 経由での
+        # 別名(macOS の /private/var/... 等)にも耐えるよう、``.resolve()`` の文字列で照合する。
+        assert str(tmp_path.resolve()) in note
+        inner.rollback()
+    finally:
+        if run_id is not None:
+            inner.rollback()
+            with inner.cursor() as cur:
+                cur.execute("DELETE FROM meta.runs WHERE run_id = %s", (run_id,))
+            inner.commit()
+        inner.close()
