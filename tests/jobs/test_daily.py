@@ -45,13 +45,13 @@ def test_daily_end_to_end(conn, run, llm_config, make_daily_llms, insert_enriche
     _seed(insert_enriched_doc)
     result, _ = _run(conn, run, llm_config, make_daily_llms)
 
-    # ステップ実行順(取込→前処理→分析→FM→執行/締め→curated→リスク→朝刊→サマリ)。
+    # ステップ実行順(取込→前処理→分析→curated→FM→執行/締め→リスク→朝刊→サマリ)。
     # fm 段は分析の後・執行の前(FM 提案 → ゲート → 執行 — T-017)。
     # risk 段は会計締め(execution 段)の直後(00 §9・設計リード裁定 2026-08-03)。
-    # curated 段は risk の分類ステップの直前(2026-08-04 の universe=0 事象の是正)。
+    # curated 段は FM 段の前(当日の撤回が当日の提案に効く — 設計リード裁定 2026-08-04)。
     assert [s.name for s in result.stages] == [
-        "ingest", "preprocess", "analysis", "fm.jim", "fm.ben", "execution",
-        "curated", "risk", "morning", "ops_summary",
+        "ingest", "preprocess", "analysis", "curated", "fm.jim", "fm.ben",
+        "execution", "risk", "morning", "ops_summary",
     ]
     assert result.ok
     assert all(s.ok for s in result.stages)

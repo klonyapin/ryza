@@ -2,8 +2,8 @@
 
 設計 30-press-discord §2・00-system-design §2/§10。1 日 1 回、以下を順に走らせる:
 
-  取込 → 前処理(縮退) → 分析エージェント → 市場観更新 → **FM(戦略)** → 執行(デモ)
-  → 締め(照合→NAV)→ curated ユニバース照合 → リスク(T-015: limits_state 更新+
+  取込 → 前処理(縮退) → 分析エージェント → 市場観更新 → curated ユニバース照合
+  → **FM(戦略)** → 執行(デモ) → 締め(照合→NAV)→ リスク(T-015: limits_state 更新+
   リスクレポート)→ 朝刊生成 → outbox → 実行サマリ
 
 **FM 段(T-017)**: Jim(非 LLM・日次)を毎日、Ben(LLM・週次)を ``config/fm_ben.yaml``
@@ -12,8 +12,9 @@
 (独立役員審査 T-017 C-5)。**分析の後・執行の前**に置く
 (FM 提案 → ゲート → 執行の順 — 設計リード裁定 2026-08-03)。Kill Switch 中は提案自体を
 作らない(ゲートも G-0 で block するが、通らないと分かっている案を作らない)。
-※ 銘柄の決定論分類(``market.instrument_classification``)を作るのは risk 段(T-015)
-なので、新規に取り込まれた銘柄が FM の候補になるのは翌日以降になる。
+※ **ルール**による銘柄分類(``market.instrument_classification``)を作るのは risk 段
+(T-015)なので、新規に取り込まれた銘柄が FM の候補になるのは翌日以降になる。一方
+**curated タグ**は直前の curated 段が当日反映するため、config の付与・撤回は当日効く。
 
 **執行段(T-016)**: 00 §9 の「ゲート → 執行 → 会計記帳 → 照合 → NAV 確定」のうち
 ゲート以降を担う(ゲートは注文起票側 = FM 段が ``gate_and_record`` で通す)。
@@ -27,7 +28,8 @@
 一度実行する」運用で、実行漏れが**無言のドリフト**になっていた(実際に承認済みリストが
 未反映のまま初回運用を迎え、ユニバースが空だった)。config を正と宣言する以上、config と
 DB の一致は機構で保証しなければならない。撤回(config から銘柄を消す)の反映漏れは
-売買母集団を広いまま残すため、付与の漏れより危険である。詳細は
+売買母集団を広いまま残すため、付与の漏れより危険である。**FM 段の前**に置き、当日の
+撤回が当日の提案に効くようにする(設計リード裁定 2026-08-04)。詳細は
 ``reconcile_curated_universes``。
 
 **risk 段(T-015)**: 00 §9 の順序どおり会計締めの直後に置く(設計リード裁定
@@ -687,7 +689,7 @@ def _build_ops_embed(
     return {
         "title": f"{title} {jst_str}",
         "description": (
-            "日次サイクルの実行サマリ(取込→前処理→分析→FM→執行/締め→curated 照合"
+            "日次サイクルの実行サマリ(取込→前処理→分析→curated 照合→FM→執行/締め"
             "→リスク→朝刊)。"
         ),
         "color": COLOR_NORMAL,
@@ -769,7 +771,23 @@ def run_daily(
 
     stages.append(_run_stage(conn, "analysis", _analysis))
 
-    # ── 4. FM(戦略): Jim 日次 + Ben 週次 → ゲート → 注文案 — T-017 ────────────
+    # ── 4. curated ユニバースの照合(config → DB。2026-08-04 事象の是正)────────
+    # **FM 段の前**に置く(設計リード裁定 2026-08-04)。本タスクの動機は「撤回の未反映が
+    # リスク側に倒れる」ことであり、config から銘柄を消した当日に Jim が依然その銘柄を
+    # 提案できるなら目的を果たさない。付与も同時に当日有効になるが、curated 定義の変更は
+    # PR マージ(`Approved:` トレーラつき代表承認・A-18-1 が突合)を経ているため、
+    # 当日有効で問題ない。
+    stages.append(
+        _run_stage(
+            conn,
+            CURATED_STAGE,
+            lambda: reconcile_curated_universes(
+                conn, run, as_of=as_of, directory=curated_dir
+            ),
+        )
+    )
+
+    # ── 5. FM(戦略): Jim 日次 + Ben 週次 → ゲート → 注文案 — T-017 ────────────
     # **FM ごとに別段(別 savepoint)**にする(独立役員審査 T-017 C-5)。1段にまとめると
     # Ben(LLM・週次)の例外で同じ段の Jim(決定論・日次)の提案・注文まで巻き戻り、
     # 日次の決定論シグナルが週次の LLM 障害に巻き込まれる。段の失敗許容は FM 単位で効かせる。
@@ -807,7 +825,7 @@ def run_daily(
 
     stages.append(_run_stage(conn, "fm.ben", _fm_ben))
 
-    # ── 5. 執行(デモ)→ 締め(照合 → NAV 確定)— T-016 ──────────────────────
+    # ── 6. 執行(デモ)→ 締め(照合 → NAV 確定)— T-016 ──────────────────────
     def _execution() -> dict[str, Any]:
         detail: dict[str, Any] = {}
         breaks: list[dict[str, Any]] = []
@@ -862,22 +880,6 @@ def run_daily(
 
     execution_stage = _run_stage(conn, "execution", _execution)
     stages.append(execution_stage)
-
-    # ── 6. curated ユニバースの照合(config → DB。2026-08-04 事象の是正)────────
-    # **risk 段の分類ステップ(classify_current_instruments)の直前**に置く。分類は
-    # risk 段が作るため、curated タグの供給も同じ「分類を整える」まとまりに属する。
-    # なお本段より前に走る fm.jim(段 4)が見るのは**前日までに反映されたタグ**である
-    # (当日の config 変更は翌日の提案から効く)。新規取込銘柄が FM の候補になるのが
-    # 翌日以降なのと同じ非同期であり、モジュール docstring 冒頭の注記と整合する。
-    stages.append(
-        _run_stage(
-            conn,
-            CURATED_STAGE,
-            lambda: reconcile_curated_universes(
-                conn, run, as_of=as_of, directory=curated_dir
-            ),
-        )
-    )
 
     # ── 7. リスクエンジン(T-015)──────────────────────────────────────────────
     # 00 §9 の順序どおり会計締め(execution 段の照合→NAV 確定)の直後に置く(設計

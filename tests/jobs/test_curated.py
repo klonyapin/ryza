@@ -228,19 +228,56 @@ def test_shipped_universe_dir_is_applied_by_the_automatic_path(conn, run):
 
 
 # ── daily への配線 ───────────────────────────────────────────────────────────
-def test_daily_curated_stage_runs_before_risk(
+def test_daily_curated_stage_runs_before_the_fm_stages(
     conn, run, llm_config, make_daily_llms, curated_dir
 ):
-    """curated 段は risk 段(分類ステップ)の直前に入る。"""
+    """curated 段は FM 段の直前に入る(当日の撤回が当日の提案に効く — 裁定 2026-08-04)。"""
     _insert_instrument(conn, "CUR7.T")
     _write_universe(curated_dir, ["CUR7.T"])
     result = _run_daily(conn, run, llm_config, make_daily_llms)
     names = [s.name for s in result.stages]
-    assert names.index(daily.CURATED_STAGE) == names.index("risk") - 1
+    assert names.index(daily.CURATED_STAGE) == names.index("fm.jim") - 1
+    assert names.index(daily.CURATED_STAGE) > names.index("analysis")
+    assert names.index(daily.CURATED_STAGE) < names.index("risk")
 
     stage = result.stage(daily.CURATED_STAGE)
     assert stage is not None and stage.ok, stage.error
     assert stage.detail["files"] == 1 and stage.detail["granted"] == 1
+
+
+def test_same_day_revocation_narrows_the_fm_universe(
+    conn, run, llm_config, make_daily_llms, curated_dir
+):
+    """**裁定 2026-08-04 の要**: config から消した銘柄は**当日の** FM 提案から外れる。
+
+    curated 段が FM 段より後ろにあると、撤回した当日も Jim は当該銘柄を候補に持つ。
+    撤回は売買母集団を狭める判断であり、1 日遅れて効くのはリスク側に倒れる。ここでは
+    「昨日 curated で付いていた銘柄が、config から消えた日の daily で Jim のユニバース
+    から消える」ことを固定する(段順を FM の後ろへ戻すと universe=1 のまま落ちる)。
+    """
+    from decimal import Decimal
+
+    from ryza.risk.classify import Classification, upsert_classification
+
+    inst = _insert_instrument(conn, "CUR11.T")
+    upsert_classification(
+        conn, inst,
+        Classification(
+            universe_tags=("liquid_equity",), instrument_flags=(),
+            is_single_name=True, product="listed_equity_cash",
+            unit_size=Decimal(100), asset_class="equity_jp",
+        ),
+        run_id=run.run_id, source="curated",
+        as_of=datetime.now(UTC) - timedelta(days=1),
+    )
+    # config から CUR11.T を落とす(ローダは entries 空を拒否するので別銘柄を1件残す)。
+    _write_universe(curated_dir, ["OTHER.T"])
+
+    result = _run_daily(conn, run, llm_config, make_daily_llms)
+    assert result.stage(daily.CURATED_STAGE).detail["revoked"] == 1
+    jim = result.stage("fm.jim")
+    assert jim is not None and jim.ok, jim.error
+    assert jim.detail["universe"] == 0
 
 
 def test_daily_curated_stage_is_idempotent_across_runs(

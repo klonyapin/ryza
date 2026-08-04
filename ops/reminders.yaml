@@ -1369,7 +1369,7 @@ reminders:
       type: issue_create
       title: "daily に curated ユニバースの冪等な自動照合を入れる"
       labels: [impl]
-      body: "2026-08-04 09:00 JST の日次サイクル初回実運用で fm.jim の universe が 0 だった。PR #99 で承認済み(Approved トレーラあり)の config/universe/jim-curated.yaml が market.instrument_classification へ反映されておらず、docs/ops/fm-curated-universe.md の CLI を人が一度実行する運用ステップが抜けていた(設計リードが 09:28 に手動反映・granted=35)。問題の本質は個別の実行漏れではなく、『config が正』と宣言しながら config と DB の一致を保証する機構が無いことである。承認・マージ・CI はすべて緑で、どの統制もこの状態を検出しない。とくに撤回(config から銘柄を消す=売買母集団を狭める)の未反映はリスク側に倒れる。是正: daily(risk の分類ステップの直前)に config/universe/*.yaml の冪等な自動照合を配線し、承認検査に落ちたファイルは反映せずスキップして実行サマリと専用 embed で警告する。"
+      body: "2026-08-04 09:00 JST の日次サイクル初回実運用で fm.jim の universe が 0 だった。PR #99 で承認済み(Approved トレーラあり)の config/universe/jim-curated.yaml が market.instrument_classification へ反映されておらず、docs/ops/fm-curated-universe.md の CLI を人が一度実行する運用ステップが抜けていた(設計リードが 09:28 に手動反映・granted=35)。問題の本質は個別の実行漏れではなく、『config が正』と宣言しながら config と DB の一致を保証する機構が無いことである。承認・マージ・CI はすべて緑で、どの統制もこの状態を検出しない。とくに撤回(config から銘柄を消す=売買母集団を狭める)の未反映はリスク側に倒れる。是正: daily(FM 段の前)に config/universe/*.yaml の冪等な自動照合を配線し、承認検査に落ちたファイルは反映せずスキップして実行サマリと専用 embed で警告する。"
     # 判断と是正(2026-08-04):
     #   原因 — 反映が「手順書の CLI を人が一度実行する」運用だった。fail-closed の設計が
     #          沈黙を深くしている(タグが無ければユニバースは空になり、空のユニバースは
@@ -1379,9 +1379,13 @@ reminders:
     #          冪等性は upsert_classification の「as_of 時点の有効行と内容同一なら履歴に
     #          追記しない」挙動に乗せ、tests/jobs/test_curated.py が 6 日ぶんの再実行で
     #          履歴行数が増えないことを固定する(risk/classify.py の変更は不要だった)
-    #   非是正 — curated 段は fm.jim(段 4)より後ろにあるため、当日の config 変更が当日の
-    #            提案に効くわけではない(新規取込銘柄が翌日以降に候補化するのと同じ非同期)。
-    #            撤回を即日効かせたい場合は段の位置を fm.jim の前へ動かす判断が別途要る
+    #   段順 — 初版は risk 段の直前(FM の後ろ)に置いたが、それでは当日の撤回が当日の Jim
+    #          提案に効かず、本項目の動機(撤回の未反映はリスク側に倒れる)を果たさない。
+    #          **設計リード裁定 2026-08-04 により FM 段の前へ移動済み**。付与も当日有効に
+    #          なるが、curated 定義の変更は Approved トレーラつき PR マージを経ているため
+    #          当日有効で問題ない。回帰は tests/jobs/test_curated.py の
+    #          test_same_day_revocation_narrows_the_fm_universe が固定する
+    #          (段を FM の後ろへ戻すと universe=1 のまま落ちる)
     status: done # 2026-08-04 実装: daily の curated 段 + 冪等性テスト + 手順書の書き換え(branch daily-curated-reconcile)
 
   - id: estat-appid-registration
