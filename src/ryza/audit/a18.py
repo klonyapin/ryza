@@ -442,19 +442,36 @@ class PRVerifier:
         return "unverifiable", reason
 
     def _unreachable_reason(self) -> str | None:
-        """リポジトリ自体に到達できるか(初回のみ問い合わせ)。到達不能なら理由を返す。"""
-        if self._reachable is None:
-            status, detail = self.api_get(f"repos/{self.slug}")
-            self._reachable = status == "ok"
+        """リポジトリ自体に到達できるか(到達確定/不在確定のみキャッシュ)。到達不能なら理由を返す。
+
+        **一時障害は永続キャッシュしない**(A-12 是正 F-2): ``status == "error"``(レート制限・
+        DNS 断・タイムアウト等)を ``_reachable = False`` に固定すると、1回のレート制限で
+        プロセス生存中の全 PR 照合が unverifiable(fail-open)に縮退する。エラーは今回の
+        呼び出しに対してだけ理由を返し、``_reachable`` は ``None`` のまま次の呼び出しで
+        再試行する。``ok``(到達確定)と ``not_found``(HTTP 404 = 不在確定)は従来どおり
+        キャッシュする。
+        """
+        if self._reachable is True:
+            return None
+        if self._reachable is False:
+            return self._reach_reason
+        status, detail = self.api_get(f"repos/{self.slug}")
+        if status == "ok":
+            self._reachable = True
+            self._reach_reason = None
+            return None
+        if status == "not_found":
+            self._reachable = False
             self._reach_reason = (
-                None
-                if self._reachable
-                else (
-                    f"リポジトリ {self.slug} に API でアクセスできない"
-                    f"(認証不備・不達の可能性: {detail if status == 'error' else 'HTTP 404'})"
-                )
+                f"リポジトリ {self.slug} に API でアクセスできない"
+                "(認証不備・不達の可能性: HTTP 404)"
             )
-        return self._reach_reason
+            return self._reach_reason
+        # status == "error": 一時障害(レート制限・DNS 断等)はキャッシュせず再試行可にする。
+        return (
+            f"リポジトリ {self.slug} に API でアクセスできない"
+            f"(一時障害の可能性: {detail})"
+        )
 
     def _fetch(self, number: int) -> tuple[str, Any]:
         """PR 1件の API 取得(成否ともキャッシュ)。"""
@@ -1805,11 +1822,17 @@ class UnrecordedPRScan:
 
     ``repo_slug`` が None の実行は ``proposal_ref`` のリポジトリ部分を照合できず、
     PR 番号の末尾一致までしか見ていない。黙って緑にせず notes に開示する。
+
+    ``unverified`` は PR 番号を件名から抽出できたが実在+マージ SHA 帰属の照合が縮退した
+    件数(A-12 是正 F-3)。分母(``checked``)には数えず、報告 embed に開示して緑の
+    範囲外であることを示す。既存 PR 番号の流用偽装(実在する別 PR の番号を件名に書いた
+    自作マージ)は A-18-4 と同じ経路(:func:`verified_pr_merge`)で弾く。
     """
 
     findings: list[dict[str, Any]]
     checked: int
     repo_slug: str | None
+    unverified: int = 0
 
 
 def pr_proposal_ref(slug: str, pr_number: int) -> str:
@@ -1879,6 +1902,7 @@ def check_unrecorded_protected_prs(
     *,
     since_commit: str | None = DEEMED_RECORD_BASELINE_COMMIT,
     repo_slug: str | None = None,
+    pr_verifier: PRVerifier | None = None,
 ) -> UnrecordedPRScan:
     """A-18-7: 保護領域 PR のうち、**その PR に帰属する**承認記録が DB に無いものを列挙する。
 
@@ -1898,11 +1922,14 @@ def check_unrecorded_protected_prs(
             (:func:`origin_slug`)。解決できない実行は PR 番号の末尾一致までしか
             照合できず、``UnrecordedPRScan.repo_slug=None`` として報告に開示する
 
-    **件名偽装は本検査では封じられない**(後続配線審査 後-6): ``--deemed`` は
-    ``proposal_ref`` を無検証で受けるため、架空の PR 番号を指す記録は作れる。したがって
-    「件名が偽なら記録も引けない」という関係は成立せず、偽装の封鎖は A-18-1 の
-    :class:`PRVerifier`(GitHub API による実在+マージ照合。**API 不達時は fail-open** で
-    縮退し、その件数は報告に出る)が担う。A-18-7 はその照合に依存する。
+    **件名偽装は A-18-4 と同じ経路で弾く**(A-12 是正 F-3): 件名の PR 番号は自己申告なので、
+    :func:`verified_pr_merge` で「その PR が実在し、かつマージ SHA が当該コミットに帰属する」
+    ことを確認してから分母(``checked``)に加算する。従来は件名の PR 番号を無検証で分母へ
+    数え、承認記録の帰属だけを検査していたため、実在する別 PR の番号を件名に流用した
+    自作マージは、その PR の承認記録が既にあれば緑を通過しえた。照合が縮退(``unverifiable``
+    — API 不達等)した実行はそのコミットを分母から除外し、``UnrecordedPRScan.unverified``
+    に計上して報告 embed で開示する。既存 PR 番号の流用偽装は分母から抜けるが、A-18-4 が
+    同じ経路で違反として鳴らす(``check_direct_pushes``)ため、経路の穴にはならない。
 
     **限界**: 承認記録が DB の外(Issue 決議など)にある PR は記録なしと判定される。
     定款第3条の発効要件は ``#承認`` への通知であり、その通知は ``governance.decisions``
@@ -1919,6 +1946,7 @@ def check_unrecorded_protected_prs(
     trailer = str(gov.get("approval_trailer") or "Approved:")
     findings: list[dict[str, Any]] = []
     checked = 0
+    unverified = 0
     for sha in _rev_list(repo, since_commit, "--first-parent", "--merges"):
         subject = _git(repo, "log", "-1", "--format=%s", sha).strip()
         # 件名からの PR 番号抽出は A-18-1/4 と同じ読み口を使う(件名は自己申告という限界も
@@ -1939,6 +1967,20 @@ def check_unrecorded_protected_prs(
         touched = match_protected(files, patterns)
         if not touched:
             continue
+        # 件名の PR 番号が実在し、かつマージ SHA が当該コミットに帰属することを確認する
+        # (A-12 是正 F-3・A-18-4 と統一)。3値判定を直接見る:
+        #   ok           → 分母(checked)に加算
+        #   bad          → 分母から除外(A-18-4 側で違反として鳴る。二重計上を避ける)
+        #   unverifiable → 分母から除外して unverified に計上(緑の範囲外を開示)
+        # ``pr_verifier`` が渡されていない実行(呼び出し側が明示的に照合を無効化した場合)
+        # は従来どおり件名を素通しし、分母に加算する。
+        if pr_verifier is not None:
+            state, _detail = pr_verifier.check(pr_number, sha)
+            if state == "bad":
+                continue
+            if state == "unverifiable":
+                unverified += 1
+                continue
         checked += 1
 
         expected = pr_proposal_ref(slug, pr_number) if slug else None
@@ -1985,7 +2027,9 @@ def check_unrecorded_protected_prs(
                 ),
             }
         )
-    return UnrecordedPRScan(findings=findings, checked=checked, repo_slug=slug)
+    return UnrecordedPRScan(
+        findings=findings, checked=checked, repo_slug=slug, unverified=unverified
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -2348,7 +2392,9 @@ def run_a18(
         unnotified, untracked_deemed = check_unnotified_deemed(conn)
         resolution_bypass = check_resolution_bypass(conn)
         deemed_scan = check_unrecorded_protected_prs(
-            repo_path, gov, conn, since_commit=deemed_since_commit
+            repo_path, gov, conn,
+            since_commit=deemed_since_commit,
+            pr_verifier=pr_verifier,
         )
         unrecorded_prs = deemed_scan.findings
         reviewed_scan = check_reviewed_sha_agreement(
@@ -2386,6 +2432,9 @@ def run_a18(
         # 緑の分母(後-4)。検査した保護領域 PR マージ数と、リポジトリ部分を照合できたか。
         "checked_protected_prs": deemed_scan.checked if deemed_scan else 0,
         "deemed_repo_slug": deemed_scan.repo_slug if deemed_scan else None,
+        # 実在照合が縮退して分母から除外した保護領域 PR マージの数(A-12 是正 F-3)。
+        # 緑の範囲外(unverifiable)であることを embed で開示する。
+        "unverified_protected_prs": deemed_scan.unverified if deemed_scan else 0,
         # A-18-8: トレーラ reviewed= ⇔ 承認記録 reviewed_sha の突合(conn のある実行のみ)。
         # 件数は決定単位(SHA-5)。受容済み(SHA-3)は別枠に分け、⚠️ は未受容のみで判定する。
         "reviewed_sha_mismatches": reviewed_mismatches,
@@ -2759,6 +2808,14 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
     # (A-18-5・A-18-6 と同じ流儀 — 沈黙を「見ていない」と区別できるようにする)。
     unrecorded = result.get("unrecorded_prs") or []
     checked_prs = result.get("checked_protected_prs") or 0
+    unverified_prs = result.get("unverified_protected_prs") or 0
+    # 実在照合が縮退した保護領域 PR は分母から抜いており、緑の範囲外であることを明示する
+    # (A-12 是正 F-3)。開示は所見の有無に関わらず出す。
+    unverified_suffix = (
+        f"(照合縮退 {unverified_prs} 件を分母から除外 — 緑の範囲外)"
+        if unverified_prs
+        else ""
+    )
     if unrecorded:
         lines = [
             f"- `{u['merge']}` PR #{u['pr_number']} {u['subject']}"
@@ -2769,7 +2826,7 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
             {
                 "name": (
                     f"⚠️ A-18-7 保護領域 PR の承認記録漏れ {len(unrecorded)}/{checked_prs} 件"
-                    "(--deemed-for-pr の実行忘れ)"
+                    f"{unverified_suffix}(--deemed-for-pr の実行忘れ)"
                 ),
                 "value": "\n".join(lines)[:1024],
                 "inline": False,
@@ -2783,10 +2840,11 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
             {
                 "name": "A-18-7 保護領域 PR の承認記録",
                 "value": (
-                    f"✅ 記録漏れなし(検査対象 {checked_prs} 件)"
+                    f"✅ 記録漏れなし(検査対象 {checked_prs} 件){unverified_suffix}"
                     if checked_prs
                     else "対象 PR なし(基準コミット以降に保護領域へ触れた PR マージが 0 件 — "
                          "squash マージ運用へ移行した場合も同じ表示になる)"
+                    + (f" {unverified_suffix}" if unverified_suffix else "")
                 ),
                 "inline": False,
             }
@@ -2896,8 +2954,17 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
         )
 
     alert = has_findings(result)
+    # dry-run(DB 接続なし)は否認済み承認を検出できない — その照合制限を notes だけでなく
+    # タイトルからも読み取れるようにする(A-12 是正 F-9)。DB 接続の有無は
+    # ``decision_refs_verified`` に一本化されており、これを dry-run の識別に使う。
+    dry_run = not result.get("decision_refs_verified")
+    dry_prefix = "[DRY-RUN(照合制限あり)] " if dry_run else ""
     return {
-        "title": ("⚠️ A-18 監査: 要対応の所見あり" if alert else "A-18 監査: 所見なし"),
+        "title": (
+            f"{dry_prefix}⚠️ A-18 監査: 要対応の所見あり"
+            if alert
+            else f"{dry_prefix}A-18 監査: 所見なし"
+        ),
         "description": (
             "規則⇔実装トレーサビリティ監査(定款第6条)。監査は read-only であり修正は行わない。"
         ),

@@ -784,6 +784,55 @@ def test_pr_verifier_caches_and_counts():
     assert err_calls.count(f"repos/{SLUG}/pulls/9") == 1
 
 
+def test_repo_reachability_temporary_error_is_not_permanently_cached():
+    """**A-12 是正 F-2**: ``repos/<slug>`` の一時障害(rate limit・ネットワーク断)は
+    ``_reachable`` に永続キャッシュしない。従来実装は初回 error を到達不能として固定し、
+    プロセス生存中の全 PR 照合を unverifiable(fail-open)に縮退させていた
+    (= トークンを一度失うだけで週次全体が緑を失う経路)。
+
+    1回目 error(rate limit)→ 2回目 ok で回復し、以後は通常照合ができること。
+    """
+    responses: list[tuple[str, object]] = [
+        ("error", "GitHub API 不達: URLError"),  # 1回目 repos/<slug>: 一時障害
+        ("ok", {"full_name": SLUG}),               # 2回目 repos/<slug>: 回復
+        ("ok", _merged("a" * 40)),                 # 3回目 pulls/9: 通常応答
+    ]
+    calls: list[str] = []
+
+    def api_get(path: str) -> tuple[str, object]:
+        calls.append(path)
+        return responses.pop(0)
+
+    verifier = a18.PRVerifier(slug=SLUG, api_get=api_get)
+    # 1回目: 一時障害 → unverifiable(縮退)。_reachable は None のまま残る。
+    state, reason = verifier.check(9)
+    assert state == "unverifiable"
+    assert "一時障害" in (reason or "")
+    # 2回目: 回復。repos/<slug> を再度叩き、その先の pulls/9 も叩ける。
+    state, _reason = verifier.check(9, "a" * 40)
+    assert state == "ok"
+    # repos/<slug> は 2 回(再試行)、pulls/9 は 1 回だけ叩かれている。
+    assert calls == [f"repos/{SLUG}", f"repos/{SLUG}", f"repos/{SLUG}/pulls/9"]
+
+
+def test_repo_reachability_not_found_is_cached():
+    """**A-12 是正 F-2**: HTTP 404(不在確定)は従来どおり ``_reachable = False`` を
+    キャッシュする。私有リポジトリ+認証不備で全件 404 になる週に、``repos/<slug>``
+    を PR 番号ごとに叩き直さないための最適化を維持する(低-9)。
+    """
+    calls: list[str] = []
+
+    def api_get(path: str) -> tuple[str, object]:
+        calls.append(path)
+        return ("not_found", None)  # 何を叩いても 404
+
+    verifier = a18.PRVerifier(slug=SLUG, api_get=api_get)
+    assert verifier.check(9)[0] == "unverifiable"
+    assert verifier.check(10)[0] == "unverifiable"
+    # repos/<slug> は 1 回しか叩かれない(404 は不在確定としてキャッシュ)。
+    assert calls.count(f"repos/{SLUG}") == 1
+
+
 def test_pr_verifier_scope_and_disabled_states():
     """他リポジトリの URL・PR でない URL は照合対象外。無効化時は unverifiable。"""
     verifier = _verifier({9: _merged("a" * 40)})
@@ -2298,6 +2347,127 @@ def test_a18_7_unresolvable_slug_is_disclosed_in_notes(repo, conn):
     conn.rollback()
 
 
+# ── 実在照合の統一(A-12 是正 F-3)───────────────────────────────────────────
+# A-18-4 と経路を揃え、件名の PR 番号を verified_pr_merge で照合してから分母に加算する。
+# 実在しない番号・SHA 帰属が破れた自作マージは分母から除外し、照合縮退(API 不達等)は
+# ``UnrecordedPRScan.unverified`` に計上して報告 embed に出す(緑の範囲外)。
+def test_a18_7_nonexistent_pr_number_is_not_counted_as_checked(repo, conn):
+    """**A-12 是正 F-3**: 件名に書いた PR 番号が実在しなければ分母(checked)に入らない。
+
+    従来は件名から PR 番号を取れれば分母に加算し、承認記録の帰属だけを検査していた。
+    実在しない PR 番号を件名にした自作マージは A-18-4 側で違反として鳴るので、A-18-7 は
+    分母から除外して二重計上を避ける(所見にも入れない)。
+    """
+    r, since = repo
+    _merge_protected_pr(r, 999999)  # PR #999999 は実在しない(擬似 API が空)
+    verifier = a18.PRVerifier(slug=SELF_SLUG, api_get=_fake_api({}))
+    scan = a18.check_unrecorded_protected_prs(
+        r, a18.load_governance(r), conn,
+        since_commit=since, repo_slug=SELF_SLUG, pr_verifier=verifier,
+    )
+    assert scan.checked == 0
+    assert scan.findings == []
+    assert scan.unverified == 0
+    conn.rollback()
+
+
+def test_a18_7_borrowed_pr_number_is_not_counted_as_checked(repo, conn, run_id):
+    """**A-12 是正 F-3**: 実在するが merge_commit_sha が別の PR 番号を件名に流用した
+    自作マージは分母に入らない。従来はその PR の承認記録があれば緑を通過しえた
+    (実在番号のコピーで承認を装う経路)。
+    """
+    r, since = repo
+    # PR #9 に対する承認記録は存在する(deemed)—— 従来なら緑になっていた。
+    _deemed(conn, run_id, _self_pr_url(9))
+    _merge_protected_pr(r, 9)
+    merge_sha = _git(r, "rev-parse", "HEAD").strip()
+    # verifier には PR #9 は実在するが merge_commit_sha は別物と応答させる(番号を借りただけ)。
+    verifier = a18.PRVerifier(
+        slug=SELF_SLUG,
+        api_get=_fake_api({9: _merged("f" * 40)}),
+    )
+    scan = a18.check_unrecorded_protected_prs(
+        r, a18.load_governance(r), conn,
+        since_commit=since, repo_slug=SELF_SLUG, pr_verifier=verifier,
+    )
+    assert merge_sha  # sanity: マージコミットは実在
+    assert scan.checked == 0 and scan.findings == []
+    conn.rollback()
+
+
+def test_a18_7_verification_degraded_is_excluded_and_disclosed(repo, conn):
+    """**A-12 是正 F-3**: 実在照合が縮退(API 不達等)した保護領域 PR は分母から除外し、
+    ``unverified`` に計上する。報告 embed のタイトルに「照合縮退」を明示する。
+    """
+    r, since = repo
+    _merge_protected_pr(r, 555)
+    # repos/<slug> が一時障害 → 縮退。1回目 error は永続キャッシュしないので毎回問い合わせる。
+    verifier = a18.PRVerifier(
+        slug=SELF_SLUG,
+        api_get=_fake_api({}, error="GitHub API 不達: URLError"),
+    )
+    scan = a18.check_unrecorded_protected_prs(
+        r, a18.load_governance(r), conn,
+        since_commit=since, repo_slug=SELF_SLUG, pr_verifier=verifier,
+    )
+    assert scan.checked == 0
+    assert scan.unverified == 1
+    assert scan.findings == []
+    conn.rollback()
+
+
+def test_a18_7_ok_pr_verification_matches_checked(repo, conn):
+    """照合 ok の PR は従来どおり分母に加算される(既存挙動の非退行)。"""
+    r, since = repo
+    _merge_protected_pr(r, 556)
+    merge_sha = _git(r, "rev-parse", "HEAD").strip()
+    verifier = a18.PRVerifier(
+        slug=SELF_SLUG,
+        api_get=_fake_api({556: _merged(merge_sha)}),
+    )
+    scan = a18.check_unrecorded_protected_prs(
+        r, a18.load_governance(r), conn,
+        since_commit=since, repo_slug=SELF_SLUG, pr_verifier=verifier,
+    )
+    # 承認記録は無いので所見に落ちるが、分母には加算されている。
+    assert scan.checked == 1
+    assert [f["pr_number"] for f in scan.findings] == [556]
+    assert scan.unverified == 0
+    conn.rollback()
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# dry-run 実行の照合制限を報告タイトルから読み取れるようにする(A-12 是正 F-9)
+# ────────────────────────────────────────────────────────────────────────────
+def test_dry_run_title_marks_limitation(repo):
+    """**A-12 是正 F-9**: dry-run(conn=None)は否認済み承認を検出できず、トレーラの存在だけで
+    受理する。この照合制限は notes に開示されているが、報告 embed のタイトルからも読み取れる
+    ようにする(タイトルに「DRY-RUN(照合制限あり)」を含める)。
+    """
+    r, since = repo
+    result = a18.run_a18(
+        r, since_commit=since, pr_since_commit=since,
+        deemed_since_commit=since, verify_prs=False,
+    )
+    # conn=None のため decision_refs_verified が False = dry-run 相当。
+    assert result["decision_refs_verified"] is False
+    embed = a18.build_alert_embed(result)
+    assert "DRY-RUN(照合制限あり)" in embed["title"]
+
+
+def test_normal_run_title_has_no_dry_run_marker(repo, conn):
+    """conn を渡した通常実行はタイトルに「DRY-RUN」を含めない。"""
+    r, since = repo
+    result = a18.run_a18(
+        r, since_commit=since, pr_since_commit=since,
+        deemed_since_commit=since, verify_prs=False, conn=conn,
+    )
+    assert result["decision_refs_verified"] is True
+    embed = a18.build_alert_embed(result)
+    assert "DRY-RUN" not in embed["title"]
+    conn.rollback()
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # 接続の分離(独立役員審査 軽微-11)
 #
@@ -2872,13 +3042,31 @@ def _deemed_with_review(conn, run_id, proposal_ref: str, reviewed_sha: str | Non
 
 
 def _write_review(r: Path, path: str, sha: str | None) -> str:
-    """意見書(新様式 = front matter 付き)を一時リポジトリに置く。``sha=None`` は旧様式。"""
+    """意見書(新様式 = front matter 付き)を一時リポジトリに置く。``sha=None`` は旧様式。
+
+    committer date は**過去(2026-08-01)に固定する**。由来判定は「意見書の初回コミット時刻
+    ≤ 決定時刻」の比較だが、テストの決定時刻は Postgres の ``now()`` = **トランザクション
+    開始時刻**に固定される(conn フィクスチャが先に開始)一方、git のコミット時刻は実時刻
+    (秒精度)である。実時刻でコミットすると、トランザクション開始から秒境界を跨いだ実行
+    だけ ``post_hoc`` に化けて flaky になる(CI で実測)。事後製造のテストは
+    :func:`_post_hoc_commit_review` が日時を明示して作るので、ここを過去に固定しても
+    検査の意味は変わらない。
+    """
     body = "# 独立役員意見書\n\n判定: 条件付き承認\n"
     text = body if sha is None else (
         f"---\nreviewed_sha: {sha}\nreview_date: 2026-08-04\nverdict: conditional_approve\n---\n\n"
         + body
     )
-    _commit(r, path, text, f"docs(reviews): 意見書 {path}")
+    p = r / path
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+    _git(r, "add", "-A")
+    fixed = "2026-08-01T00:00:00+09:00"
+    subprocess.run(
+        ["git", "-C", str(r), "commit", "-m", f"docs(reviews): 意見書 {path}"],
+        capture_output=True, text=True, check=True,
+        env={**os.environ, "GIT_AUTHOR_DATE": fixed, "GIT_COMMITTER_DATE": fixed},
+    )
     return path
 
 
