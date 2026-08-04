@@ -60,6 +60,22 @@ POLL_SECONDS = 5.0
 DAILY_TIME = dt.time(hour=18, minute=0, tzinfo=JST)  # 18:00 JST
 
 
+def _mask_channel_id(channel_id: object) -> str:
+    """Discord チャネル ID をログ・例外向けに伏字化する(pass4-security 所見5・F-13-6)。
+
+    Discord サーバーの内部 ID は「システム上の致命的な秘密」ではないが、ログや例外
+    メッセージに素で流出させる利得は無い(``mask_url`` と同じ流儀)。数字の下 4 桁
+    だけ残し、それ以外は ``*`` で置き換える(識別しやすさの下限は保つ)。文字列に
+    ならない場合や短すぎる場合は全体を伏せる。
+    """
+    s = str(channel_id) if channel_id is not None else ""
+    if not s:
+        return "<masked>"
+    if len(s) <= 4:
+        return "*" * len(s)
+    return "*" * (len(s) - 4) + s[-4:]
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # 設定(環境変数)
 # ────────────────────────────────────────────────────────────────────────────
@@ -534,6 +550,10 @@ class RyzaBot(commands.Bot):
                     resolve_conn.rollback()  # 失敗でアボートした tx を明示的に畳む
                     overrides = {}
             if channel_id is None:
+                # 論理チャネル名(press.outbox.channel: approval/ops/press/dev)は
+                # 秘密ではなく素で載せる。Discord 内部 ID を露出させるのはこの経路の
+                # 隣にある「取得失敗」側の raise だけで、そちらは _mask_channel_id
+                # で伏字化する(pass4-security 所見5 の是正・F-13-6)。
                 raise RuntimeError(f"チャンネル未解決(ensure 前?): {msg.channel}")
             # #承認 向けで proposal footer を持つ embed には承認ボタンを付ける
             # (凍結中の例外的取引などを1件ずつオーナー承認する経路)。
@@ -563,7 +583,7 @@ class RyzaBot(commands.Bot):
                 embed.color = discord.Color(COLOR_FLASH)
             channel = self.get_channel(int(channel_id))
             if channel is None:
-                raise RuntimeError(f"チャンネル取得失敗: {channel_id}")
+                raise RuntimeError(f"チャンネル取得失敗: id={_mask_channel_id(channel_id)}")
             send_kwargs: dict = {"embed": embed}
             if deemed_ref is not None:
                 send_kwargs["view"] = VetoView(self, deemed_ref)
