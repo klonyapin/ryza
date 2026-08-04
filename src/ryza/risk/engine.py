@@ -83,11 +83,20 @@ class NavPoint:
 
 @dataclass(frozen=True)
 class RiskPosition:
-    """ポジション評価額1件(ES・ガードレール入力)。value は符号付き JPY 時価総額。"""
+    """ポジション評価額1件(ES・ガードレール入力)。
+
+    行=**fm × instrument** 単位で受け取る(A-12 是正 F-6・T-021)。ポッド間のネットは
+    測度の意味論に従って**測度側**で決める(``guardrail_usage`` の docstring 参照)。
+    グロス測度(gross_leverage / single_asset_class_gross)は行単位 Σ|value| で測り、
+    発行体集中度と ES は同一銘柄を符号付きで合算してから abs / weights に載せる。
+    ``value`` は符号付き JPY 時価総額(負=ショート・行単位)。``fm`` は由来ポッドで、
+    集計には使わないがレポートと監査のトレーサビリティのために保持する。
+    """
 
     instrument_id: int
     asset_class: str
     value: Decimal
+    fm: str = ""  # 保有ポッド(A-12 F-6): 集計はしないが由来の開示・デバッグ用
 
 
 @dataclass(frozen=True)
@@ -263,12 +272,18 @@ def es95(
     """
     if nav <= 0:
         return ESResult(None, None, 0.0, 0)
+    # 銘柄単位でネット(行=fm×instrument 入力を許容 — A-12 F-6・T-021)。ES は同一銘柄の
+    # 逆ポジション P&L が厳密に相殺するため、weights は符号付き加算のまま。
     weights: dict[int, float] = {}
     for pos in positions:
         if pos.value != 0:
             weights[pos.instrument_id] = weights.get(pos.instrument_id, 0.0) + float(
                 pos.value / nav
             )
+    # ネット後に厳密ゼロになった銘柄は落とす(両建てが `included` や共通観測日の計算に
+    # 混入して余計に判定保留を招くのを防ぐ — T-021)。行単位の pos.value != 0 ガードだけ
+    # では合算後ゼロを掬えなかった。
+    weights = {i: w for i, w in weights.items() if w != 0.0}
     if not weights:
         return ESResult(None, None, 0.0, 0)
 
@@ -432,21 +447,36 @@ def guardrail_usage(
 ) -> dict[str, dict[str, float | str | None]]:
     """ガードレール消費率(現在値/上限 — 日次リスクレポート用。判定はゲートの管轄)。
 
-    返り値は ``{名前: {value, limit, usage}}``。usage は上限に対する消費率(0..∞)。
-    現金下限のみ「下限」なので usage = 下限/現在値(現在値が下限に近いほど 1 に近づく)。
+    **測度ごとに集計の意味論が違う**(A-12 F-6・T-021):
+
+    - ``gross_leverage`` / ``single_asset_class_gross``: **行単位 Σ|value|**(ネット
+      しない)。建玉の総量を測る指標なのでポッド間の相殺は執行上の相殺ではなく、
+      両建ては両建てのまま計上する(t014 設計判断3 と同じ理屈 — ゲート G-4/G-8 の
+      グロス計算と整合)
+    - ``issuer_concentration``: **銘柄単位で符号付き合算 → abs**。同一銘柄の両建ては
+      発行体リスクとしては相殺される(compliance.py の abs(post_fund_qty) と同じ
+      意味論)
+    - ``cash_floor``: 現金下限は下限なので usage = 下限/現在値(下限に近いほど 1)
+
+    返り値は ``{名前: {value, limit, usage}}``。
     """
     if nav <= 0:
         return {}
     hl, gr = ips.hard_limits, ips.guardrails
-    by_issuer: dict[int, Decimal] = {}
+    # issuer は **銘柄単位でネット後 abs**(2段集計 — T-021)。まず符号付きで合算し、
+    # そのうえで絶対値を取る。両建ては 0 になる(発行体リスクとしては正しい)。
+    signed_by_issuer: dict[int, Decimal] = {}
     by_class: dict[str, Decimal] = {}
     gross = Decimal(0)
     for pos in positions:
-        by_issuer[pos.instrument_id] = by_issuer.get(pos.instrument_id, Decimal(0)) + abs(
-            pos.value
+        signed_by_issuer[pos.instrument_id] = (
+            signed_by_issuer.get(pos.instrument_id, Decimal(0)) + pos.value
         )
+        # class / gross は行単位 Σ|value|(入力が行単位になったことで自動的にグロス
+        # 計上になる — F-6 是正の本体)。
         by_class[pos.asset_class] = by_class.get(pos.asset_class, Decimal(0)) + abs(pos.value)
         gross += abs(pos.value)
+    by_issuer = {i: abs(v) for i, v in signed_by_issuer.items()}
 
     top_issuer = max(by_issuer.values(), default=Decimal(0))
     top_class_name, top_class_value = max(
