@@ -144,6 +144,63 @@ VETO_ORIGINS: tuple[str, ...] = ("discord_button", "discord_command", "cli", "jo
 # 方針なので定数は共有せず各々が持つ。
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 
+# proposal_ref の様式(F-10 / A-12-13 / A-12-04)。書き込み時のみ検証し、既存 DB 行には
+# 触れない(migration による遡及書き換えは追記オンリー原則の逸脱にあたる)。目的は
+# 「短い任意文字列が 0007 の UNIQUE(proposal_ref) に偶然一致して重複判定を誤らせる」
+# 経路を塞ぐこと。3形式:
+#   (a) 本リポジトリ規則で使う PR URL — `https://github.com/<owner>/<repo>/pull/<数字>`
+#   (b) `decision:<数字>` — 決定 id の直接参照(否認・撤回の起点として `record_veto`
+#       などが `decision_id` を保持しているので、対応する ref を機械生成できる)
+#   (c) `manual:<スラッグ>` — 上記いずれでもない遡及登録・手作業(戦略昇格の非 PR 経路など)。
+#       スラッグは短すぎる衝突を防ぐため下限を持つ(先頭 1 文字 + 残り 2〜63 文字 = 計 3〜64)
+# **なぜ writer 側で弾くか**: proposal_ref は UNIQUE キーそのもので、書き込みの様式が
+# 揃わないと「二重記録の防止」が偶然一致の可否に依存する。CLI 側で弾く方式は、Bot 経路や
+# 別スクリプトからの直接呼び出しに穴が残る(A-18-1 が事後検出することになるが、統制の
+# 一次責任は writer に置くのが本仕様の原則 — decisions.py モジュール冒頭 §二重の検証)。
+_PROPOSAL_REF_PR_URL_RE = re.compile(
+    r"^https://github\.com/[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*/pull/[1-9][0-9]*$"
+)
+_PROPOSAL_REF_DECISION_RE = re.compile(r"^decision:[1-9][0-9]*$")
+_PROPOSAL_REF_MANUAL_RE = re.compile(r"^manual:[a-z0-9][a-z0-9\-_]{2,63}$")
+
+
+def validate_proposal_ref(value: str) -> str:
+    """``proposal_ref`` の様式を検証する純粋関数(F-10)。
+
+    許可される 3 形式:
+
+    - ``https://github.com/<owner>/<repo>/pull/<数字>`` — GitHub の PR URL
+    - ``decision:<数字>`` — 決定 id の直接参照
+    - ``manual:<スラッグ>`` — スラッグは ``[a-z0-9]`` で始まり、続く 2〜63 文字は
+      ``[a-z0-9\\-_]``(計 3〜64 文字)
+
+    いずれにも合致しない場合は ``ValueError`` を送出する(空文字・空白は
+    :func:`_require_text` が先に弾く想定だが、単体でも使えるよう再検査する)。
+
+    設計判断: **正規表現を writer に閉じる**。呼び出し側で複雑な検証を書かせると、
+    経路が増えるたびに解釈が分岐して同じ「短い任意文字列で UNIQUE を素通り」を再現しうる。
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"proposal_ref は文字列である必要がある: {type(value).__name__}")
+    if not value or value != value.strip():
+        raise ValueError(
+            "proposal_ref は前後空白を持たない非空文字列で、以下 3 形式のいずれか: "
+            "`https://github.com/<owner>/<repo>/pull/<数字>` / "
+            "`decision:<数字>` / `manual:<スラッグ>`"
+        )
+    if _PROPOSAL_REF_PR_URL_RE.match(value):
+        return value
+    if _PROPOSAL_REF_DECISION_RE.match(value):
+        return value
+    if _PROPOSAL_REF_MANUAL_RE.match(value):
+        return value
+    raise ValueError(
+        f"proposal_ref='{value}' は許可された様式に一致しない。"
+        "許可: `https://github.com/<owner>/<repo>/pull/<数字>` / "
+        "`decision:<数字>` / `manual:<[a-z0-9][a-z0-9\\-_]{2,63}>`。"
+        "旧来の短い任意文字列は 0007 の UNIQUE(proposal_ref) の重複判定と衝突するため不可"
+    )
+
 # 否認できる決定(0021 の check_veto_target トリガと一致させる)。
 # reject / question を否認可能にすると「却下されている」という阻止の根拠が消え、
 # 現決定を読む将来の判定が fail-open で外れる(独立役員審査 0021 C-2)。
@@ -292,6 +349,7 @@ def record_deemed_approval(
     保護領域 PR で必須にする判断は CLI 側(``REVIEW_REQUIRED_KINDS``)に置く。
     """
     _require_text(proposal_ref, "proposal_ref")
+    validate_proposal_ref(proposal_ref)
     _require_text(notice_ref, "notice_ref")
     _require_text(source, "source")
     reviewed_sha = normalize_reviewed_sha(reviewed_sha)
@@ -1349,6 +1407,7 @@ __all__ = [
     "record_veto_withdrawal",
     "require_existing_review",
     "resolve_reviewed_sha",
+    "validate_proposal_ref",
 ]
 
 

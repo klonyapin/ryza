@@ -169,6 +169,10 @@ def create_evidence(
     未設定時は小さな内部記録として JSON を payload_ref にインライン格納し、
     sha256 は JSON バイト列に対して計算する(設計書 §5 補足)。
     """
+    # F-10: source の様式検証は writer に一本化する(ストア経由・インラインで規則が変わらない)。
+    from ryza.provenance.evidence import validate_source
+
+    validate_source(source)
     store = _evidence_store()
     if store is not None:
         return store.store(conn, kind, _store_payload(payload), source)
