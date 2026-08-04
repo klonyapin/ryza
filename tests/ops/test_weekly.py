@@ -224,10 +224,9 @@ reminders:
 """
     client = StubClient(reminders_text=text)
     doc = weekly.yaml.safe_load(text)
-    fired = weekly.fire_reminders(client, doc, text, "sha0", NOW, bq_checker=_false_bq)
-    assert fired == []
+    assert weekly.fire_reminders(client, doc, text, "sha0", NOW, bq_checker=_false_bq).fired == []
     fired2 = weekly.fire_reminders(client, doc, text, "sha0", NOW, bq_checker=_true_bq)
-    assert fired2 == ["billing"]
+    assert fired2.fired == ["billing"]
 
 
 # ── set_reminder_status: ターゲット書き換え ─────────────────────────────────
@@ -248,10 +247,11 @@ def test_set_reminder_status_targeted():
 def test_fire_skips_already_fired_and_future():
     client = StubClient()
     doc = weekly.yaml.safe_load(SYNTH_REMINDERS)
-    fired = weekly.fire_reminders(
+    outcome = weekly.fire_reminders(
         client, doc, SYNTH_REMINDERS, "sha0", NOW, bq_checker=_false_bq
     )
-    assert fired == ["fires-now"]  # not-yet(未来)・already-fired(既発火)は除外
+    assert outcome.fired == ["fires-now"]  # not-yet(未来)・already-fired(既発火)は除外
+    assert outcome.failures == []
     assert client.comments_posted == [(5, "発火テスト")]
     # reminders.yaml が1回コミットされ、status が fired になっている。
     assert len(client.files_updated) == 1
@@ -296,9 +296,9 @@ def test_digest_created_when_missing():
 def test_dry_run_end_to_end_no_writes():
     digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
     client = StubClient(issues=[digest_issue], dry_run=True)
-    fired = weekly.run_weekly(client, now=NOW, bq_checker=_true_bq)
+    outcome = weekly.run_weekly(client, now=NOW, bq_checker=_true_bq)
     # 評価・発火判定は行われる(fires-now が対象)。
-    assert fired == ["fires-now"]
+    assert outcome.fired == ["fires-now"]
     # だが書き込みは一切行われない。
     assert client.comments_posted == []
     assert client.issues_created == []
@@ -345,8 +345,8 @@ def test_dry_run_real_client_makes_no_write_requests():
     }
     opener = _PathOpener(routes)
     client = GitHubClient("tok", "acme/ryza", dry_run=True, opener=opener)
-    fired = weekly.run_weekly(client, now=NOW, bq_checker=_true_bq)
-    assert fired == ["fires-now"]
+    outcome = weekly.run_weekly(client, now=NOW, bq_checker=_true_bq)
+    assert outcome.fired == ["fires-now"]
     # opener に届いたのは GET のみ(POST/PUT なし)。
     assert all(r["method"] == "GET" for r in opener.records)
 
@@ -454,3 +454,174 @@ def test_resolution_audit_status_failure_is_reported(monkeypatch):
 
     monkeypatch.setattr("ryza.db.conn.connect", _boom)
     assert weekly.resolution_audit_status().startswith("失敗: OSError")
+
+
+# ── action: notify(ops/reminders.yaml の様式: type / channel / body)──────────
+NOTIFY_REMINDERS = """\
+version: 2
+reminders:
+  - id: notify-now
+    what: "テスト: notify 型"
+    conditions:
+      - type: date_after
+        date: "2020-01-01"
+    action:
+      type: notify
+      channel: 運営
+      body: "OAuth クライアントの紐付けを確認する。"
+    status: pending
+"""
+
+
+def test_notify_action_fires_and_is_delivered():
+    """notify 型が例外を投げずに配送され、status が fired へ遷移する。"""
+    digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
+    client = StubClient(reminders_text=NOTIFY_REMINDERS, issues=[digest_issue])
+    doc = weekly.yaml.safe_load(NOTIFY_REMINDERS)
+    outcome = weekly.fire_reminders(
+        client, doc, NOTIFY_REMINDERS, "sha0", NOW, bq_checker=_false_bq
+    )
+    assert outcome.fired == ["notify-now"]
+    assert outcome.failures == []
+    # 配送先はこのジョブが持つ唯一の通知経路(ダイジェスト Issue のコメント)。
+    assert len(client.comments_posted) == 1
+    issue_number, body = client.comments_posted[0]
+    assert issue_number == 9
+    assert "運営" in body
+    assert "OAuth クライアントの紐付けを確認する。" in body
+    # status 遷移は他 action 型と同じ慣習("fired: <日付>")。
+    new_text, _ = client.files["ops/reminders.yaml"]
+    by_id = {r["id"]: r for r in weekly.yaml.safe_load(new_text)["reminders"]}
+    assert by_id["notify-now"]["status"] == f"fired: {NOW.date().isoformat()}"
+
+
+def test_notify_body_includes_optional_title():
+    """様式上 title は任意(実在の 2 エントリは持たない)。あれば見出しに載せる。"""
+    with_title = weekly.build_notify_body(
+        {"type": "notify", "channel": "運営", "title": "確認", "body": "本文"}
+    )
+    assert "確認" in with_title and "本文" in with_title
+    without_title = weekly.build_notify_body({"type": "notify", "channel": "運営", "body": "本文"})
+    assert "本文" in without_title
+
+
+# ── 終端 status(done)は発火対象から外れる ───────────────────────────────────
+DONE_REMINDERS = """\
+version: 2
+reminders:
+  - id: already-done
+    what: "テスト: 完了済み(条件は充足するが再発火してはならない)"
+    conditions:
+      - type: date_after
+        date: "2020-01-01"
+    action:
+      type: issue_create
+      title: "誤発火"
+      body: "発火してはならない"
+    status: done
+"""
+
+
+def test_done_entries_do_not_fire():
+    client = StubClient(reminders_text=DONE_REMINDERS)
+    doc = weekly.yaml.safe_load(DONE_REMINDERS)
+    outcome = weekly.fire_reminders(
+        client, doc, DONE_REMINDERS, "sha0", NOW, bq_checker=_false_bq
+    )
+    assert outcome.fired == []
+    assert client.issues_created == []
+    assert client.files_updated == []
+
+
+def test_real_reminders_yaml_done_entries_never_fire():
+    """実ファイルの done エントリ(過去日条件を多数含む)が1件も発火しない。"""
+    real = (REPO_ROOT / "ops" / "reminders.yaml").read_text(encoding="utf-8")
+    doc = weekly.yaml.safe_load(real)
+    done_ids = {r["id"] for r in doc["reminders"] if str(r.get("status", "")).startswith("done")}
+    assert done_ids, "前提: 実ファイルに done エントリが存在する"
+    digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
+    client = StubClient(reminders_text=real, issues=[digest_issue])
+    outcome = weekly.fire_reminders(client, doc, real, "sha0", NOW, bq_checker=_false_bq)
+    assert not (set(outcome.fired) & done_ids)
+
+
+# ── 1件の失敗がループ全体を止めない(失敗は黙殺せずサマリに載せる) ─────────────
+MIXED_REMINDERS = """\
+version: 2
+reminders:
+  - id: ok-before
+    what: "テスト: 失敗エントリの前"
+    conditions:
+      - type: date_after
+        date: "2020-01-01"
+    action:
+      type: issue_comment
+      issue: 5
+      body: "前"
+    status: pending
+
+  - id: broken
+    what: "テスト: 未知 action type で失敗する"
+    conditions:
+      - type: date_after
+        date: "2020-01-01"
+    action:
+      type: no_such_action
+    status: pending
+
+  - id: ok-after
+    what: "テスト: 失敗エントリの後(処理が続くこと)"
+    conditions:
+      - type: date_after
+        date: "2020-01-01"
+    action:
+      type: issue_comment
+      issue: 6
+      body: "後"
+    status: pending
+"""
+
+
+def test_single_entry_failure_does_not_stop_the_loop():
+    client = StubClient(reminders_text=MIXED_REMINDERS)
+    doc = weekly.yaml.safe_load(MIXED_REMINDERS)
+    outcome = weekly.fire_reminders(
+        client, doc, MIXED_REMINDERS, "sha0", NOW, bq_checker=_false_bq
+    )
+    assert outcome.fired == ["ok-before", "ok-after"]
+    assert [rid for rid, _ in outcome.failures] == ["broken"]
+    assert "no_such_action" in outcome.failures[0][1]
+    # 失敗エントリの status は据え置き(翌週再試行される)。
+    new_text, _ = client.files["ops/reminders.yaml"]
+    by_id = {r["id"]: r for r in weekly.yaml.safe_load(new_text)["reminders"]}
+    assert by_id["broken"]["status"] == "pending"
+
+
+def test_digest_always_contains_failure_line():
+    """失敗ゼロでも行は必ず載る(沈黙を多義的にしない — A-18 行と同じ流儀)。"""
+    digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
+    client = StubClient(issues=[digest_issue])
+    assert weekly.post_digest(client, NOW, fired=[]) is True
+    assert "### 失敗したリマインダー: なし" in client.comments_posted[0][1]
+
+
+def test_digest_lists_failed_reminder_ids():
+    digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
+    client = StubClient(issues=[digest_issue])
+    failures = [("broken", "ValueError: 未知の action type: no_such_action")]
+    assert weekly.post_digest(client, NOW, fired=[], failures=failures) is True
+    body = client.comments_posted[0][1]
+    assert "### ⚠ 失敗したリマインダー: 1 件" in body
+    assert "broken" in body and "no_such_action" in body
+
+
+def test_run_weekly_reports_failures_in_digest():
+    """run_weekly 経由でも失敗が週次サマリ通知に載る(発火は継続する)。"""
+    digest_issue = {"number": 9, "state": "open", "labels": [{"name": "digest"}]}
+    client = StubClient(reminders_text=MIXED_REMINDERS, issues=[digest_issue])
+    outcome = weekly.run_weekly(client, now=NOW, bq_checker=_false_bq)
+    assert outcome.fired == ["ok-before", "ok-after"]
+    assert [rid for rid, _ in outcome.failures] == ["broken"]
+    digest_body = client.comments_posted[-1][1]
+    assert "### ⚠ 失敗したリマインダー: 1 件" in digest_body
+    assert "broken" in digest_body
