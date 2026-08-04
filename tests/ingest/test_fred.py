@@ -51,6 +51,20 @@ def test_api_key_missing_raises(monkeypatch, fake_secret_manager):
         fred.api_key()
 
 
+def test_api_key_secret_failure_reason_in_message(monkeypatch, fake_secret_manager):
+    """Secret 取得失敗の理由がエラーメッセージ(→ daily skip 理由)に載る(Issue #38)。
+
+    jquants / estat と同じ診断性(取得できない理由: env 未設定/GCP_PROJECT 不明/
+    Secret 未登録またはバージョン未追加)を FRED にも揃える。
+    """
+    fake_secret_manager({})  # 未登録/バージョン未追加 → 404
+    monkeypatch.delenv("RYZA_FRED_API_KEY", raising=False)
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+    monkeypatch.setenv("GCP_PROJECT", "proj")
+    with pytest.raises(fred.FredAuthError, match="fred-api-key.*404"):
+        fred.api_key()
+
+
 def test_ingest_series_writes_indicators_with_prefix(conn, run, store):
     payload = _payload([("2026-08-01", "4.25"), ("2026-08-02", "."),
                         ("2026-08-03", "4.30")])

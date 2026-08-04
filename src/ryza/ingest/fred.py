@@ -30,7 +30,7 @@ from ryza.ingest import base
 from ryza.ingest.base import Fetcher
 from ryza.provenance import EvidenceStore, Run, record
 from ryza.provenance import run as run_ctx
-from ryza.secrets import load_secret
+from ryza.secrets import probe_secret
 
 _API_BASE = "https://api.stlouisfed.org/fred"
 SOURCE_NAME = "FRED"
@@ -45,13 +45,18 @@ class FredAuthError(RuntimeError):
 
 
 def api_key() -> str:
-    """API キーを取得する（env 優先 → Secret Manager ``fred-api-key``、Issue #30）。"""
-    key = load_secret(env=("RYZA_FRED_API_KEY", "FRED_API_KEY"), secret="fred-api-key")
-    if not key:
-        raise FredAuthError(
-            "FRED API キー未設定（Secret 'fred-api-key' / env FRED_API_KEY）"
-        )
-    return key
+    """API キーを取得する(env 優先 → Secret Manager ``fred-api-key``、Issue #30)。
+
+    未取得時のエラーに理由(env 未設定/GCP_PROJECT 不明/Secret 取得失敗の内容)を
+    含める — jquants / estat と同じ診断性(Issue #38: skip 理由を ops サマリだけで
+    切り分けられる)を FRED にも揃える。
+    """
+    res = probe_secret(
+        env=("RYZA_FRED_API_KEY", "FRED_API_KEY"), secret="fred-api-key"
+    )
+    if not res.value:
+        raise FredAuthError(f"FRED API キー未設定: {res.reason}")
+    return res.value
 
 
 @dataclass(frozen=True)

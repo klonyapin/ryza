@@ -357,6 +357,24 @@ protected_areas:
   #   NAV の手計算値。書き換えれば close.py の評価替えの誤りが検出されなくなる。
   - path: tests/execution/test_close.py
     area: invariant_tests
+  # ── 独立審査記録パーサ(2026-08-04 登録・reviewed-sha-provenance の独立役員審査 C-8)──
+  # src/ryza/reviews.py は「front matter の書式・参照の解決範囲・封印判定(BLOCKING_VERDICTS)」
+  # の3つを1モジュールで持つ。A-18-8 の由来判定と CLI(governance.decisions)の発効停止が
+  # ここに依存するため、参照の書式(``is_repo_path_ref`` / ``resolve_review_path``)や
+  # ``BLOCKING_VERDICTS`` を書き換えれば、審査 → #承認通知 → 48h みなし承認 の統制経路が
+  # 無音で緩む。governance_engine と audit の両方の実体をつなぐ結節点であり、governance/**
+  # の glob には入らないため個別に登録する(reviews は governance 部門の意見書パーサだが、
+  # 物理配置は src/ryza/reviews.py — 新モジュールの初回登録)。
+  - path: src/ryza/reviews.py
+    area: governance_engine
+  #   実装から独立した参照 = **front matter の受理・拒否の境界と語彙**(``BLOCKING_VERDICTS``
+  #   の集合・様式不備を「旧様式」に読み替えないこと・重複キー拒否・symlink/絶対パス/リポジトリ
+  #   外への参照の拒否・blob URL の変換・先頭空行の許容)。これらを先に緩めれば、後日 reviews.py
+  #   や decisions.py を「意見書に verdict を書けば止める」経路を弱める変更が CI 差分に出なくなる。
+  #   統制の実体はテスト側にしか宿らない(reviews.py 自体は判定を持たない読み取り専用パーサ)
+  #   場面もあり、書式受理の境界を先に緩める二段手順を塞ぐ意味は大きい。
+  - path: tests/test_reviews.py
+    area: invariant_tests
   # 棚卸しの記録(2026-08-04・phase-2): 以下は **今回は対象外** と判断した。
   #   config/fm_ben.yaml・config/fm_jim.yaml … max_slots は1銘柄あたりの金額を動かすが、
   #     上限は保護領域側が持つ — sizing.check_slots(保護領域)が「1スロット > ポッド内集中度
