@@ -1586,3 +1586,39 @@ reminders:
       labels: [design]
       body: "T-029 初回バックフィル(t029-backfill-execution)完了後、実 payload に対して以下を検証する。①**NonConsolidated 開示のフィールド所在**: DocType が `..._NonConsolidated_...` の開示で、仕様どおりトップレベル Sales/OP 等が空で NC*(NCSales/NCOP/NCOdP/NCNP/NCEPS/NCDEPS)側に値が入るかを確認する。単体開示のみの企業(小型株 — GARP の主猟場)の系列が丸ごと no_value skip になっていた場合、config/jquants_fields.yaml に NC* マッピングを bucket=actuals 追補する(基本料金は現行と対称)。②**予想修正開示(EarnForecastRevision / DividendForecastRevision)の扱い再検討**: 現状は `_basis_from_doctype` が not_statement で全 skip する。fail-closed としては安全だが、GARP(T-019)の核である予想成長率が期中改定を失う。対応案(a: 予想修正開示に限り FSales/FOP 等の会社予想フィールドを抽出、b: 現状維持で四半期本決算のみ、c: 別ソース併用)を評価。③**skip 集計の診断**: fundamentals_stats.skip を SELECT 集計し、no_value・no_end_date・no_basis・not_statement の内訳を確認、想定外の欠落があれば根本原因を特定して修正する。出典: PR #147 独立審査 C-3/C-4・設計リード裁定 2026-08-04。"
     status: pending
+
+  - id: t031-universe-approval
+    what: "T-031 curated ユニバース2件(stan-index-etf / peter-jp-midcap)の代表承認フォロー"
+    conditions:
+      - type: date_after
+        date: "2026-08-07"
+    action:
+      type: issue_create
+      title: "T-031: curated ユニバース承認が未取得なら再依頼する"
+      labels: [governance]
+      body: "config/universe/stan-index-etf.yaml と peter-jp-midcap.yaml は approved_at: null のまま起案・審査済み(反対意見書つきで代表へ承認依頼を Discord に送付済み — 2026-08-04)。本リマインダー発火時点で承認が未取得なら、代表へ再依頼する。承認が取れたら approved_at/approved_by を記入するコミット(Approved: トレーラ必須 — protected_areas: mandates)を作り、daily の curated 段の自動反映(翌朝)で Stan/Peter のユニバースが非空になることを確認して本リマインダーを done にする。T-019 ゲート判定(2026-08-20, t019-fm-second-gen-impl)の判定材料①がこれ。出典: T-019 §1-2/§2-2・docs/ops/fm-curated-universe.md。"
+    status: pending
+
+  - id: t031-mid400-periodic-reconciliation
+    what: "curated ユニバースの定期入替突き合わせ(TOPIX Mid400 定期選定・日経225 定期見直し)"
+    conditions:
+      - type: date_after
+        date: "2026-11-04"
+    action:
+      type: issue_create
+      title: "curated ユニバース: 2026年10月定期入替後の構成突き合わせ"
+      labels: [ops]
+      body: "TOPIX ニューインデックスシリーズの定期入替(2026年10月最終営業日適用)と日経225 定期見直し(2026年10月)の公表後に、config/universe/ の3ファイル(jim-curated / stan-index-etf / peter-jp-midcap)の entries を当時の公式構成と突き合わせる。とくに peter-jp-midcap は Mid400→TOPIX 100 昇格銘柄(もう midcap でない)の撤回、stan-index-etf は JPX レバレッジ型・インバース型一覧の新規掲載有無(コードは4桁数字と英数字 ####A の両形式を数えること — 独立審査 t031 中-1)と上場廃止/償還を確認する。差分があれば version 更新+content_sha256 再計算+再承認(protected_areas: mandates — Approved: トレーラ)。完了時に翌年分(2027年入替)の本リマインダーを再登録すること(独立審査 t031 軽微-3)。出典: 各ファイルの運用上の注意・JPX「TOPIXニューインデックスシリーズ」定期選定。"
+    status: pending
+
+  - id: fm-midcap-measured-quantile
+    what: "peter-jp-midcap: 代理基準(TOPIX Mid400 手選びサブセット)から時価総額・流動性の実測分位への移行"
+    conditions:
+      - type: date_after
+        date: "2026-12-01"
+    action:
+      type: issue_create
+      title: "jp_equity_midcap_cash を実測分位ベースの供給に移行する"
+      labels: [design]
+      body: "config/universe/peter-jp-midcap.yaml v1 は TOPIX Mid400 構成×東証プライムの手選び28銘柄(著名・大型寄りに偏るサブセット — 独立審査 t031 中-2 が指摘した選定バイアス)である。market.bars の履歴が概ね4ヶ月蓄積する本期日以降に、時価総額・売買代金の実測分位(例: プライム内の時価総額分位帯かつ売買代金下限)で midcap を定義し直し、curated 手選びから決定論供給へ移行する設計を起案する。GARP の本来の猟場(カバレッジの薄い中堅)を構造的に外している現状の緩和が目的。jim の fm-liquid-equity-measured-turnover(liquid_equity の実測化)と統一設計にできるか併せて検討。移行までは curated 手選び(fail-closed)を維持する。出典: 独立審査 t031 中-2・peter-jp-midcap.yaml ヘッダの移行約束。"
+    status: pending

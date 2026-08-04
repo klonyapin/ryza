@@ -1,0 +1,179 @@
+# curated ユニバース: Peter の国内中堅株タグ(jp_equity_midcap_cash)
+#
+# 用途: config/mandates/peter.yaml の universe([jp_equity_midcap_cash, us_equity_cash])の
+#       うち **jp_equity_midcap_cash** に属する銘柄を明示列挙する。決定論ルール
+#       (src/ryza/risk/classify.py)は時価総額系タグを付けない — 母集団データ(時価総額・
+#       流動性の分位)が要るため。タグが供給されるまで Peter の国内側ユニバースは空で
+#       あり、それは fail-closed の設計どおりの挙動である(タグを緩めて埋めてはならない
+#       — T-019 §2-2)。
+# 反映: daily の curated 段が自動照合する(手動 CLI は初回・緊急時のみ)。付与は
+#       market.instrument_classification(+0026 履歴)へ書かれ、point-in-time で
+#       「いつからその銘柄が jp_equity_midcap_cash だったか」を再現できる。
+# 手順の正: docs/ops/fm-curated-universe.md
+#
+# ── 選定基準(criterion の根拠)────────────────────────────────────────────────
+# 「中堅(midcap)」の本来の定義は時価総額・流動性の実測分位である。実測が整備される
+# までの初版は**代理基準**を使う — jim-curated.yaml が日経225 を流動性の代理としたのと
+# 同型の論法である:
+#
+#   TOPIX Mid400 の構成銘柄であり、かつ東証プライム市場に上場する内国普通株式
+#
+# TOPIX Mid400 は JPX(東京証券取引所)が算出・公表する TOPIX ニューインデックス
+# シリーズの規模別区分で、「TOPIX 500 のうち TOPIX 100(超大型 Core30+大型 Large70)を
+# 除く 400 銘柄」= 時価総額・流動性が TOPIX 100 に**次ぐ**銘柄群である(出典: JPX
+# 「TOPIXニューインデックスシリーズ」規模別指数の定義)。取引所自身が公表する公式の
+# 「中堅」区分であるため、恣意的な閾値を持ち込まずに midcap を切り出せる。定義上
+# TOPIX 100(トヨタ・ソニー等の超大型)は**構造的に除外**される。
+#
+# 構成の確認に使った一次情報源: JPX「『TOPIXニューインデックスシリーズ』の定期選定
+# 結果及び構成銘柄一覧」(2025-10-07 公表・2025-10-31 適用、
+# https://www.jpx.co.jp/markets/indices/topix/tvdivq00000030ne-att/mei2_12_size.pdf)。
+# 本ファイルの全銘柄は同資料で **2025年10月の定期入替の前後とも TOPIX Mid400** で
+# あることを確認した(入替をまたいで区分が安定している銘柄のみを採る)。
+#
+# 本ファイルは Mid400 全400銘柄の写しでは**ない**。確認の取れた銘柄だけを東証33業種の
+# 分散を持たせて列挙した初版サブセットである(fail-closed: 掲載外の銘柄には永遠にタグが
+# 付かない。網羅は実測分位への移行時に基準ごと解決する)。
+#
+# ── この版でカバーしないもの ──────────────────────────────────────────────────
+# - **us_equity_cash タグは供給しない**。決定論ルール(classify_instrument)が
+#   venue(NYSE/NASDAQ)から付与するため curated 供給の対象外である
+# - TOPIX Small 以下・スタンダード/グロース市場・ETF/REIT は対象外(criterion のとおり)
+#
+# ── 運用上の注意 ──────────────────────────────────────────────────────────────
+# - TOPIX Mid400 の構成銘柄は**年1回の定期入替(10月最終営業日)**と臨時入替で変わる。
+#   **承認時と定期見直し時に、entries が当時の Mid400 構成銘柄であることを必ず
+#   突き合わせること**。本ファイルはその時点の写しであり、Mid400 の正ではない。
+#   とくに Mid400 → TOPIX 100 へ**昇格**した銘柄は「もう midcap でない」ため撤回が要る
+# - approved_at が null の間、ローダは読み込みを拒否する(未承認のリストでユニバースを
+#   広げない)。承認は投資委員会(代表)。本ファイルは config/governance.yaml の
+#   protected_areas(area: mandates)に登録された config/universe/** に属し、変更
+#   コミットには `Approved:` トレーラが要る(承認の正はそちら — 審査 C-24)
+# - **銘柄を1行足すことは「Peter が売買できる銘柄を1つ増やす」こと**である。rationale の
+#   無いエントリはローダが拒否する
+# - content_sha256 は criterion + 全エントリ(symbol・tags・rationale)の正規化ハッシュ。
+#   内容を変えたら version と併せて更新し、再承認する(審査 C-25)。
+#   再計算: uv run python -c "import yaml,pathlib;from ryza.risk.classify import
+#   curated_content_digest as d;r=yaml.safe_load(pathlib.Path('config/universe/peter-jp-midcap.yaml')
+#   .read_text());print(d(r['criterion'], r['entries']))"
+
+name: peter-jp-midcap
+version: "1"
+criterion: >-
+  TOPIX Mid400(JPX が公表する TOPIX ニューインデックスシリーズの規模別区分 —
+  TOPIX 500 のうち TOPIX 100 を除く 400 銘柄)の構成銘柄であり、かつ東証プライム市場に
+  上場する内国普通株式。時価総額・流動性の実測分位が整備されるまでの
+  「中堅(midcap)」の代理基準。
+manages_tags: [jp_equity_midcap_cash]
+
+# 承認記録(null の間は反映されない)。approved_at は ISO 日付、approved_by は
+# 'representative' 固定(起草者が自分で名乗れない — 審査 C-24)。
+# **本ファイルは未承認のまま起案されている** — 承認は投資委員会(代表)。
+approved_at: null
+approved_by: null
+
+# criterion + entries の正規化 sha256(内容と版の紐付け — 審査 C-25)。
+content_sha256: "48b47585466423518e28d2a899a219be5961cdbb4e33833083e2decc674b9c1f"
+
+# 各 rationale の「Mid400 構成(2025-10-31 適用・入替前後とも)」は、ヘッダ記載の
+# JPX 定期選定結果 PDF(2025-10-07 公表)による確認を指す。
+entries:
+  # 建設
+  - symbol: "1812.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(建設)"
+  # 食料品
+  - symbol: "2269.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(食料品 — 明治ホールディングス)"
+  - symbol: "2897.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(食料品 — 日清食品ホールディングス)"
+  # 化学
+  - symbol: "4183.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(化学 — 三井化学)"
+  - symbol: "4204.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(化学 — 積水化学工業)"
+  # 医薬品
+  - symbol: "4151.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(医薬品 — 協和キリン)"
+  - symbol: "4528.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(医薬品 — 小野薬品工業)"
+  # 石油・石炭製品
+  - symbol: "5019.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(石油・石炭製品 — 出光興産)"
+  # ガラス・土石製品
+  - symbol: "5332.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(ガラス・土石製品 — TOTO)"
+  # 鉄鋼・非鉄金属
+  - symbol: "5411.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(鉄鋼 — JFEホールディングス)"
+  - symbol: "5713.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(非鉄金属 — 住友金属鉱山)"
+  # 機械
+  - symbol: "6113.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(機械 — アマダ)"
+  - symbol: "6383.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(機械 — ダイフク)"
+  # 電気機器
+  - symbol: "6645.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(電気機器 — オムロン)"
+  - symbol: "6963.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(電気機器 — ローム)"
+  # 輸送用機器
+  - symbol: "7259.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(輸送用機器 — アイシン)"
+  - symbol: "7272.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(輸送用機器 — ヤマハ発動機)"
+  # 精密機器
+  - symbol: "7701.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(精密機器 — 島津製作所)"
+  # 情報・通信
+  - symbol: "3626.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(情報・通信 — TIS)"
+  - symbol: "9766.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(情報・通信 — コナミグループ)"
+  # 卸売・小売
+  - symbol: "2768.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(卸売 — 双日)"
+  - symbol: "7453.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(小売 — 良品計画)"
+  # 銀行・その他金融・保険
+  - symbol: "8331.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(銀行 — 千葉銀行)"
+  - symbol: "8593.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(その他金融 — 三菱HCキャピタル)"
+  - symbol: "8795.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(保険 — T&Dホールディングス)"
+  # 不動産・陸運・電気ガス
+  - symbol: "3231.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(不動産 — 野村不動産ホールディングス)"
+  - symbol: "9008.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(陸運 — 京王電鉄)"
+  - symbol: "9531.T"
+    tags: [jp_equity_midcap_cash]
+    rationale: "TOPIX Mid400 構成(2025-10-31 適用・入替前後とも)・東証プライム(電気・ガス — 東京瓦斯)"
