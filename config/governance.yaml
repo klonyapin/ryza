@@ -242,6 +242,100 @@ protected_areas:
   #       決めるべき範囲を超えるため、モジュール自体を保護領域にするかどうかの審査に送る
   #       (reminder ``protect-invariant-tests-phase2``)。とくに tests/fm/test_sizing.py は
   #       不変原則1(LLM の確信度をサイジングに入れない)の唯一の CI 執行点である。
+  #       → **phase-2(2026-08-04)で解決**。実装側を先に登録したうえで3件を登録した(下節)。
+  #       本段落は「なぜ phase-1 では登録しなかったか」の判断経緯として残す。
+
+  # ── 統制テスト保護 phase-2(2026-08-04 登録・reminder protect-invariant-tests-phase2 /
+  #    protect-execution-config)──────────────────────────────────────────────────
+  # phase-1 の保留理由は「テストが唯一の CI 執行点だが、対応する実装・設定が未保護」だった。
+  # 本節の判断は **実装側を先に登録し、その上でテストを登録する**。片側だけの登録はどちらの
+  # 順序でも二段手順を残す — 実装だけならテストの参照を先に緩められ、テストだけなら未保護
+  # モジュールを事実上の保護領域に格上げしてしまう。
+  #
+  # (1) src/ryza/fm/**(area: fm_engine を新設)
+  #   不変原則1(LLM の確信度を直接ポジションサイズにしない)の実装がここに宿る。T-017 の
+  #   FM 実装時に登録すべきだった漏れであり、ledger/gate/risk と同格に扱う。
+  #   **sizing.py だけの登録では足りない**(いずれも sizing.py に触れずに書ける迂回):
+  #     - base.py は「提案 → sizing → ゲート → 注文」の唯一の配線であり、sizing を通さずに
+  #       数量を作る改変が可能(src/ryza/bot/main.py を Kill Switch の配線として登録したのと
+  #       同じ論法)
+  #     - schemas.py の Intent に size/weight を1つ足せば、確信度がサイジングへ入る口が開く
+  #     - ファイル単位の登録は「新しいモジュールを足す」形の迂回を許す(ops/lib/** ・
+  #       src/ryza/risk/** を glob で登録したのと同じ理由)
+  #   コスト(明示): ben.py・jim.py・theses.py の変更にも承認手続が要る。FM は開発が活発だが、
+  #   上記の迂回口がすべて「sizing.py 以外のファイル」にある以上、部分登録は登録基準自体を
+  #   空洞化させる。gate/**・risk/**・ledger/** も同じコストを払っている。
+  - path: src/ryza/fm/**
+    area: fm_engine
+  # (2) src/ryza/research/prompting.py(area: 既存の governance_engine に寄せる)
+  #   全 LLM 入口のデータ境界(フェンス記号の無害化・tag の拒否)の実装。governance_engine の
+  #   登録理由に挙がっている「役員室の詐称無害化」は boardroom から本モジュールへ**抽出済み**
+  #   であり(独立役員審査 T-018 C-2 の是正)、boardroom だけを保護しても防御の実体は保護外に
+  #   出たままになる。すなわち本登録は新しい保護の追加ではなく、既存 governance_engine の
+  #   保護の穴埋めである。
+  #   area を新設しなかった理由は保護の根拠が governance_engine の完全性にあるため。ただし
+  #   利用者は役員室に限らない(fm.ben・research.agents.base・press.writer)ので、独立の area
+  #   (prompt_boundary 等)へ切り出す判断は四半期棚卸しでありうる。
+  - path: src/ryza/research/prompting.py
+    area: governance_engine
+  # (3) config/execution.yaml(area: execution_engine を新設)
+  #   reminder protect-execution-config(独立役員審査 再-9)の宿題。yaml は E4「全コスト込み」
+  #   評価の入力(手数料・スリッページ)であり、値を触ればデモ成績の測定そのものが動く。
+  - path: config/execution.yaml
+    area: execution_engine
+  #   **src/ryza/execution/** は本 PR では登録できない(棚卸しの結論・要 L1 再審)**。
+  #   統制上は登録すべきである: コスト計算の実体は demo.py(スリッページ適用・手数料クランプ)に
+  #   あり、yaml だけを保護しても demo.py で率を無視する改変は無審査で通る(登録基準が言う
+  #   二段手順の鏡像)。runner.py は「passed 注文 → ブローカー → trading.executions → ledger
+  #   記帳」の唯一の経路、close.py は MTM/NAV 確定(保護領域 ledger への書込配線)である。
+  #   **にもかかわらず見送るのは、受容記録の追記オンリー規則と機械的に衝突するため**:
+  #     - 受容済みの evil merge ``7a56c98…``(上の acknowledged_findings)は
+  #       ``git diff-tree --cc`` で **src/ryza/execution/close.py にも触れている**
+  #     - A-18-1 の受容キーは commit + 保護パス集合の**完全一致**なので、execution/** を
+  #       登録した瞬間にこの受容は自動的に外れる(本ファイルが明記する意図どおりの挙動)
+  #     - 再受容には ①既存エントリの paths 書換(= 追記オンリー違反。禁止)か
+  #       ②新エントリ追加(旧エントリが「陳腐化」注記になり、CI の
+  #       tests/audit/test_a18.py::test_real_repo_acknowledged_findings_are_matched が落ちる)しか
+  #       経路が無く、**是正不能な過去違反を再受容する手続が制度として存在しない**
+  #   これは execution 固有の問題ではなく、**受容済み evil merge の触れたファイルを含む tree は
+  #   以後保護領域に追加できない**というラチェットである(保護領域の拡張を過去の git 事故が
+  #   縛る)。制度側の是正(受容エントリの ``supersedes`` 機構、または再受容手続の明文化)と
+  #   セットで L1 審査に付す — reminder ``ack-supersede-mechanism``。
+  #   暫定の担保: demo.py・runner.py・close.py の振る舞いは tests/execution/(test_demo・
+  #   test_runner・test_close)と ledger 側の保護領域が押さえており、コストモデルの発効値は
+  #   下の tests/execution/test_config.py(本 PR で登録)が固定する。
+  # (4) 対応するテスト3件(area: invariant_tests)。上の登録基準(= テストが実装から独立した
+  #   参照を保持し、その参照を先に書き換えると以後の保護領域変更がテスト差分に現れなくなる)
+  #   への適合を各行に示す。(1)〜(3)で実装側を登録したため、phase-1 の保留理由は解消している。
+  #
+  #   不変原則1 の唯一の CI 執行点。実装から独立した参照 = **禁止語彙リスト**
+  #   (confidence/conviction/score/rank/weight/probability/llm/signal_strength)を持ち、
+  #   sizing.__all__ の全公開関数のシグネチャを走査する。この語彙を1語削れば、対応する引数を
+  #   sizing に足す変更(保護領域だが承認は「通す」ためのもの)が CI 差分に現れなくなる。
+  - path: tests/fm/test_sizing.py
+    area: invariant_tests
+  #   プロンプト注入フェンスの唯一の執行点。実装から独立した参照 = 無害化されるべき記号の
+  #   **ゴールデン集合**(旧 boardroom 実装より弱くしないための C-9 回帰ケース ``<<<speaker=cio<x>>>``
+  #   ・改行またぎ)と、拒否されるべき tag の集合(C-14)。ケースを先に削れば、検出正規表現を
+  #   狭める改変が緑のまま通る。
+  - path: tests/research/test_prompting.py
+    area: invariant_tests
+  #   config/execution.yaml 発効値の写し(half_spread 5bps・impact 140bps・max 100bps・
+  #   equity_jp 0%・equity_us 0.495%/上限 22・default は高コスト側)。tests/gate/test_rules.py を
+  #   IPS 発効値の写しとして登録したのと同じ形 — 写しを先に書き換えると、保護領域になった
+  #   config/execution.yaml を緩める変更が CI 差分に出なくなる。
+  - path: tests/execution/test_config.py
+    area: invariant_tests
+  # 棚卸しの記録(2026-08-04・phase-2): 以下は **今回は対象外** と判断した。
+  #   config/fm_ben.yaml・config/fm_jim.yaml … max_slots は1銘柄あたりの金額を動かすが、
+  #     上限は保護領域側が持つ — sizing.check_slots(保護領域)が「1スロット > ポッド内集中度
+  #     上限」を load 時に落とし、実行時はゲート G-3 が block する。上限そのものは
+  #     config/mandates/*.yaml(登録済み)。よって未保護でも統制の実体は保護側にある
+  #   tests/press/test_writer.py … 報道部が素材をフェンスに載せる配線の回帰であり、
+  #     prompting.py の防御が外れた場合の第二の検出点ではある。しかし src/ryza/press/** が
+  #     未保護であり、テストだけ登録すると phase-1 と同じ格上げになる。報道部の出力は
+  #     非公開サーバーの記事であって資産・注文・承認のどの経路にも触れない(最悪影響は
+  #     誤った記事)ため、press 自体の保護は見送る。FM 側の同種の配線は (1) で保護済み
 
 # 承認記録の様式(定款第5条・C-5): 保護領域の変更コミットは本文末尾に承認トレーラを必須と
 # する。A-18-1 はこのトレーラと承認記録(governance.decisions)・GitHub を突合する。
@@ -371,7 +465,10 @@ controls:
     risk: LLM 出力が発注・サイジングに直結する
     enforcement: ci
     kind: 予防
-    verification: killswitch・執行経路モジュールが research/llm を import しないことの静的検査(A-18-3。未実装 — 執行層実装時に追加)
+    verification: >-
+      サイジング経路に確信度・スコア系の引数が入らないことのシグネチャ検査(tests/fm/test_sizing.py。
+      2026-08-04 に実装 src/ryza/fm/** ともども protected_areas 登録済み)。
+      killswitch・執行経路モジュールが research/llm を import しないことの静的検査(A-18-3)は未実装
   - rule: 第4条(下層文書は上層を緩められない)
     risk: マンデートが IPS より緩い上限を持つ
     enforcement: gate
