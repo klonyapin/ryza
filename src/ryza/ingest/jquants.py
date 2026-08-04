@@ -30,7 +30,8 @@ HTTP は ``Fetcher`` 越し（テストはモック）。日足の各バーは�
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -302,6 +303,11 @@ def ingest_statements(
 class DailyResult:
     instruments: dict[str, int]
     bars: dict[str, int]
+    # statements は日足の後段で取得する（Free プランでは日足と同じ 12 週遅延が適用され
+    # るため実効日は共有する）。取込 0 件が「本当に開示ゼロだった」か「取込段が例外で
+    # 空回りした」かをサマリで見分けるため、成功時は ``{'written', 'total'}``、失敗時は
+    # ``{'error': ...}`` を載せる（run_daily 内で完結：src/ryza/jobs/daily.py には触れない）。
+    statements: dict[str, Any] = field(default_factory=dict)
 
 
 def run_daily(
@@ -312,9 +318,16 @@ def run_daily(
     *,
     quote_date: str,
     with_instruments: bool = True,
+    with_statements: bool = True,
     key: str | None = None,
 ) -> DailyResult:
-    """日次取込（銘柄マスタ更新 + 当日日足）を実行する。"""
+    """日次取込（銘柄マスタ更新 + 当日日足 + 財務諸表）を実行する。
+
+    statements は日足の**後**に取得する。同一 API・同一プラン遅延・同一認証のため実効日
+    （``quote_date``）を共有するが、HTTP エラー等で失敗しても日足取込を巻き添えにしない
+    よう例外をここで捕捉し、``DailyResult.statements`` に ``{'error': ...}`` として記録する
+    （T-030 §1 の「静かに空回りさせない」）。``with_statements=False`` で無効化できる。
+    """
     key = key if key is not None else api_key()
     inst_result = {"resolved": 0, "created": 0}
     if with_instruments:
@@ -324,7 +337,85 @@ def run_daily(
         conn, run, store, quotes,
         quote_date=quote_date, raw_response=quotes,
     )
-    return DailyResult(instruments=inst_result, bars=bars_result)
+    stmt_result: dict[str, Any] = {}
+    if with_statements:
+        try:
+            statements = fetch_statements(fetcher, key, stmt_date=quote_date)
+            stmt_result = ingest_statements(conn, run, store, statements)
+        except Exception as exc:  # noqa: BLE001 - 日足取込を巻き添えにしない（T-030 §1）
+            stmt_result = {"error": f"{type(exc).__name__}: {exc}"}
+    return DailyResult(
+        instruments=inst_result, bars=bars_result, statements=stmt_result
+    )
+
+
+# バックフィル時の API 呼び出し間 sleep（秒）。J-Quants の公式レートリミット表は Free
+# プランでは明記されていない（2026-08-04 時点、jquants.com/pricing/）。境界越えで 429 を
+# 出すよりは保守的に **1 秒**の間を置き、他ジョブと同居して走らせても API 側に負荷を
+# 集中させない。数百日ぶんの呼び出しでも合計数分の増加に収まる（日単位のバックフィル
+# は運用上「たまに」流すもので、律速要因ではない）。
+_BACKFILL_SLEEP_SEC = 1.0
+
+# バックフィルの進捗ログを何日ごとに出すか。数百日を無言で回さない（T-030 §2）。
+_BACKFILL_PROGRESS_EVERY = 20
+
+
+def _weekday_range(start: date, end: date) -> list[date]:
+    """``start``〜``end``（両端含む）の平日のみを返す（土日はスキップ）。
+
+    J-Quants の ``date`` 指定は開示が無い日でも空データを返すためエラーにはならないが、
+    土日を叩く意味は無いため落とす（``effective_quote_date`` と同じ扱い）。祝日は
+    落とさない（取引カレンダー依存を持ち込まない）。
+    """
+    out: list[date] = []
+    d = start
+    while d <= end:
+        if d.weekday() < 5:  # 5=土, 6=日
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+def run_backfill_statements(
+    conn: psycopg.Connection,
+    fetcher: Fetcher,
+    store: EvidenceStore,
+    *,
+    date_from: date,
+    date_to: date,
+    key: str | None = None,
+    sleep_sec: float = _BACKFILL_SLEEP_SEC,
+    progress_every: int = _BACKFILL_PROGRESS_EVERY,
+) -> dict[str, int]:
+    """日付範囲の財務諸表をバックフィルする（平日のみ・冪等・レート配慮）。
+
+    ``date_from`` から ``date_to`` の**平日**を日次で ``/v2/fins/summary`` に叩き、
+    ``ingest_statements`` へ流す。開示が無い日は空リストが返る（エラーにならない）。
+    冪等キー（``DiscDate+DiscNo``）は ``ingest_statements`` 側で担保されているので再実行
+    安全（既存分は written=0）。返り値は ``{days, written, total}``。
+    """
+    key = key if key is not None else api_key()
+    days = _weekday_range(date_from, date_to)
+    total_written = 0
+    total_seen = 0
+    for i, d in enumerate(days, start=1):
+        iso = d.isoformat()
+        with run_ctx(
+            "ingest.jquants.backfill_statements",
+            {"date": iso}, conn=conn,
+        ) as r:
+            statements = fetch_statements(fetcher, key, stmt_date=iso)
+            res = ingest_statements(conn, r, store, statements)
+        total_written += res["written"]
+        total_seen += res["total"]
+        if i % progress_every == 0 or i == len(days):
+            print(
+                f"jquants backfill_statements 進捗 {i}/{len(days)} "
+                f"最終日={iso} written+={res['written']} total+={res['total']}"
+            )
+        if i < len(days) and sleep_sec > 0:
+            time.sleep(sleep_sec)
+    return {"days": len(days), "written": total_written, "total": total_seen}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -336,27 +427,57 @@ def main(argv: list[str] | None = None) -> int:
         "--no-instruments", action="store_true", help="銘柄マスタ更新を省略"
     )
     parser.add_argument(
+        "--no-statements", action="store_true",
+        help="財務諸表取込を省略（日足と切り離したいとき）",
+    )
+    parser.add_argument(
         "--lag-days", type=int, default=_PLAN_LAG_DAYS,
         help=f"プラン遅延日数（既定 {_PLAN_LAG_DAYS}=Free。有償プランは 0）",
     )
+    parser.add_argument(
+        "--backfill-statements-from", default=None,
+        help="財務諸表バックフィル開始日 YYYY-MM-DD（--to と併用でバックフィルモード）",
+    )
+    parser.add_argument(
+        "--backfill-statements-to", default=None,
+        help="財務諸表バックフィル終了日 YYYY-MM-DD（両端含む・平日のみ処理）",
+    )
     args = parser.parse_args(argv)
-
-    # Free プランは直近 12 週の日付指定が HTTP 400 になるため、取得可能な日付へ丸める
-    # （モジュール docstring / Issue #38）。
-    quote_date = effective_quote_date(
-        date.fromisoformat(args.date), lag_days=args.lag_days
-    ).isoformat()
 
     store = base.default_store()
     fetcher = base.default_fetcher()
     # autocommit 共有接続: 冪等な追記書込は逐次確定でよい（再実行が続きを埋める）。
     conn = connect(autocommit=True)
     try:
+        # ── バックフィルモード（両方指定されたときのみ） ──────────────────────
+        if args.backfill_statements_from and args.backfill_statements_to:
+            date_from = date.fromisoformat(args.backfill_statements_from)
+            date_to = date.fromisoformat(args.backfill_statements_to)
+            if date_from > date_to:
+                parser.error("--backfill-statements-from は --backfill-statements-to 以前")
+            summary = run_backfill_statements(
+                conn, fetcher, store, date_from=date_from, date_to=date_to,
+            )
+            print(
+                f"jquants backfill_statements {date_from}〜{date_to}: {summary}"
+            )
+            return 0
+
+        # ── 通常の日次モード ─────────────────────────────────────────────────
+        # Free プランは直近 12 週の日付指定が HTTP 400 になるため、取得可能な日付へ丸める
+        # （モジュール docstring / Issue #38）。財務データも同じプラン遅延の対象なので
+        # 実効日を共有する（T-030 §1）。
+        quote_date = effective_quote_date(
+            date.fromisoformat(args.date), lag_days=args.lag_days
+        ).isoformat()
+
         params = {"date": args.date, "effective_date": quote_date}
         with run_ctx("ingest.jquants.daily", params, conn=conn) as r:
             result = run_daily(
                 conn, r, store, fetcher,
-                quote_date=quote_date, with_instruments=not args.no_instruments,
+                quote_date=quote_date,
+                with_instruments=not args.no_instruments,
+                with_statements=not args.no_statements,
             )
         print(f"jquants daily {quote_date} (要求 {args.date}): {result}")
     finally:
