@@ -928,12 +928,16 @@ def run_daily(
     def _ops_summary() -> dict[str, Any]:
         # 検疫の件数は毎日必ず出す(解除できない封じ込めの検知可能化 — 審査 C-10)。
         stats = quarantine_stats(conn, as_of=as_of)
-        # risk 段の失敗は G-10 の限度状態鮮度検査(独立役員審査 2026-08-03 T-015 統合
-        # 条件)の**根っこ**に当たる: engine が update しない日が積み重なれば as_of が
-        # 古びて、いずれゲートが block を返し始める。実行サマリで見逃されると原因発見が
-        # 遅れるため、失敗した run は必ず urgent で上げる(サマリの ✅/⚠️ の一列に混ぜない)。
+        # risk 段が**全域例外で**落ちた場合、実行サマリを urgent で昇格する(部分失敗は
+        # risk_daily 側の urgent 埋め込みが拾う二段構え — 独立役員審査 2026-08-04 M-1)。
+        # G-10 の限度状態鮮度検査(独立役員審査 2026-08-03 T-015 統合条件)の**根っこ**
+        # に当たる: engine が update しない日が積み重なれば as_of が古びて、いずれ
+        # ゲートが block を返し始める。全域停止の 1 日目から確実に urgent で捕らえる。
+        # 呼び出し順序(stages への risk 段追加)が壊れたら fail-closed で例外を出す —
+        # ops_summary 段自体は _run_stage が握るので日次サイクルは止まらない。
         risk_stage = next((s for s in stages if s.name == "risk"), None)
-        risk_failed = risk_stage is not None and not risk_stage.ok
+        assert risk_stage is not None
+        risk_failed = not risk_stage.ok
         embed = _build_ops_embed(
             stages, kill_switch=state["kill_switch"], posted=state["posted"],
             as_of=as_of, dry_run=dry_run, quarantine=stats,

@@ -632,7 +632,8 @@ def _g10_risk_state(ctx: _Ctx) -> list[Reason]:
     フラグで判定し続けることを防ぐ。``as_of=None`` は判定不能 → block 側に倒す
     (行不存在時の挙動と整合 — 判定不能を「新鮮」と主張しない)。**未来 as_of**
     (時計ずれ等)も判定不能扱いで block(``business_days_between`` が 0 を返すので
-    別途 ``as_of > now`` を明示的に fail-closed する)。
+    別途 ``as_of > now`` を明示的に fail-closed する)。営業日は JST 日付で判定
+    (engine が夜間更新する運用と揃える — 独立役員審査 2026-08-04 M-2)。
     """
     limits = ctx.state.limits
     assert limits is not None  # G-F 通過済み

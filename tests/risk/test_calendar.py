@@ -29,6 +29,16 @@ def test_jp_holidays_are_not_business_days():
     assert not is_business_day(date(2026, 9, 22))  # 国民の休日
 
 
+def test_year_end_market_holidays_are_consistent_across_years():
+    """東証の年末休場(12/31)は 2026 と 2027 の両方で非営業日である(R-2 是正の固定)。
+
+    振替でなく市場慣行の休場だが、2026-12-31 だけ入って 2027-12-31 が抜けていると
+    経過営業日数が年をまたぐたびに 1 ずれる(G-10 の鮮度判定の再現性が下がる)。
+    """
+    assert not is_business_day(date(2026, 12, 31))  # Thu — 表内
+    assert not is_business_day(date(2027, 12, 31))  # Fri — 2027 も市場慣行で休場
+
+
 def test_out_of_range_falls_back_to_weekday_only():
     """テーブル外の年(例: 2028)は「祝日でない=営業日」に倒れる — fail-closed の方向。
 
