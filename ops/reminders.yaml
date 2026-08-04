@@ -1398,3 +1398,15 @@ reminders:
       channel: 運営
       body: "【代表アクション】e-Stat(日本政府統計の総合窓口)API の appId が未登録のため、日次サイクルの estat 取込が毎日『資格情報未設定』で skipped になっている(実行サマリの ingest 行 estat:skipped)。https://www.e-stat.go.jp/api/ でユーザー登録し appId を発行して提供いただければ、Secret Manager の `estat-app-id` に登録して配線する(Secret 名・accessor 付与は ops/deploy-daily.sh に宣言済み。docs/tasks/T-012-ingestion-batch2.md)。Discord での依頼は 2026-08-04 に送付済み。期限までに提供が無ければ再度依頼する。"
     status: pending
+
+  - id: t019-fm-second-gen-impl
+    what: "FM 第二陣(Stan=グローバルマクロ・Peter=GARP)のシグナル実装本体 — 役職資産と指示書は 2026-08-04 に先行整備済み"
+    conditions:
+      - type: date_after
+        date: "2026-08-20"
+    action:
+      type: issue_create
+      title: "T-019: FM 第二陣(Stan・Peter)のシグナル実装"
+      labels: [impl]
+      body: "指示書は docs/tasks/T-019-fm-second-gen.md(自己完結)。役職資産(personas/fm-stan/・personas/fm-peter/)とマンデート(config/mandates/stan.yaml・peter.yaml — 81 §3 で 2026-08-03 承認済み)は整備済みで、残るのはシグナル実装(src/ryza/fm/indicators.py・stan.py・screening.py・peter.py)と daily 配線。**着手可否をまず判定すること — 判定主体は設計リード、時点は本リマインダーの期日である**(T-019 §6 反対意見1・独立役員 L3 レビュー 2026-08-04 の注文): 40-fund-managers.md の起動順は『Stan/Peter は市場観・マクロ系(T-011)の安定後』であり、加えて T-019 §1-2・§2-2 のデータ制約が未解消なら発注ゼロの FM を2体増やすだけになる。判定材料 = ①config/universe/** に index_etf / jp_equity_midcap_cash の供給があるか(無ければ fm-etf-futures-curated-classification が先)、②EDINET/EDGAR の構造化財務数値が使える形で入っているか(無ければ Peter 第一段は実装せず本リマインダーを繰り延べる)。**見送る場合は本エントリの date を更新し、見送り理由を同ファイルに残すこと**(判断の履歴を消さない)。src/ryza/fm/** は保護領域(fm_engine)のため独立役員審査+承認トレーラが要る。"
+    status: pending

@@ -8,10 +8,16 @@
 from __future__ import annotations
 
 import socket
+from pathlib import Path
 
 import pytest
 
 from ryza import org
+from ryza.governance.personas import load_persona_assets
+from ryza.ips import load_mandates
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_MANDATES_DIR = _REPO_ROOT / "config" / "mandates"
 
 
 class _FakeCursor:
@@ -101,6 +107,44 @@ def test_member_for_role_resolves_via_persona():
     assert org.member_for_role("dev_lead").id == "aoba"
     with pytest.raises(KeyError):
         org.member_for_role("unknown_role")
+
+
+# ── FM の役職資産とマンデートの整合(40 §初代4名・81 §3)──────────────────────
+# マンデートを交付された FM は、charter(職務規程)と system(人格)を必ず持つ。
+# 片方だけの状態で着任させない(personas.load_persona_assets が FileNotFoundError)。
+def test_every_mandated_fm_has_persona_assets():
+    for fm in load_mandates(_MANDATES_DIR):
+        assets = load_persona_assets(f"fm_{fm}")
+        assert assets.charter.strip(), f"fm_{fm}: charter.md が空"
+        assert assets.system.strip(), f"fm_{fm}: system.md が空"
+
+
+def test_every_mandated_fm_is_in_the_org_ledger():
+    """マンデートの fm 名は台帳のメンバー id(哲学の器の技術 ID)と一致する。"""
+    members = org.members()
+    for fm in load_mandates(_MANDATES_DIR):
+        assert fm in members, f"マンデート {fm} に対応するメンバーが org.yaml に無い"
+        assert members[fm].persona == f"personas/fm-{fm}"
+
+
+def test_fm_charter_binds_its_own_mandate_file():
+    """charter は自分のマンデートファイルを参照する(81 §2 — 器と契約の分離)。"""
+    for fm in load_mandates(_MANDATES_DIR):
+        charter = load_persona_assets(f"fm_{fm}").charter
+        assert f"config/mandates/{fm}.yaml" in charter, f"fm_{fm}: マンデート参照が無い"
+
+
+def test_fm_personas_forbid_sizing():
+    """不変原則1: FM の人格・職務規程はサイズを決めることを禁じている。
+
+    「候補の採否だけを出す」の言明が消えると、確信度をサイズに載せる改訂が
+    レビュー差分に現れなくなるため、文言の存在をテストで固定する。
+    """
+    for fm in load_mandates(_MANDATES_DIR):
+        assets = load_persona_assets(f"fm_{fm}")
+        text = assets.charter + assets.system
+        assert "サイズを決めること" in text, f"fm_{fm}: サイジング禁止の明記が無い"
+        assert "不変原則1" in text, f"fm_{fm}: 不変原則1 への参照が無い"
 
 
 def test_embed_author_shape():

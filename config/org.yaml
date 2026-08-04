@@ -91,7 +91,7 @@ members:
     source: "賭ケグルイ(蛇喰夢子)"
     title: FM(グローバルマクロ)
     dept: 運用(ポッド stan)
-    persona: personas/fm-stan # 後続タスクで作成
+    persona: personas/fm-stan # 役職資産は作成済み(シグナル実装は T-019)
     color: "#7f1d1d" # 紅黒
     icon_url: "https://safebooru.org/images/4414/9b647668271ab9c2d05f3cc48b7984236df74d7a.jpg" # safebooru post 6812607
     model_tier: mid
@@ -101,7 +101,7 @@ members:
     source: "氷菓(千反田える)"
     title: FM(GARP)
     dept: 運用(ポッド peter)
-    persona: personas/fm-peter # 後続タスクで作成
+    persona: personas/fm-peter # 役職資産は作成済み(シグナル実装は T-019)
     color: "#0e7490" # 瞳の瑠璃
     # 原寸 PNG は 7.0MB のため縮小版(samples)を採用
     icon_url: "https://safebooru.org/samples/3840/sample_4d52105dcdb62fddc8e1bf6706ff8e8f3c766e6d.jpg" # safebooru post 5227253
