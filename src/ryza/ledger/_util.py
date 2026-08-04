@@ -8,6 +8,11 @@
   統合済み(T-005)。環境変数 ``RYZA_EVIDENCE_DIR`` があれば ``EvidenceStore(LocalStorage(そのパス))``
   で不変保存 + sha256 改竄検知 + 重複排除を行う。未設定時は設計書 §5 補足に従い、小さな内部記録は
   payload_ref に JSON をインライン格納する(kind='decision' 等の内部記録はインライン許容)。
+- **本番(GCE)では ``RYZA_EVIDENCE_DIR`` を必須とし、未設定でインライン経路に落ちる瞬間に
+  fail-closed で ``RuntimeError`` を送出する**(A-12 F-7 / T-024)。インライン証憑は DB 行その
+  ものが原本のため sha256 ごと書換可能で、ファイルストアが持つ「DB 外の対照物」による不変
+  保存が働かない。開発・CI(非 GCE)の挙動は不変で、統制迂回の環境変数は用意しない
+  (統制の逃げ道になるため)。GCE 検出は ``ryza.secrets.is_running_on_gce``。
 - ``replay_position`` はどちらの経路の証憑でも payload を復元して読む。
 """
 
@@ -25,6 +30,7 @@ from typing import Any
 import psycopg
 
 from ryza.provenance.evidence import EvidenceStore, LocalStorage
+from ryza.secrets import is_running_on_gce
 
 CODE_VERSION = "T-002"
 
@@ -66,9 +72,28 @@ def _evidence_store() -> EvidenceStore | None:
     """環境変数 ``RYZA_EVIDENCE_DIR`` があれば証憑ストアを、無ければ None を返す。
 
     None のときは create_evidence が従来どおり payload_ref に JSON をインライン格納する。
+
+    **本番(GCE)ガード**(A-12 F-7 / T-024): このプロセスが GCE 上で動いていて
+    ``RYZA_EVIDENCE_DIR`` が未設定なら、インライン経路に落ちる瞬間に ``RuntimeError`` を
+    送出して fail-closed で止める。インライン証憑は DB 行そのものが原本であり、DB を
+    直接操作すれば sha256 ごと書換可能 — ファイルストアが持つ「DB 外の対照物」による
+    不変保存が働かず、設計書 §4 の不変保存が形骸化するため。
+    開発・CI(非 GCE)では従来どおりインラインへ落ちる。判定は
+    ``ryza.secrets.is_running_on_gce`` がプロセス内でキャッシュするため、
+    証憑作成のたびにメタデータサーバへ問い合わせない。
+    **統制迂回の環境変数(``RYZA_FORCE_INLINE_EVIDENCE`` 等)は用意しない** — 統制の
+    逃げ道になるため(T-024)。
     """
     evidence_dir = os.environ.get("RYZA_EVIDENCE_DIR")
     if not evidence_dir:
+        if is_running_on_gce():
+            raise RuntimeError(
+                "本番環境(GCE)で RYZA_EVIDENCE_DIR が未設定です。"
+                "インライン証憑は DB 行そのものが原本のため sha256 ごと書換可能で、"
+                "不変保存(設計書 §4)を満たしません。"
+                "証憑ストアのパス(例 /var/lib/ryza/evidence)を RYZA_EVIDENCE_DIR に"
+                "設定してから起動してください(A-12 F-7 / T-024)。"
+            )
         return None
     return _evidence_store_for(evidence_dir)
 
