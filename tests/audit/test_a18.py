@@ -1540,7 +1540,7 @@ def test_rejected_decision_trailer_is_violation(repo, conn):
     from ryza.bot.approvals import record_decision
 
     r, since = repo
-    got = record_decision(conn, "rejected-proposal", "reject", OWNER, OWNERS, kind="pr")
+    got = record_decision(conn, "manual:rejected-proposal", "reject", OWNER, OWNERS, kind="pr")
     _commit_with_trailer(r, f"decision:{got.id}")
     violations, _ = _run_a181_db(r, since, conn)
     assert len(violations) == 1
@@ -1633,9 +1633,9 @@ def test_fresh_unsent_notice_is_not_a_finding(conn, run_id):
     """投入直後の未配送は正常(配送ループは 5 秒間隔)。"""
     from ryza.governance import notices
 
-    notices.announce_deemed_approval(conn, "a185-fresh", "pr", "要旨", run_id)
+    notices.announce_deemed_approval(conn, "manual:a185-fresh", "pr", "要旨", run_id)
     findings, _ = a18.check_unnotified_deemed(conn)
-    assert [f for f in findings if f["proposal_ref"] == "a185-fresh"] == []
+    assert [f for f in findings if f["proposal_ref"] == "manual:a185-fresh"] == []
     conn.rollback()
 
 
@@ -1643,10 +1643,10 @@ def test_stale_unsent_notice_is_a_violation(conn, run_id):
     """60 分を超えて未配送なら「通知なき発効」として違反。"""
     from ryza.governance import notices
 
-    result = notices.announce_deemed_approval(conn, "a185-stale", "pr", "要旨", run_id)
+    result = notices.announce_deemed_approval(conn, "manual:a185-stale", "pr", "要旨", run_id)
     _age_outbox(conn, result.outbox_id, 120)
     findings, _ = a18.check_unnotified_deemed(conn)
-    mine = [f for f in findings if f["proposal_ref"] == "a185-stale"]
+    mine = [f for f in findings if f["proposal_ref"] == "manual:a185-stale"]
     assert len(mine) == 1
     assert mine[0]["decision_id"] == result.decision.id
     assert mine[0]["notice_ref"] == result.notice_ref
@@ -1659,11 +1659,11 @@ def test_delivered_notice_is_not_a_finding(conn, run_id):
     from ryza.bot.outbox import mark_sent
     from ryza.governance import notices
 
-    result = notices.announce_deemed_approval(conn, "a185-sent", "pr", "要旨", run_id)
+    result = notices.announce_deemed_approval(conn, "manual:a185-sent", "pr", "要旨", run_id)
     _age_outbox(conn, result.outbox_id, 120)
     mark_sent(conn, result.outbox_id, "123456")
     findings, _ = a18.check_unnotified_deemed(conn)
-    assert [f for f in findings if f["proposal_ref"] == "a185-sent"] == []
+    assert [f for f in findings if f["proposal_ref"] == "manual:a185-sent"] == []
     conn.rollback()
 
 
@@ -1671,7 +1671,7 @@ def test_manual_notice_ref_is_reported_as_untracked(conn):
     """``outbox:`` 形式でない通知参照(手作業の記録)は追跡不能として数える。"""
     from ryza.governance.decisions import record_deemed_approval
 
-    record_deemed_approval(conn, "a185-manual", "pr", "discord://承認/12345")
+    record_deemed_approval(conn, "manual:a185-manual", "pr", "discord://承認/12345")
     _findings, untracked = a18.check_unnotified_deemed(conn)
     assert untracked >= 1
     conn.rollback()
@@ -1682,7 +1682,9 @@ def test_unnotified_deemed_reaches_report_and_is_urgent(conn, run_id, repo):
     from ryza.governance import notices
 
     r, since = repo
-    result_notice = notices.announce_deemed_approval(conn, "a185-report", "pr", "要旨", run_id)
+    result_notice = notices.announce_deemed_approval(
+        conn, "manual:a185-report", "pr", "要旨", run_id
+    )
     _age_outbox(conn, result_notice.outbox_id, 120)
     result = a18.run_a18(
         r, since_commit=since, pr_since_commit=since, deemed_since_commit=since, conn=conn
@@ -2193,11 +2195,11 @@ def test_a18_7_non_pr_proposal_ref_is_not_attribution(repo, conn, run_id):
     「この PR の発効通知が出た」証跡にはならない。理由に参照先を出して切り分けられるようにする。
     """
     r, since = repo
-    _deemed(conn, run_id, "ips-2026-09-revision")
-    _merge_protected_pr(r, 503, trailer="ips-2026-09-revision")
+    _deemed(conn, run_id, "manual:ips-2026-09-revision")
+    _merge_protected_pr(r, 503, trailer="manual:ips-2026-09-revision")
     findings = _run_a187(r, since, conn)
     assert [f["pr_number"] for f in findings] == [503]
-    assert "ips-2026-09-revision" in findings[0]["reason"]
+    assert "manual:ips-2026-09-revision" in findings[0]["reason"]
     conn.rollback()
 
 

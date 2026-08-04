@@ -16,10 +16,14 @@ OWNERS = ["1001", "1002"]
 
 
 def _ref(conn) -> str:
-    """テスト間で衝突しない proposal_ref を採番(UNIQUE 制約回避)。"""
+    """テスト間で衝突しない proposal_ref を採番(UNIQUE 制約回避)。
+
+    F-10 は proposal_ref を 3 形式(PR URL / decision:<id> / manual:<slug>)に制限する。
+    テストは意味を持たない一意 ID を大量に使うので manual: 形式に揃える。
+    """
     with conn.cursor() as cur:
         cur.execute("SELECT nextval(pg_get_serial_sequence('governance.decisions', 'id'))")
-        return f"prop-{cur.fetchone()[0]}"
+        return f"manual:prop-{cur.fetchone()[0]}"
 
 
 def _fetch(conn, proposal_ref: str):

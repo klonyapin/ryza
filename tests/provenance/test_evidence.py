@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from ryza.provenance.evidence import EvidenceStore, GcsStorage, LocalStorage
+from ryza.provenance.evidence import EvidenceStore, GcsStorage, LocalStorage, validate_source
 
 
 # ── GCS のインメモリ・フェイク(google-cloud-storage の最小 API) ─────────────
@@ -171,3 +171,72 @@ def test_gcs_tamper_detected(conn, gcs_store):
     key = next(iter(bucket._store))
     bucket._store[key] = b"tampered"
     assert store.verify(conn, eid) is False
+
+
+# ── F-10: source 様式の検証(表示系への注入面の遮断)────────────────────────
+# 実運用値 11 種(TDnet / 日銀 / BOE / 米経済分析局BEA / FRB / ECB / FRED /
+# intl_banks / investment_committee / demo / J-Quants)+ URL・パス形式が通ること。
+@pytest.mark.parametrize(
+    "value",
+    [
+        # 既存実運用の 11 値(遡及書き換えを避けるための下限保証)
+        "TDnet",
+        "日銀",
+        "BOE",
+        "米経済分析局BEA",
+        "FRB",
+        "ECB",
+        "FRED",
+        "intl_banks",
+        "investment_committee",
+        "demo",
+        "J-Quants",
+        # 追加の許容形(URL 相当・パス相当)
+        "anthropic",
+        "binance_testnet",
+        "https://api.example.com/v1/quotes",
+        "path/to/artifact.json",
+        "run:1234-abcd",
+        "TDnet/2026-08-04",
+        "a" + "b" * 127,  # 上限 128 文字
+    ],
+)
+def test_validate_source_accepts_real_values(value):
+    assert validate_source(value) == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",  # 空文字
+        "has space",  # 空白
+        "line1\nline2",  # 改行
+        "with\ttab",  # タブ
+        "*bold*",  # markdown メタ
+        "[link](x)",
+        "under_score|pipe",
+        "<script>",
+        "a" + "b" * 128,  # 129 文字(上限超え)
+        " leading_space",
+        "trailing_space ",
+        "\x00null",  # 制御文字
+    ],
+)
+def test_validate_source_rejects_bad(value):
+    with pytest.raises(ValueError):
+        validate_source(value)
+
+
+def test_validate_source_rejects_non_str():
+    with pytest.raises(ValueError):
+        validate_source(None)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        validate_source(123)  # type: ignore[arg-type]
+
+
+def test_store_rejects_bad_source(conn, local_store):
+    """EvidenceStore.store 経由でも同じ検証が効くこと(A-12-04)。"""
+    store, _ = local_store
+    with pytest.raises(ValueError, match="source"):
+        store.store(conn, "llm_usage", {"x": 1}, source="has space")
+    conn.rollback()

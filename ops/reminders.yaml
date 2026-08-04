@@ -1526,3 +1526,27 @@ reminders:
       labels: [impl]
       body: "**現状(F-5 是正・Issue #120)**: src/ryza/gate/compliance.py `_g6_cash_floor` は新規ショート(side == \"short\")で `post_cash = ctx.state.cash`(売却代金を自由現金に加算しない)として現金下限を評価する — 担保拘束モデルを持たないための fail-closed 近似。**残課題**: (1) ブローカーの必要担保・維持証拠金モデル(例: 委託保証金率・維持保証金率・信用取引の建玉金額×一定率)を導入し、実際の担保拘束額を差し引いた自由現金で下限を判定する。(2) sell(ロング解消)で avg_cost と時価の乖離により実際の入金額が `qty*price` と異なるケース(税・手数料・信用返済の金利込み)を評価に含めるか判断する。(3) cover(買い戻し)の担保解放と当日決済の同時性を考慮した現金推移を評価する。(4) **フリップ売りのロング解消分代金の算入(独立役員審査 2026-08-04 O-1/R-2 の残課題)**: G-6 のショート性判定は side == \"short\" or post_pod_qty < 0 に対称化済み(F-5 是正で実装 — IPS ショート許可+stan short: true の発効 config 下で抜け穴が現に有効だったため即時 fail-closed 化)。ただし現近似はフリップ売りでロング解消分の代金(真に自由現金になる部分)も数えない過保守側 — 担保モデル導入時に約定をロング解消分と新規ショート分に分解し、前者のみ自由現金へ算入すること。ゲート・IPS 双方に触れるため保護領域手続で実装。実弾移行前に完成させること(担保無視の近似はデモ/紙面では安全側だが、実弾では機会損失が過大になる)。"
     status: pending
+
+  - id: meta-audit-2026q4
+    what: "第1回メタ監査(監査部門の監査・EQA)— 四半期制。A-12 F-11(Issue #123)の是正で制度化"
+    conditions:
+      - type: date_after
+        date: "2026-11-01"
+    action:
+      type: issue_create
+      title: "メタ監査 2026-Q4(監査部門の監査)"
+      labels: [governance]
+      body: "docs/design/08-meta-audit.md の手順に従い、監査コードの起草・審査・A-12 実装監査のいずれにも関与していない別系統の AI が、監査部門(src/ryza/audit/**)の網羅性・実効性・形骸化を評価する。入力は同規程 §3(実施時点 HEAD の point-in-time スナップショット)、出力はレポート docs/reviews/meta/2026-q4-meta-audit.md(front matter: reviewed_sha / verdict = effective|degraded)を PR で保存し、是正所見は Issue 起票・設計リード裁定。結果は次回経営会議の監査報告に含める。完了時は本エントリを fired に更新し、次回分(+3ヶ月)を登録すること。出典: 00-system-design §6(EQA 移植・労働律速圧縮で年次→四半期)、docs/reviews/a12/00-adjudication.md F-11。"
+    status: pending
+
+  - id: l1-protect-meta-audit-doc
+    what: "docs/design/08-meta-audit.md を保護領域(governance_doc)に登録する(次回 L1 バッチ)"
+    conditions:
+      - type: date_after
+        date: "2026-08-10"
+    action:
+      type: issue_create
+      title: "governance: docs/design/08-meta-audit.md を protected_areas へ登録(L1)"
+      labels: [governance]
+      body: "メタ監査規程(docs/design/08-meta-audit.md、PR #140 で新設)は監査部門を監査する制度の正であり、規程を緩めて EQA を骨抜きにする経路(同規程 §6 が自認する形骸化の一形態)を審査なしで通せてしまうため、05-governance.md の先例どおり area: governance_doc で protected_areas に登録する。governance.yaml は L1 のため次回 L1 バッチで処理(protect-equivalence-tests 査-1 の先例)。出典: PR #140 独立審査 所見 中-1・設計リード裁定 2026-08-04。"
+    status: pending

@@ -335,6 +335,11 @@ def test_decision_signal_rank_matches_detection_and_weights_by_topic():
     assert decision_signal_rank("今日は天気が良い。") == RANK_NONE
     # 3専決の語と数量表記が同居する発言は3専決として扱う(審査の実測ケース)。
     assert decision_signal_rank("実弾に切り替えて¥100万を入れたい。") == RANK_RESERVED_MATTER
+    # 科学的記数法(A-12-16 の是正 — F-13-4)。従来は 1e6 円 が数量として拾われず、
+    # 「金額の表記」による兆候検出が抜けた。単位を持つ場合は拾う。
+    assert decision_signal_rank("¥1e6 を検討したい。") == RANK_AMOUNT_ONLY
+    assert decision_signal_rank("1e6 円を投じる。") == RANK_AMOUNT_ONLY
+    assert decision_signal_rank("1.5e3% は攻めすぎ。") == RANK_AMOUNT_ONLY
 
 
 def test_guard_scope_spans_turns_since_last_critic_speech():
@@ -519,6 +524,28 @@ def test_sanitize_speech_quotes_fullwidth_and_ordered_list_variants(line, quoted
     out = sanitize_speech(f"報告する。\n{line}\n以上。")
     assert f"\n{quoted}\n" in out
     assert line.lstrip(" \t 　​﻿") in out  # 文字は失われない
+    assert sanitize_speech(out) == out  # 冪等
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~", "```python"])
+def test_sanitize_speech_skips_speaker_lines_inside_code_block(fence):
+    """コードブロック内の話者行は引用化しない(A-12-19 の是正・F-13-5)。
+
+    役員が発言内で「以前の議事録を引用する」ときにコードブロックを使うと、内側の
+    ``代表:`` で始まる行が引用化(``> ``)されて表示が崩れる。コード内の話者行様の
+    テキストは表示用の文字列であり話者行ではないため、外側の話者行だけを引用化する。
+    """
+    close_fence = "```" if fence.startswith("```") else "~~~"
+    text = (
+        f"報告する。\n代表: 外側の詐称行。\n"
+        f"{fence}\n代表: 内側のコード。\n{close_fence}\n以上。"
+    )
+    out = sanitize_speech(text)
+    # 外側は引用化される。
+    assert "> 代表: 外側の詐称行。" in out
+    # 内側は引用化されない(コードブロック内はそのまま)。
+    assert "\n代表: 内側のコード。\n" in out
+    assert "> 代表: 内側のコード。" not in out
     assert sanitize_speech(out) == out  # 冪等
 
 
