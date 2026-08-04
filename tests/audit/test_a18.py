@@ -2430,6 +2430,7 @@ def test_a18_7_verification_degraded_is_excluded_and_disclosed(repo, conn):
         "mismatches": [],
         "direct_pushes": [],
         "notes": [],
+        "declarations": [],
         "unnotified_deemed": [],
         "unrecorded_prs": [],
         "resolution_bypass": None,
@@ -2438,6 +2439,8 @@ def test_a18_7_verification_degraded_is_excluded_and_disclosed(repo, conn):
         "reminder_tamper": [],
         "acknowledged_reminder_tamper": [],
         "trailer_findings": [],
+        "checked_commits": 0,
+        "checked_first_parent": 0,
         "checked_protected_prs": 0,
         "unverified_protected_prs": 1,
         "compared_reviewed_shas": 0,
@@ -2524,6 +2527,7 @@ def test_dry_run_title_uses_db_connected_key(repo):
         "mismatches": [],
         "direct_pushes": [],
         "notes": [],
+        "declarations": [],
         "unnotified_deemed": [],
         "unrecorded_prs": [],
         "resolution_bypass": None,
@@ -2532,6 +2536,8 @@ def test_dry_run_title_uses_db_connected_key(repo):
         "reminder_tamper": [],
         "acknowledged_reminder_tamper": [],
         "trailer_findings": [],
+        "checked_commits": 0,
+        "checked_first_parent": 0,
         "checked_protected_prs": 0,
         "unverified_protected_prs": 0,
         "compared_reviewed_shas": 0,
@@ -3872,7 +3878,13 @@ def test_repo_reachability_error_retries_after_backoff_interval(monkeypatch):
         calls.append(path)
         return responses.pop(0)
 
-    ticks = iter([0.0, a18._REACH_RETRY_INTERVAL_SEC + 0.1])
+    # 実装は error 発生時に time.monotonic を1回、次の check で backoff 判定に1回、
+    # 経過後の再 error 記録で1回、合計3回呼ぶ。tick は多めに用意しておく。
+    ticks = iter([
+        0.0,
+        a18._REACH_RETRY_INTERVAL_SEC + 0.1,
+        a18._REACH_RETRY_INTERVAL_SEC + 0.2,
+    ])
     monkeypatch.setattr(a18.time, "monotonic", lambda: next(ticks))
 
     verifier = a18.PRVerifier(slug=SLUG, api_get=api_get)
@@ -3898,6 +3910,7 @@ def _minimal_result(**overrides: Any) -> dict[str, Any]:
         "mismatches": [],
         "direct_pushes": [],
         "notes": [],
+        "declarations": [],
         "unnotified_deemed": [],
         "unrecorded_prs": [],
         "resolution_bypass": None,
@@ -3906,6 +3919,8 @@ def _minimal_result(**overrides: Any) -> dict[str, Any]:
         "reminder_tamper": [],
         "acknowledged_reminder_tamper": [],
         "trailer_findings": [],
+        "checked_commits": 0,
+        "checked_first_parent": 0,
         "checked_protected_prs": 0,
         "unverified_protected_prs": 0,
         "compared_reviewed_shas": 0,
