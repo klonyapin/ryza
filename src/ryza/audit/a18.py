@@ -194,6 +194,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -358,6 +359,13 @@ _TOKEN_ENV_VARS: tuple[str, ...] = ("GH_TOKEN", "GITHUB_TOKEN", "GIT_TOKEN")
 #: API 呼び出し1回あたりの上限秒数(週次バッチなので長すぎない値)。
 GITHUB_API_TIMEOUT = 15.0
 
+#: ``repos/<slug>`` の一時障害(rate limit・DNS 断・タイムアウト)直後に、同一プロセスから
+#: 何度も再問い合わせしない最低間隔(秒)。F-2 是正で「一時障害を永続キャッシュしない」
+#: 挙動は保つが、障害が継続している run では PR 照合のたびに repos/<slug> を叩いてしまい
+#: レート制限をさらに悪化させる副作用があったため、in-process backoff で自己増悪を防ぐ
+#: (審査 #131 軽微-2)。interval 経過後は必ず再試行する。
+_REACH_RETRY_INTERVAL_SEC = 60.0
+
 
 def origin_slug(repo_path: str | Path) -> str | None:
     """``origin`` remote から ``owner/repo`` を返す(GitHub でなければ None)。"""
@@ -449,6 +457,11 @@ class PRVerifier:
     _verified: int = field(default=0, repr=False)
     _reachable: bool | None = field(default=None, repr=False)
     _reach_reason: str | None = field(default=None, repr=False)
+    #: 直近の一時障害の ``time.monotonic()``。``_REACH_RETRY_INTERVAL_SEC`` 未満の間隔での
+    #: 再問い合わせを抑制する(審査 #131 軽微-2 — 障害継続中の自己増悪防止)。
+    _last_probe_error_at: float | None = field(default=None, repr=False)
+    #: 直近の一時障害の理由文字列(backoff 期間中は API を叩かずこれを返す)。
+    _last_probe_error_reason: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.api_get is None:
@@ -470,15 +483,28 @@ class PRVerifier:
         呼び出しに対してだけ理由を返し、``_reachable`` は ``None`` のまま次の呼び出しで
         再試行する。``ok``(到達確定)と ``not_found``(HTTP 404 = 不在確定)は従来どおり
         キャッシュする。
+
+        **backoff(審査 #131 軽微-2)**: 一時障害が継続している run では、PR 照合のたびに
+        ``repos/<slug>`` を再問い合わせしてレート制限をさらに悪化させる副作用があった。
+        直近の一時障害から ``_REACH_RETRY_INTERVAL_SEC`` 秒未満の呼び出しは API を叩かず
+        前回のエラー理由を返す。永続キャッシュしないという F-2 是正の性質(interval 経過後
+        は必ず再試行する)は不変。
         """
         if self._reachable is True:
             return None
         if self._reachable is False:
             return self._reach_reason
+        # backoff: 直近の一時障害から interval 未満なら API を叩かず前回理由を返す。
+        if self._last_probe_error_at is not None:
+            elapsed = time.monotonic() - self._last_probe_error_at
+            if elapsed < _REACH_RETRY_INTERVAL_SEC:
+                return self._last_probe_error_reason
         status, detail = self.api_get(f"repos/{self.slug}")
         if status == "ok":
             self._reachable = True
             self._reach_reason = None
+            self._last_probe_error_at = None
+            self._last_probe_error_reason = None
             return None
         if status == "not_found":
             self._reachable = False
@@ -486,12 +512,18 @@ class PRVerifier:
                 f"リポジトリ {self.slug} に API でアクセスできない"
                 "(認証不備・不達の可能性: HTTP 404)"
             )
+            self._last_probe_error_at = None
+            self._last_probe_error_reason = None
             return self._reach_reason
         # status == "error": 一時障害(レート制限・DNS 断等)はキャッシュせず再試行可にする。
-        return (
+        # ただし backoff の起点として時刻と理由を記録する(軽微-2)。
+        reason = (
             f"リポジトリ {self.slug} に API でアクセスできない"
             f"(一時障害の可能性: {detail})"
         )
+        self._last_probe_error_at = time.monotonic()
+        self._last_probe_error_reason = reason
+        return reason
 
     def _fetch(self, number: int) -> tuple[str, Any]:
         """PR 1件の API 取得(成否ともキャッシュ)。"""
@@ -3029,6 +3061,10 @@ def run_a18(
         "reminder_tamper_trailered": reminder_scan.trailered,
         "reminder_tamper_since_commit": effective_reminder_since,
         "decision_refs_verified": conn is not None,
+        # DB 接続の有無(dry-run 判定の分離 — 審査 #131 軽微-3)。従来 build_alert_embed は
+        # ``decision_refs_verified`` に相乗りしていたが、後者は A-18-5/7/8 の緑側 elif 分岐の
+        # 前提条件でもあり、意味が変わるとタイトルが偽る。DB 接続キーとして独立させる。
+        "db_connected": conn is not None,
         "prs_verified": pr_verifier is not None,
         # PR 照合の成立/縮退の件数。縮退 > 0 の週は緑にしない(独立役員審査 重要-4:
         # 攻撃者が GIT_TOKEN を消すだけで偽 PR が「所見なし」で通る経路を塞ぐ)。
@@ -3632,8 +3668,10 @@ def build_alert_embed(result: dict[str, Any]) -> dict[str, Any]:
     alert = has_findings(result)
     # dry-run(DB 接続なし)は否認済み承認を検出できない — その照合制限を notes だけでなく
     # タイトルからも読み取れるようにする(A-12 是正 F-9)。DB 接続の有無は
-    # ``decision_refs_verified`` に一本化されており、これを dry-run の識別に使う。
-    dry_run = not result.get("decision_refs_verified")
+    # ``db_connected`` キーで独立に判定する(decision_refs_verified への相乗りを解消 —
+    # #131 軽微-3。後者は A-18-5/7/8 の緑側 elif の前提として使われており、意味が変わると
+    # dry-run タイトルが偽る)。
+    dry_run = not result.get("db_connected")
     dry_prefix = "[DRY-RUN(照合制限あり)] " if dry_run else ""
     return {
         "title": (
