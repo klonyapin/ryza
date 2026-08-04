@@ -476,10 +476,45 @@ def _g5_crypto(ctx: _Ctx) -> list[Reason]:
 
 
 def _g6_cash_floor(ctx: _Ctx) -> list[Reason]:
-    """G-6 現金下限: 約定後の現金 ≥ NAV の 5%(IPS §4.2)。現金が増える注文は除く。"""
+    """G-6 現金下限: 約定後の現金 ≥ NAV の 5%(IPS §4.2)。現金が増える注文は除く。
+
+    **新規ショート建て(side == "short")の扱い(F-5・Issue #120)**:
+    素朴に ``post_cash = cash - delta*price`` を計算すると、``delta`` は sell/short で
+    負(:759 付近)なので新規ショートは「現金が増える取引」となり早期リターンで
+    G-6 を素通ししてしまう。しかし新規ショートの売却代金は**担保として拘束される**
+    ものであり、自由現金として現金下限を満たす原資にはならない。担保モデルを
+    実装するまでの fail-closed 側の近似として、``side == "short"`` のときは
+    ``post_cash = ctx.state.cash``(売却代金を数えない)で現金下限を評価する
+    — ショート自体は殺さず、現金が下限未満のときにだけ止める。
+    sell(ロング解消の売り・現金増)と cover(買い戻し・現金減)は従来どおり。
+
+    **フリップ売りの対称化(独立役員審査 2026-08-04 O-1/R-2)**: ``side == "sell"``
+    で保有ロング数量を超える qty を出すと約定後は実質ネットショート
+    (``post_pod_qty < 0``)になる。side 文字列だけで分岐すると、このフリップは
+    売却代金全額を自由現金と数えて早期リターンし(担保拘束を見ない)、同一の
+    約定後建玉を ``side == "short"`` で出した場合と判定が食い違う。IPS はショート
+    許可(``short_selling.allowed: true``)・stan マンデートも ``short: true`` の
+    ため G-9 はこの経路を止めず、抜け穴は現に有効だった。よってショート性の
+    判定は G-9 と同じ ``side == "short" or ctx.post_pod_qty < 0``(約定後の建玉
+    方向)で行い、該当時は ``post_cash = min(cash − delta×price, cash)`` の
+    fail-closed 近似で評価する — **代金の増加は担保拘束として数えず、現金の
+    減少(部分カバー等・約定後もネットショートが残る買い戻し)はそのまま
+    数える**。単純に ``post_cash = cash`` とすると部分カバーの現金流出を
+    無視して fail-open になるため min を取る。ロング解消分の代金も数えない
+    過保守側の近似だが、担保モデル不在の間は安全側に倒す(F-5 の方針と同一)。
+
+    TODO(g6-short-margin-model / ops/reminders.yaml):
+      担保モデル導入時に精緻化する(必要担保・維持証拠金・クローズ売りの
+      avg_cost 考慮・フリップ売りのロング解消分代金の算入など)。
+    """
     assert ctx.state.nav is not None and ctx.state.cash is not None
     post_cash = ctx.state.cash - ctx.delta * ctx.price
-    if post_cash >= ctx.state.cash:  # 売り等で現金が増える注文は現金下限を悪化させない
+    # ショート性は約定後の建玉方向で判定(G-9 と同じ基準 — フリップ売りも捕捉)。
+    if ctx.proposal.side == "short" or ctx.post_pod_qty < 0:
+        # 売却代金は担保拘束 → 自由現金の増加とは数えない(fail-closed 近似)。
+        # 現金減(部分カバー等)はそのまま数える — cash に丸めると fail-open になる。
+        post_cash = min(post_cash, ctx.state.cash)
+    elif post_cash >= ctx.state.cash:  # 売り等で現金が増える注文は現金下限を悪化させない
         return []
     floor = _dec(ctx.ips.guardrails.cash_nav_min) * ctx.state.nav
     if post_cash < floor:
@@ -498,6 +533,12 @@ def _g7_turnover(ctx: _Ctx) -> list[Reason]:
     """G-7 売買代金: 当日累計+本注文 ≤ NAV の 30%(IPS §3.2 暴走ガード)。
 
     dd_soft(DD 15% ソフトリミット)中の新規建ては枠を半減して評価する(G-10 の解釈)。
+
+    事前評価は**注文時価格**(limit_price/ref_price)で行う近似であり、成行のスリッページ
+    で約定額面が事後に上限を跨ぐ TOCTOU がありうる(F-12)。事後の遮断はできない
+    (既に約定済み)ため、跨ぎ検知は ``gate.orders.turnover_breach_after_execution``
+    が約定ベースの累計で行い、跨いだ瞬間だけ ``#運営`` へ urgent 通知する。以後の
+    注文はここ(現行 G-7)が自動的に塞ぐ。
     """
     assert ctx.state.nav is not None and ctx.state.daily_turnover is not None
     limit = _dec(ctx.ips.hard_limits.daily_turnover_nav_max) * ctx.state.nav

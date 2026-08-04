@@ -30,14 +30,73 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
+from ryza.bot import COLOR_FLASH, DISCLAIMER
+from ryza.bot.outbox import enqueue
 from ryza.execution.broker import EXPIRED, FILLED, REJECTED, Broker, BrokerOrder, BrokerResult
-from ryza.gate.orders import advance_order_status, record_execution
+from ryza.gate.orders import (
+    TurnoverBreach,
+    advance_order_status,
+    record_execution,
+    turnover_breach_after_execution,
+)
 from ryza.ledger import posting
 
 _JST = ZoneInfo("Asia/Tokyo")
 
 # ledger(post_fill)が記帳できる side。short/cover は会計未対応のため執行しない。
 _LEDGER_SIDES = frozenset({"buy", "sell"})
+
+
+def _turnover_breach_embed(breach: TurnoverBreach) -> dict[str, Any]:
+    """G-7 上限跨ぎ(F-12)通知の embed。#運営 へ urgent で1通。
+
+    NAV が取れなかった fail-closed 経路は理由を明示し、上限は「判定不能」と書く
+    (数値を偽装しない — 監査再現性)。
+    """
+    if breach.nav is None:
+        limit_text = (
+            f"判定不能({breach.nav_missing_reason or 'gate_log から NAV を取得できない'})"
+        )
+        title = f"⚠ G-7 事後監視: NAV 判定不能({breach.book_id} {breach.trade_date})"
+    else:
+        # 比率は limit/nav から動的に出す(IPS 値のハードコード禁止 — 設定変更時に表示が嘘になる)。
+        limit_text = (
+            f"¥{breach.limit:,.0f}(NAV ¥{breach.nav:,.0f}"
+            f" × {float(breach.limit / breach.nav):.0%})"
+        )
+        title = (
+            f"⚠ G-7 上限跨ぎ検知({breach.book_id} {breach.trade_date}"
+            f" — 約定 {breach.execution_id})"
+        )
+    fields: list[dict[str, Any]] = [
+        {
+            "name": "約定ベース当日累計",
+            "value": (
+                f"before ¥{breach.before:,.0f} → after ¥{breach.after:,.0f}"
+                f"(注文 {breach.order_id} / instrument {breach.instrument_id})"
+            ),
+            "inline": False,
+        },
+        {"name": "上限", "value": limit_text, "inline": False},
+    ]
+    if breach.nav_source_gate_log_id is not None:
+        fields.append(
+            {
+                "name": "NAV 出所",
+                "value": f"compliance.gate_log #{breach.nav_source_gate_log_id}",
+                "inline": True,
+            }
+        )
+    return {
+        "title": title,
+        "description": (
+            "約定ベースの当日売買代金が G-7 上限を跨いだ(F-12 事後監視)。"
+            "以後の注文は現行 G-7 が塞ぐため事後遮断は行わない。"
+        ),
+        "color": COLOR_FLASH,
+        "fields": fields,
+        "footer": {"text": DISCLAIMER},
+    }
 
 
 def _passed_orders(conn: psycopg.Connection, book_id: str) -> list[dict[str, Any]]:
@@ -139,7 +198,21 @@ def _execute_one(
             posted_by="execution.runner",
         )
         advance_order_status(conn, order_id, "filled")
-        return {
+        # F-12: 約定ベース累計が G-7 上限を跨いだ瞬間を検知し、urgent 通知する。
+        # 事後遮断はしない(既に約定済み)— 以後の注文は現行 G-7 が自動的に塞ぐ。
+        # 同一トランザクション内で enqueue することで、約定の巻き戻し(トランザクション
+        # 失敗)と通知の存在を一致させる(通知だけ残ることを防ぐ)。
+        breach = turnover_breach_after_execution(conn, execution_id)
+        breach_notified: int | None = None
+        if breach is not None:
+            breach_notified = enqueue(
+                conn,
+                "ops",
+                _turnover_breach_embed(breach),
+                run_id,
+                urgent=True,
+            )
+        outcome: dict[str, Any] = {
             "order_id": order_id,
             "status": "filled",
             "execution_id": execution_id,
@@ -148,6 +221,9 @@ def _execute_one(
             "price": str(result.price),
             "fee": str(fee),
         }
+        if breach_notified is not None:
+            outcome["turnover_breach_outbox_id"] = breach_notified
+        return outcome
 
     if result.status == REJECTED:
         advance_order_status(conn, order_id, "rejected")
