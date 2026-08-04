@@ -2,7 +2,7 @@
 
 **アーギュメント: 監査部門は自分自身の形骸化を検出できないため、監査コードの起草・審査・実装監査のいずれにも関与していない別系統の AI による四半期の外部品質評価(EQA)を制度化し、その実施をリマインダー・レジストリと証跡で強制する。**
 
-制定根拠: `docs/design/00-system-design.md` §6「監査部門自体の更新機構」項2(年次メタ監査 = IIA 外部品質評価の移植)および同 §6 の営業期間圧縮(労働律速レビューの 年次→四半期)。A-12 監査所見 A-12-17(裁定 F-11・中、`docs/reviews/a12/00-adjudication.md` §3)が「実行基盤の未定義」を指摘したことによる是正。文書層は L4(`config/governance.yaml` document_layers)。
+制定根拠: `docs/design/00-system-design.md` §6「監査部門自体の更新機構」項2(年次メタ監査 = IIA 外部品質評価の移植)および同 §6 の営業期間圧縮(労働律速レビューの 年次→四半期)。A-12 監査所見 A-12-17(裁定 F-11・中、`docs/reviews/a12/00-adjudication.md` §3)が「実行基盤の未定義」を指摘したことによる是正。文書層は L3(`config/governance.yaml` document_layers — `docs/design/*.md` は L3)。
 
 ## 1. なぜ監査部門に監査が要るか
 
@@ -39,11 +39,11 @@
 
 ## 5. 出力と証跡
 
-1. **レポート**: `docs/reviews/meta/<YYYY>-q<N>-meta-audit.md` に PR で保存する。front matter に `review` / `reviewed_sha`(対象 HEAD の40桁)/ `reviewer` / `review_date` / `verdict`(`effective` = 監査は機能している / `degraded` = 形骸化の兆候あり・是正要)を記録する
+1. **レポート**: `docs/reviews/meta/<YYYY>-q<N>-meta-audit.md` に PR で保存する。front matter に `review` / `reviewed_sha`(対象 HEAD の40桁)/ `reviewer` / `review_date` / `verdict`(`effective` = 監査は機能している / `degraded` = 形骸化の兆候あり・是正要)を記録する。verdict は次のいずれかに該当すれば `degraded` とする: (a) ゼロトレランス領域のいずれかに対応する自動検査が存在しない、(b) 是正を要する所見のうち「重大」相当が1件以上ある、(c) §4 の形骸化兆候(懸念ゼロ連続・同型所見再発・閾値緩和・警報埋没・リマインダー放置)が2つ以上同時に観測される。判定基準に対する境界事例は実施者が理由付きで裁量判定し、レポートに明記する
 2. **所見の追跡**: 是正を要する所見は GitHub Issue に起票し、レポートから参照する。裁定(採否)は設計リードが行い、A-12 裁定書と同じ形式で残す
 3. **報告**: 結果は次回の経営会議(月次)で監査報告に含める
 4. **実施記録**: `ops/reminders.yaml` の該当エントリを fired に更新し、完了時に次回分(+3ヶ月)を登録する。実施の証跡はレポートのコミット履歴と fired 履歴の両方に残る — どちらか一方の消去では実施偽装にならない
 
 ## 6. 制度の自己言及に関する注記
 
-本規程自体も docs/design 配下の L4 文書であり、メタ監査の評価対象に含まれる(規程が緩められて EQA が骨抜きになる経路も、メタ監査が見るべき形骸化の一形態である)。本規程の改訂は document_layers の手続に従う。
+本規程自体も docs/design 配下の L3 文書であり、メタ監査の評価対象に含まれる(規程が緩められて EQA が骨抜きになる経路も、メタ監査が見るべき形骸化の一形態である)。本規程の改訂は document_layers の手続に従う。
