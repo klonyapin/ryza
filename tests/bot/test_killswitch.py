@@ -275,7 +275,7 @@ def test_frozen_exception_request_enqueues_approval(conn, run_id):
     assert "proposal:frozen-ex-001" in embed["footer"]["text"]
     # 承認は既存 UI 経路(オーナー検証 → governance.decisions・1件=1決定)。
     d = record_decision(
-        conn, "frozen-ex-001", "approve", "1001", OWNERS, kind="frozen_exception_trade"
+        conn, "manual:frozen-ex-001", "approve", "1001", OWNERS, kind="frozen_exception_trade"
     )
     assert d.kind == "frozen_exception_trade"
 

@@ -116,10 +116,10 @@ def test_deemed_embed_rejects_marker_collision(ref):
 
 # ── 配送時の実在照合(偽装 embed に否認ボタンを付けない — 重要-4)──────────────
 def test_resolve_deemed_view_accepts_a_real_deemed_notice(conn, run_id):
-    notices.announce_deemed_approval(conn, "view-real", "pr", NOTICE, run_id)
-    embed = notices.build_deemed_notice_embed("view-real", "pr", NOTICE)
+    notices.announce_deemed_approval(conn, "manual:view-real", "pr", NOTICE, run_id)
+    embed = notices.build_deemed_notice_embed("manual:view-real", "pr", NOTICE)
     target = notices.resolve_deemed_view(conn, embed)
-    assert target.ref == "view-real" and target.warning is None
+    assert target.ref == "manual:view-real" and target.warning is None
     conn.rollback()
 
 
@@ -134,8 +134,8 @@ def test_resolve_deemed_view_rejects_a_forged_notice(conn):
 
 def test_resolve_deemed_view_rejects_non_deemed_decision(conn):
     """明示承認(approve)の proposal_ref を騙る通知も弾く。"""
-    record_decision(conn, "view-explicit", "approve", OWNER, OWNERS, kind="pr")
-    embed = notices.build_deemed_notice_embed("view-explicit", "pr", NOTICE)
+    record_decision(conn, "manual:view-explicit", "approve", OWNER, OWNERS, kind="pr")
+    embed = notices.build_deemed_notice_embed("manual:view-explicit", "pr", NOTICE)
     target = notices.resolve_deemed_view(conn, embed)
     assert target.ref is None and "みなし承認でない" in target.warning
     conn.rollback()
@@ -143,11 +143,12 @@ def test_resolve_deemed_view_rejects_non_deemed_decision(conn):
 
 def test_resolve_deemed_view_skips_already_vetoed(conn, run_id):
     """否認済みならボタンを出さない(押しても失敗するだけ。撤回は /unveto)。"""
-    notices.announce_deemed_approval(conn, "view-vetoed", "pr", NOTICE, run_id)
+    notices.announce_deemed_approval(conn, "manual:view-vetoed", "pr", NOTICE, run_id)
     notices.apply_veto(
-        conn, "view-vetoed", "否認", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN
+        conn, "manual:view-vetoed", "否認",
+        vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
     )
-    embed = notices.build_deemed_notice_embed("view-vetoed", "pr", NOTICE)
+    embed = notices.build_deemed_notice_embed("manual:view-vetoed", "pr", NOTICE)
     target = notices.resolve_deemed_view(conn, embed)
     assert target.ref is None and "既に否認済み" in target.warning
     conn.rollback()
@@ -165,16 +166,16 @@ def test_resolve_deemed_view_ignores_non_deemed_embeds(conn):
 # ── みなし承認: 記録+通知の同時成立 ─────────────────────────────────────────
 def test_announce_writes_notice_and_decision_together(conn, run_id):
     result = notices.announce_deemed_approval(
-        conn, "https://x/pull/101", "pr", NOTICE, run_id
+        conn, "https://github.com/x/y/pull/101", "pr", NOTICE, run_id
     )
     rows = _outbox_rows(conn, run_id)
     assert len(rows) == 1
     outbox_id, channel, urgent, embed = rows[0]
     assert channel == "approval" and urgent is False
-    assert notices.parse_deemed_notice(embed) == "https://x/pull/101"
+    assert notices.parse_deemed_notice(embed) == "https://github.com/x/y/pull/101"
     # 通知参照は outbox 行を指す(Discord メッセージ ID は配送後にしか確定しない)。
     assert result.notice_ref == f"outbox:{outbox_id}"
-    row = current_decision(conn, "https://x/pull/101")
+    row = current_decision(conn, "https://github.com/x/y/pull/101")
     assert row["effective_decision"] == "deemed"
     assert row["decided_by"] == "system:deemed"
     conn.rollback()
@@ -182,14 +183,14 @@ def test_announce_writes_notice_and_decision_together(conn, run_id):
 
 def test_announce_source_reaches_decided_by(conn, run_id):
     result = notices.announce_deemed_approval(
-        conn, "ips-2026-09", "other", NOTICE, run_id, source="ips_monthly_review"
+        conn, "manual:ips-2026-09", "other", NOTICE, run_id, source="ips_monthly_review"
     )
     assert result.decision.decided_by == "system:ips_monthly_review"
     conn.rollback()
 
 
 def test_notice_message_id_resolves_after_delivery(conn, run_id):
-    result = notices.announce_deemed_approval(conn, "ref-msgid", "pr", NOTICE, run_id)
+    result = notices.announce_deemed_approval(conn, "manual:ref-msgid", "pr", NOTICE, run_id)
     assert notices.notice_message_id(conn, result.notice_ref) is None  # 未配送
     mark_sent(conn, result.outbox_id, "999888777")
     assert notices.notice_message_id(conn, result.notice_ref) == "999888777"
@@ -200,14 +201,14 @@ def test_notice_message_id_resolves_after_delivery(conn, run_id):
 # ── 原子性(片方失敗で両方ロールバック)────────────────────────────────────
 def test_duplicate_decision_rolls_back_the_notice(conn, run_id):
     """二重通知でも承認記録は増えず、**通知も残らない**(記録なき通知を作らない)。"""
-    notices.announce_deemed_approval(conn, "dup-ref", "pr", NOTICE, run_id)
+    notices.announce_deemed_approval(conn, "manual:dup-ref", "pr", NOTICE, run_id)
     assert len(_outbox_rows(conn, run_id)) == 1
     with pytest.raises(DuplicateDecisionError):
-        notices.announce_deemed_approval(conn, "dup-ref", "pr", NOTICE, run_id)
+        notices.announce_deemed_approval(conn, "manual:dup-ref", "pr", NOTICE, run_id)
     assert len(_outbox_rows(conn, run_id)) == 1  # 2件目の通知は SAVEPOINT ごと消えた
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT count(*) FROM governance.decisions WHERE proposal_ref = 'dup-ref'"
+            "SELECT count(*) FROM governance.decisions WHERE proposal_ref = 'manual:dup-ref'"
         )
         assert cur.fetchone()[0] == 1
     conn.rollback()
@@ -216,10 +217,12 @@ def test_duplicate_decision_rolls_back_the_notice(conn, run_id):
 def test_reserved_kind_rolls_back_the_notice(conn, run_id):
     """3専決事項(定款第3条)は通知も出ない — 発効していないものを告知しない。"""
     with pytest.raises(ReservedMatterError):
-        notices.announce_deemed_approval(conn, "reserved-1", "breaker_resume", NOTICE, run_id)
+        notices.announce_deemed_approval(
+            conn, "manual:reserved-1", "breaker_resume", NOTICE, run_id
+        )
     assert _outbox_rows(conn, run_id) == []
     # 呼び出し側のトランザクションは生きている(SAVEPOINT で巻き戻したため)。
-    assert notices.announce_deemed_approval(conn, "after-reserved", "pr", NOTICE, run_id)
+    assert notices.announce_deemed_approval(conn, "manual:after-reserved", "pr", NOTICE, run_id)
     assert len(_outbox_rows(conn, run_id)) == 1
     conn.rollback()
 
@@ -240,16 +243,16 @@ def test_outbox_failure_leaves_no_decision(conn, run_id, monkeypatch):
 
     monkeypatch.setattr(notices, "enqueue", failing_enqueue)
     with pytest.raises(RuntimeError, match="模擬"):
-        notices.announce_deemed_approval(conn, "fault-outbox", "pr", NOTICE, run_id)
+        notices.announce_deemed_approval(conn, "manual:fault-outbox", "pr", NOTICE, run_id)
     assert _outbox_rows(conn, run_id) == []
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT count(*) FROM governance.decisions WHERE proposal_ref = 'fault-outbox'"
+            "SELECT count(*) FROM governance.decisions WHERE proposal_ref = 'manual:fault-outbox'"
         )
         assert cur.fetchone()[0] == 0
     # 呼び出し側のトランザクションは生きている(巻き戻しは SAVEPOINT まで)。
     monkeypatch.undo()
-    assert notices.announce_deemed_approval(conn, "fault-after", "pr", NOTICE, run_id)
+    assert notices.announce_deemed_approval(conn, "manual:fault-after", "pr", NOTICE, run_id)
     assert len(_outbox_rows(conn, run_id)) == 1
     conn.rollback()
 
@@ -264,13 +267,16 @@ def test_outbox_constraint_violation_rolls_back_both(conn, run_id):
 
     with pytest.raises(psycopg.errors.NotNullViolation):
         # run_id=None で outbox の NOT NULL に触れさせる(通知側だけを DB 層で失敗させる)。
-        notices.announce_deemed_approval(conn, "fault-null", "pr", NOTICE, None)  # type: ignore[arg-type]
+        notices.announce_deemed_approval(conn, "manual:fault-null", "pr", NOTICE, None)  # type: ignore[arg-type]
     assert _outbox_rows(conn, run_id) == []
     with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM governance.decisions WHERE proposal_ref = 'fault-null'")
+        cur.execute(
+            "SELECT count(*) FROM governance.decisions"
+            " WHERE proposal_ref = 'manual:fault-null'"
+        )
         assert cur.fetchone()[0] == 0
     # abort した文の後でも呼び出し側のトランザクションは使える(SAVEPOINT まで戻った)。
-    assert notices.announce_deemed_approval(conn, "fault-null-after", "pr", NOTICE, run_id)
+    assert notices.announce_deemed_approval(conn, "manual:fault-null-after", "pr", NOTICE, run_id)
     conn.rollback()
 
 
@@ -289,10 +295,10 @@ def test_announce_on_an_idle_connection_does_not_commit(migrated_db):
     c.commit()  # Run だけ確定させ、接続を IDLE(CLI 起動直後と同じ状態)に戻す
     try:
         assert c.info.transaction_status == pq.TransactionStatus.IDLE
-        result = notices.announce_deemed_approval(c, "idle-ref", "pr", NOTICE, run.run_id)
-        assert current_decision(c, "idle-ref") is not None
+        result = notices.announce_deemed_approval(c, "manual:idle-ref", "pr", NOTICE, run.run_id)
+        assert current_decision(c, "manual:idle-ref") is not None
         c.rollback()
-        assert current_decision(c, "idle-ref") is None
+        assert current_decision(c, "manual:idle-ref") is None
         with c.cursor() as cur:
             cur.execute("SELECT count(*) FROM press.outbox WHERE id = %s", (result.outbox_id,))
             assert cur.fetchone()[0] == 0
@@ -308,10 +314,11 @@ def test_autocommit_connection_is_refused(migrated_db):
     c = connect(autocommit=True)
     try:
         with pytest.raises(notices.AtomicityError, match="autocommit"):
-            notices.announce_deemed_approval(c, "autocommit-ref", "pr", NOTICE, 1)
+            notices.announce_deemed_approval(c, "manual:autocommit-ref", "pr", NOTICE, 1)
         with c.cursor() as cur:
             cur.execute(
-                "SELECT count(*) FROM governance.decisions WHERE proposal_ref = 'autocommit-ref'"
+                "SELECT count(*) FROM governance.decisions"
+                " WHERE proposal_ref = 'manual:autocommit-ref'"
             )
             assert cur.fetchone()[0] == 0
     finally:
@@ -320,44 +327,44 @@ def test_autocommit_connection_is_refused(migrated_db):
 
 # ── 否認(#承認 の否認ボタン → record_veto → #運営 の取消義務リマインド)─────
 def test_apply_veto_records_and_notifies(conn, run_id):
-    notices.announce_deemed_approval(conn, "veto-ref", "pr", NOTICE, run_id)
+    notices.announce_deemed_approval(conn, "manual:veto-ref", "pr", NOTICE, run_id)
     result = notices.apply_veto(
-        conn, "veto-ref", "リスク上限を緩める方向のため",
+        conn, "manual:veto-ref", "リスク上限を緩める方向のため",
         vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
     )
-    assert current_decision(conn, "veto-ref")["effective_decision"] == "vetoed"
+    assert current_decision(conn, "manual:veto-ref")["effective_decision"] == "vetoed"
     ops = [r for r in _outbox_rows(conn, run_id) if r[1] == "ops"]
     assert len(ops) == 1
     _, _, urgent, embed = ops[0]
     assert urgent is True  # 取消義務は「遅滞なく」— 速報と同じ優先度で配送する
     assert "取消義務" in embed["title"]
-    assert any(f["value"] == "veto-ref" for f in embed["fields"])
+    assert any(f["value"] == "manual:veto-ref" for f in embed["fields"])
     assert result.veto.vetoed_by == OWNER
     conn.rollback()
 
 
 def test_apply_veto_works_on_explicit_approval(conn, run_id):
     """ボタン経路は明示承認(approve)も否認できる(定款は撤回を禁じていない)。"""
-    record_decision(conn, "explicit-ref", "approve", OWNER, OWNERS, kind="pr")
+    record_decision(conn, "manual:explicit-ref", "approve", OWNER, OWNERS, kind="pr")
     notices.apply_veto(
-        conn, "explicit-ref", "前提データの誤り",
+        conn, "manual:explicit-ref", "前提データの誤り",
         vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
     )
-    assert current_decision(conn, "explicit-ref")["effective_decision"] == "vetoed"
+    assert current_decision(conn, "manual:explicit-ref")["effective_decision"] == "vetoed"
     conn.rollback()
 
 
 def test_non_owner_veto_leaves_nothing(conn, run_id, no_denial_record):
     """非オーナーの否認は記録もリマインドも残さず、拒否の痕跡だけが残る(中-6)。"""
-    notices.announce_deemed_approval(conn, "veto-nonowner", "pr", NOTICE, run_id)
+    notices.announce_deemed_approval(conn, "manual:veto-nonowner", "pr", NOTICE, run_id)
     with pytest.raises(NotOwnerError):
         notices.apply_veto(
-            conn, "veto-nonowner", "越権否認",
+            conn, "manual:veto-nonowner", "越権否認",
             vetoed_by="999999", owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
         )
     assert [r for r in _outbox_rows(conn, run_id) if r[1] == "ops"] == []
-    assert current_decision(conn, "veto-nonowner")["is_vetoed"] is False
-    assert no_denial_record == [("veto", "veto-nonowner", "999999")]
+    assert current_decision(conn, "manual:veto-nonowner")["is_vetoed"] is False
+    assert no_denial_record == [("veto", "manual:veto-nonowner", "999999")]
     conn.rollback()
 
 
@@ -397,9 +404,10 @@ def test_denied_attempt_is_recorded_on_its_own_connection(migrated_db):
 
 def test_veto_records_run_id(conn, run_id):
     """否認の出所を事後に辿れるよう run_id を記録する(独立役員審査 重要-5 後段)。"""
-    notices.announce_deemed_approval(conn, "veto-runid", "pr", NOTICE, run_id)
+    notices.announce_deemed_approval(conn, "manual:veto-runid", "pr", NOTICE, run_id)
     result = notices.apply_veto(
-        conn, "veto-runid", "否認", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN
+        conn, "manual:veto-runid", "否認",
+        vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
     )
     with conn.cursor() as cur:
         cur.execute(
@@ -408,13 +416,14 @@ def test_veto_records_run_id(conn, run_id):
         )
         assert cur.fetchone()[0] == run_id
     notices.withdraw_veto(
-        conn, "veto-runid", "撤回", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN
+        conn, "manual:veto-runid", "撤回",
+        vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
     )
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM governance.decision_vetoes "
             "WHERE run_id IS NULL AND decision_id = "
-            "(SELECT id FROM governance.decisions WHERE proposal_ref = 'veto-runid')"
+            "(SELECT id FROM governance.decisions WHERE proposal_ref = 'manual:veto-runid')"
         )
         assert cur.fetchone()[0] == 0
     conn.rollback()
@@ -422,13 +431,14 @@ def test_veto_records_run_id(conn, run_id):
 
 def test_double_veto_is_refused(conn, run_id):
     """ボタンの二度押しでリマインドを二重投稿しない。"""
-    notices.announce_deemed_approval(conn, "veto-twice", "pr", NOTICE, run_id)
+    notices.announce_deemed_approval(conn, "manual:veto-twice", "pr", NOTICE, run_id)
     notices.apply_veto(
-        conn, "veto-twice", "否認", vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN
+        conn, "manual:veto-twice", "否認",
+        vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
     )
     with pytest.raises(notices.AlreadyVetoedError):
         notices.apply_veto(
-            conn, "veto-twice", "もう一度否認",
+            conn, "manual:veto-twice", "もう一度否認",
             vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
         )
     assert len([r for r in _outbox_rows(conn, run_id) if r[1] == "ops"]) == 1
@@ -446,10 +456,10 @@ def test_veto_of_unknown_proposal_raises(conn, run_id):
 
 def test_reject_cannot_be_vetoed_through_the_button_path(conn, run_id):
     """却下は否認できない(阻止の根拠を消さない — 0021 審査 C-2)。"""
-    record_decision(conn, "rejected-ref", "reject", OWNER, OWNERS, kind="pr")
+    record_decision(conn, "manual:rejected-ref", "reject", OWNER, OWNERS, kind="pr")
     with pytest.raises(NotVetoableError):
         notices.apply_veto(
-            conn, "rejected-ref", "却下を覆す",
+            conn, "manual:rejected-ref", "却下を覆す",
             vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
         )
     assert [r for r in _outbox_rows(conn, run_id) if r[1] == "ops"] == []
@@ -458,16 +468,16 @@ def test_reject_cannot_be_vetoed_through_the_button_path(conn, run_id):
 
 # ── 否認の撤回(誤操作からの復旧)───────────────────────────────────────────
 def test_withdraw_veto_restores_and_notifies(conn, run_id):
-    notices.announce_deemed_approval(conn, "veto-undo", "pr", NOTICE, run_id)
+    notices.announce_deemed_approval(conn, "manual:veto-undo", "pr", NOTICE, run_id)
     notices.apply_veto(
-        conn, "veto-undo", "誤った対象",
+        conn, "manual:veto-undo", "誤った対象",
         vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
     )
     notices.withdraw_veto(
-        conn, "veto-undo", "対象取り違えのため撤回",
+        conn, "manual:veto-undo", "対象取り違えのため撤回",
         vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
     )
-    row = current_decision(conn, "veto-undo")
+    row = current_decision(conn, "manual:veto-undo")
     assert row["is_vetoed"] is False
     assert row["effective_decision"] == "deemed"
     ops = [r for r in _outbox_rows(conn, run_id) if r[1] == "ops"]
@@ -477,10 +487,10 @@ def test_withdraw_veto_restores_and_notifies(conn, run_id):
 
 
 def test_withdraw_without_veto_raises(conn, run_id):
-    notices.announce_deemed_approval(conn, "veto-none", "pr", NOTICE, run_id)
+    notices.announce_deemed_approval(conn, "manual:veto-none", "pr", NOTICE, run_id)
     with pytest.raises(notices.NotVetoedError):
         notices.withdraw_veto(
-            conn, "veto-none", "撤回",
+            conn, "manual:veto-none", "撤回",
             vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
         )
     assert [r for r in _outbox_rows(conn, run_id) if r[1] == "ops"] == []
@@ -488,18 +498,18 @@ def test_withdraw_without_veto_raises(conn, run_id):
 
 
 def test_non_owner_withdrawal_leaves_nothing(conn, run_id, no_denial_record):
-    notices.announce_deemed_approval(conn, "veto-undo-nonowner", "pr", NOTICE, run_id)
+    notices.announce_deemed_approval(conn, "manual:veto-undo-nonowner", "pr", NOTICE, run_id)
     notices.apply_veto(
-        conn, "veto-undo-nonowner", "否認",
+        conn, "manual:veto-undo-nonowner", "否認",
         vetoed_by=OWNER, owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
     )
     with pytest.raises(NotOwnerError):
         notices.withdraw_veto(
-            conn, "veto-undo-nonowner", "越権撤回",
+            conn, "manual:veto-undo-nonowner", "越権撤回",
             vetoed_by="999999", owner_ids=OWNERS, run_id=run_id, origin=ORIGIN,
         )
     assert len([r for r in _outbox_rows(conn, run_id) if r[1] == "ops"]) == 1
-    assert current_decision(conn, "veto-undo-nonowner")["is_vetoed"] is True
+    assert current_decision(conn, "manual:veto-undo-nonowner")["is_vetoed"] is True
     conn.rollback()
 
 
@@ -511,7 +521,7 @@ def test_apply_veto_records_origin(conn, run_id, origin):
     run_id では代替できない: ボタン経路と ``/veto`` は同じ job_name で Run を開くため、
     meta.runs を辿っても両者は区別できない(0030)。
     """
-    ref = f"veto-origin-{origin}"
+    ref = f"manual:veto-origin-{origin}"
     notices.announce_deemed_approval(conn, ref, "pr", NOTICE, run_id)
     result = notices.apply_veto(
         conn, ref, "否認", vetoed_by=OWNER, owner_ids=OWNERS,
@@ -532,30 +542,30 @@ def test_apply_veto_records_origin(conn, run_id, origin):
 
 def test_withdraw_veto_records_its_own_origin(conn, run_id):
     """撤回の出所は否認の出所と独立に残る(経路をまたいだ撤回がありうる)。"""
-    notices.announce_deemed_approval(conn, "veto-origin-undo", "pr", NOTICE, run_id)
+    notices.announce_deemed_approval(conn, "manual:veto-origin-undo", "pr", NOTICE, run_id)
     notices.apply_veto(
-        conn, "veto-origin-undo", "否認", vetoed_by=OWNER, owner_ids=OWNERS,
+        conn, "manual:veto-origin-undo", "否認", vetoed_by=OWNER, owner_ids=OWNERS,
         run_id=run_id, origin="discord_button",
     )
     result = notices.withdraw_veto(
-        conn, "veto-origin-undo", "撤回", vetoed_by=OWNER, owner_ids=OWNERS,
+        conn, "manual:veto-origin-undo", "撤回", vetoed_by=OWNER, owner_ids=OWNERS,
         run_id=run_id, origin="discord_command",
     )
     assert result.veto.origin == "discord_command"
     # 現決定 view は最新行(= 撤回)の出所を返す。
-    assert current_decision(conn, "veto-origin-undo")["veto_origin"] == "discord_command"
+    assert current_decision(conn, "manual:veto-origin-undo")["veto_origin"] == "discord_command"
     conn.rollback()
 
 
 def test_unknown_origin_is_rejected_before_any_write(conn, run_id):
     """語彙外の出所は書き込む前に落とす(CheckViolation で通知まで巻き添えにしない)。"""
-    notices.announce_deemed_approval(conn, "veto-origin-bad", "pr", NOTICE, run_id)
+    notices.announce_deemed_approval(conn, "manual:veto-origin-bad", "pr", NOTICE, run_id)
     with pytest.raises(ValueError, match="未知の否認の出所"):
         notices.apply_veto(
-            conn, "veto-origin-bad", "否認", vetoed_by=OWNER, owner_ids=OWNERS,
+            conn, "manual:veto-origin-bad", "否認", vetoed_by=OWNER, owner_ids=OWNERS,
             run_id=run_id, origin="webhook",
         )
-    assert current_decision(conn, "veto-origin-bad")["is_vetoed"] is False
+    assert current_decision(conn, "manual:veto-origin-bad")["is_vetoed"] is False
     assert [r for r in _outbox_rows(conn, run_id) if r[1] == "ops"] == []
     conn.rollback()
 

@@ -116,7 +116,7 @@ def record_decision(
 
     呼び出し側でトランザクションを制御する(本関数は commit しない)。
     """
-    from ryza.governance.decisions import normalize_reviewed_sha
+    from ryza.governance.decisions import normalize_reviewed_sha, validate_proposal_ref
 
     if decision not in DECISIONS:
         raise ValueError(f"未知の決定: {decision}")
@@ -125,6 +125,8 @@ def record_decision(
     if not is_owner(decided_by, owner_ids):
         raise NotOwnerError(f"非オーナーの承認操作を拒否: user={decided_by}")
     # 様式検証は writer に一本化する(deemed 経路と同じ規則 = 突合が経路で変わらない)。
+    # F-10: proposal_ref も deemed と同じ 3 形式に限定し、UNIQUE の偶然一致経路を塞ぐ。
+    validate_proposal_ref(proposal_ref)
     reviewed_sha = normalize_reviewed_sha(reviewed_sha)
 
     with conn.cursor() as cur:
