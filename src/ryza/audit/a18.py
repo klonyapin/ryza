@@ -152,6 +152,13 @@ A-18-1 は一致した違反を ``violations`` から外す代わりに ``acknow
 拡張(保護領域の追加による)だけを正当な理由とする —— 縮小・入替・理由なしの差し替えは受容の
 隠蔽と区別できないため却下し、そのエントリは受容として効かせない(fail-safe)。承継された旧
 エントリは陳腐化注記の対象外になるが、承継の事実は毎回 notes に出す(履歴が残る)。
+同一の旧エントリを複数の新エントリが承継する形(ダイヤモンド)は許容する —— 違反に当たらない
+側が陳腐化として鳴るため隠蔽に転用できない(独立役員審査 2026-08-04 低-5)。
+
+**同一キーの重複追記**(独立役員審査 2026-08-04 低-1): 既存エントリと同じ (commit, paths) の
+エントリを追記すると、索引の後勝ち上書きで報告の ack_reason / approval_ref =「誰の・どの承認で
+受容されたか」が**無開示のまま差し替わる**(追記オンリー規則の禁止列挙は削除・書換のみだった)。
+後のエントリを無効とし(fail-safe)、両エントリの承認記録・受容日・理由を notes に開示する。
 
 **evil merge 対策**: マージコミット自身のコンフリクト解消差分は ``git diff-tree --cc``
 (全親と異なるファイルのみ列挙)で検査する。保護パスに触れる場合は **マージコミット自身の**
@@ -1217,8 +1224,24 @@ def _ack_kind(entry: dict[str, Any]) -> str:
 
 
 def _ack_key(commit: str, files: list[str] | tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
-    """受容記録の一致キー: (完全 SHA, 保護パスの正規化集合)。順序差では外れない。"""
+    """受容記録の一致キー: (完全 SHA, 保護パスの正規化集合)。順序差・重複では外れない。"""
     return commit.strip().lower(), tuple(sorted({str(f).strip() for f in files}))
+
+
+def _one_line(text: Any, limit: int = 60) -> str:
+    """注記に埋める1行要約(改行を潰し長すぎる本文を切る)。"""
+    s = " ".join(str(text or "").split())
+    return (s[:limit] + "…") if len(s) > limit else (s or "(なし)")
+
+
+def _paths_are_list(paths: Any) -> bool:
+    """``paths`` がパスの列か(スカラ文字列を弾く)。
+
+    文字列は反復可能なので、``paths: docs/x.md`` と書くと1文字ずつ分解された無意味なキーに
+    なる(独立役員審査 2026-08-04 低-3)。結果は fail-safe(受容が効かない)だが開示文言が
+    不可解になるため、型として明示的に拒否する。
+    """
+    return isinstance(paths, (list, tuple, set))
 
 
 def _supersede_target_key(
@@ -1239,6 +1262,8 @@ def _supersede_target_key(
     paths = raw.get("paths") or []
     if not commit or not paths:
         return None, "commit / paths のいずれかが欠落"
+    if not _paths_are_list(paths):
+        return None, "paths はリストであること(スカラ文字列は1文字ずつ分解され旧キーを指せない)"
     if not _FULL_SHA_RE.match(commit):
         return None, f"commit が 40 桁 hex の完全 SHA でない: {commit}"
     return _ack_key(commit, paths), ""
@@ -1313,6 +1338,13 @@ def acknowledged_index(
                 f"{commit or '(commit なし)'}"
             )
             continue
+        if not _paths_are_list(paths):
+            # スカラ文字列は1文字ずつ分解され不可解なキーになる(独立役員審査 低-3)。
+            notes.append(
+                "acknowledged_findings のエントリが無効(paths はリストであること — "
+                f"スカラ文字列は1文字ずつ分解される): {commit[:12]}"
+            )
+            continue
         if not _FULL_SHA_RE.match(commit):
             notes.append(
                 f"acknowledged_findings のエントリが無効(40 桁 hex の完全 SHA が必要 — "
@@ -1320,6 +1352,24 @@ def acknowledged_index(
             )
             continue
         key = _ack_key(commit, paths)
+        if key in index:
+            # 同一キーの重複追記(独立役員審査 低-1)。後勝ち上書きを許すと、報告に出る
+            # ack_reason / approval_ref =「誰の・どの承認で受容されたか」が**追記だけで**
+            # 無開示のまま差し替わる(追記オンリー規則の禁止列挙は削除・書換のみだった)。
+            # 後のエントリを無効にし(fail-safe)、両者の内容を開示する。
+            first = index[key]
+            notes.append(
+                "acknowledged_findings に同一キーの重複エントリ(後のエントリは無効 — "
+                "受容の表示メタデータの無開示な差し替えを防ぐ): "
+                f"{commit[:12]}({', '.join(key[1])}) / "
+                f"有効(先): approval_ref={first.get('approval_ref') or '(なし)'}・"
+                f"acknowledged_on={first.get('acknowledged_on') or '(なし)'}・"
+                f"reason={_one_line(first.get('reason'))} / "
+                f"無効(後): approval_ref={entry.get('approval_ref') or '(なし)'}・"
+                f"acknowledged_on={entry.get('acknowledged_on') or '(なし)'}・"
+                f"reason={_one_line(entry.get('reason'))}"
+            )
+            continue
         if entry.get("supersedes") is not None:
             target, why = _supersede_target_key(entry["supersedes"])
             if target is not None:

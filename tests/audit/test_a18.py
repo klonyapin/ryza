@@ -1173,6 +1173,82 @@ def test_supersede_chain_is_transitive(repo):
     assert sum(n.startswith("受容の承継") for n in result["notes"]) == 2
 
 
+# ── 受容エントリの重複追記・型不備(独立役員審査 2026-08-04 低-1 / 低-3)──────
+def test_duplicate_acknowledgement_key_keeps_first_and_discloses(repo):
+    """同一キーの重複追記は**後のエントリが無効**。両者の内容を notes に開示する。
+
+    後勝ち上書きを許すと、報告に出る「誰の・どの承認で受容されたか」が追記だけで無開示に
+    差し替わる(追記オンリー規則の禁止列挙は削除・書換のみだった)。
+    """
+    r, since = repo
+    sha = _commit(r, "docs/protected.md", "v2\n", "docs: 無承認変更")
+    first = _ack_entry(sha, ["docs/protected.md"])
+    first["approval_ref"] = "https://github.com/x/y/pull/1"
+    second = _ack_entry(sha, ["docs/protected.md"])
+    second["approval_ref"] = "https://github.com/x/y/pull/999"
+    second["reason"] = "後から差し替えた理由"
+    _ack_entries(r, [first, second])
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    # 受容自体は先のエントリで成立する(違反は鳴らない)。
+    assert result["violations"] == []
+    assert result["acknowledged"][0]["approval_ref"] == "https://github.com/x/y/pull/1"
+    note = next(n for n in result["notes"] if "同一キーの重複エントリ" in n)
+    assert "pull/1" in note and "pull/999" in note and "後から差し替えた理由" in note
+
+
+def test_duplicate_key_does_not_leave_stale_note(repo):
+    """重複で無効化した後のエントリは「陳腐化」として二重に鳴らさない(索引に入らないため)。"""
+    r, since = repo
+    sha = _commit(r, "docs/protected.md", "v2\n", "docs: 無承認変更")
+    _ack_entries(r, [_ack_entry(sha, ["docs/protected.md"])] * 2)
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert len(result["acknowledged"]) == 1
+    assert not any("一致する違反を持たない" in n for n in result["notes"])
+
+
+def test_scalar_paths_entry_is_rejected_with_clear_note():
+    """paths がスカラ文字列のエントリは明示的に無効(1文字分解のまま通さない)。"""
+    sha = "a" * 40
+    gov = {"acknowledged_findings": [{"commit": sha, "paths": "CLAUDE.md", "reason": "r"}]}
+    index, notes, _superseded = a18.acknowledged_index(gov)
+    assert index == {}
+    assert any("paths はリストであること" in n for n in notes)
+
+
+def test_scalar_supersede_paths_is_rejected_with_clear_note():
+    """supersedes.paths のスカラ文字列も同様に型として弾く(開示文言を読める形にする)。"""
+    sha = "a" * 40
+    entries = [
+        _ack_entry(sha, ["CLAUDE.md"]),
+        _ack_entry(sha, ["CLAUDE.md", "config/ips.yaml"],
+                   supersedes={"commit": sha, "paths": "CLAUDE.md"}),
+    ]
+    _index, notes, superseded = a18.acknowledged_index({"acknowledged_findings": entries})
+    assert superseded == set()
+    assert any("paths はリストであること" in n for n in notes)
+
+
+def test_diamond_supersede_is_allowed_and_mismatch_rings(repo):
+    """ダイヤモンド承継(2エントリが同一の旧エントリを承継)は許容。隠蔽には使えない。"""
+    r, since = repo
+    sha = _two_path_violation(r)
+    old_paths = ["docs/protected.md"]
+    _ack_entries(
+        r,
+        [
+            _ack_entry(sha, old_paths),
+            _ack_entry(sha, PATHS_2, supersedes={"commit": sha, "paths": old_paths}),
+            # 同じ旧エントリを承継するが、実在の違反には当たらない側。
+            _ack_entry(sha, [*old_paths, "migrations/9999_x.sql"],
+                       supersedes={"commit": sha, "paths": old_paths}),
+        ],
+    )
+    result = a18.run_a18(r, since_commit=since, pr_since_commit=since)
+    assert result["violations"] == []  # 当たる側で受容が成立
+    # 当たらない側は陳腐化として鳴る(先回り受容・水増しの封じ込め)。
+    assert any("一致する違反を持たない" in n and "9999" in n for n in result["notes"])
+
+
 # ── 実リポジトリの受容記録(承認手続の固定)────────────────────────────────────
 def _real_governance() -> dict:
     root = Path(__file__).resolve().parents[2]
