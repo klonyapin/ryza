@@ -119,17 +119,25 @@ export HOME=/root
 export PATH="/root/.local/bin:\$PATH"
 
 # 3.1 ソース展開(deploy-bot.sh と同じ /opt/ryza を共有。冪等)。
+#     uv.lock は git archive HEAD に含まれるため tar で更新される(A-12 F-13)。
 install -d -o root -g root /opt/ryza
-rm -rf /opt/ryza/src /opt/ryza/migrations /opt/ryza/pyproject.toml /opt/ryza/README.md /opt/ryza/config
+rm -rf /opt/ryza/src /opt/ryza/migrations /opt/ryza/pyproject.toml /opt/ryza/README.md /opt/ryza/config /opt/ryza/uv.lock
 tar -xzf /tmp/ryza-src.tar.gz -C /opt/ryza
 
-# 3.2 venv(無ければ作成)+ 依存同期(.[bot]: daily は torch を積まない縮退モードで動く)。
+# 3.2 依存同期(A-12 F-13: `uv sync --locked` で CI と同じ解決に固定)。
+#     旧世代 `uv pip install -e '.[bot]'` は pyproject.toml の `>=` を毎回最新解決し
+#     CI と本番の依存が乖離する(Supply Chain の再現性劣化)。CI(.github/workflows/
+#     ci.yml)と同じ `uv sync --locked --extra bot` に統一する。daily は torch を
+#     積まない縮退モードで動くため extra は bot のみ(preprocess は入れない)。
 if ! command -v uv >/dev/null 2>&1; then
   curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
 cd /opt/ryza
-[ -d .venv ] || uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -e '.[bot]'
+if [ ! -f uv.lock ]; then
+  echo "ERROR: /opt/ryza/uv.lock が無い。tar に含まれていない可能性あり(デプロイ資材の欠落)。" >&2
+  exit 1
+fi
+uv sync --locked --extra bot
 
 # 3.3 マイグレーション適用(冪等: schema_migrations で未適用のみ)。
 RYZA_DATABASE_URL='${DATABASE_URL}' .venv/bin/python -m ryza.db.migrate
