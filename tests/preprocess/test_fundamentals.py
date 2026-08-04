@@ -260,16 +260,90 @@ def test_lineage_indicators_to_documents(conn, run, store):
         assert cur.fetchone()[0] == 11
 
 
-# ── 追加: DocType が財務諸表本体でない開示は全項目 skip(no_basis)────────────
+# ── 追加: DocType が財務諸表本体でない開示は全項目 skip(not_statement)──────
 def test_non_statement_doctype_skipped(conn, run, store):
-    """DividendForecastRevision 等の DocType は財務諸表ではないので全 skip。"""
+    """DividendForecastRevision 等の DocType は財務諸表ではないので全 skip。
+
+    ``no_basis``(basis 未定)と ``not_statement``(そもそも財務諸表本体でない)は
+    運用診断のため別キーに分離する(C-3)。
+    """
     payload = _payload_full()
     payload["DocType"] = "DividendForecastRevision"
     _upsert_jquants_doc(conn, run, store, payload)
     result = fundamentals.run_promotion(conn, run, store, limit=10)
     assert result.processed == 1
     assert result.written == 0
-    assert result.skip["no_basis"] == 1
+    assert result.skip["not_statement"] == 1
+    assert result.skip["no_basis"] == 0  # 財務諸表本体でないため not_statement 側
+
+
+# ── 追加(C-2): DiscTime 欠測は開示日の JST 終端(翌日 00:00 JST)へ倒す ────
+def test_parse_as_of_missing_disctime_falls_back_to_end_of_day_jst():
+    """DiscTime 欠測時は翌日 00:00 JST(=開示日の JST 終端)を刻む。
+
+    保守側 — 開示より**前**に as_of を倒さない(不変原則4・look-ahead 防止)。
+    「開示日 00:00 JST」フォールバックは最大 24 時間の look-ahead を許すため採らない。
+    期待値は UTC で固定(2026-05-14 の JST 終端 = 2026-05-15 00:00 JST = 2026-05-14 15:00 UTC)。
+    """
+    payload = {"DiscDate": "2026-05-14"}  # DiscTime 欠測
+    result = fundamentals._parse_as_of(payload)
+    assert result == datetime(2026, 5, 14, 15, 0, tzinfo=UTC)
+    # DiscTime 存在時は開示時刻を刻む(look-ahead は生じない)。
+    payload_with = {"DiscDate": "2026-05-14", "DiscTime": "15:00:00"}
+    result_with = fundamentals._parse_as_of(payload_with)
+    assert result_with == datetime(2026, 5, 14, 6, 0, tzinfo=UTC)  # 15:00 JST = 06:00 UTC
+
+
+# ── 追加(C-9): _num は NaN/Infinity を拒否する(fail-closed)───────────────
+def test_num_rejects_non_finite_values():
+    """"NaN"/"Infinity"/"1e999" などの非有限 float は None に落として skip 側へ。
+
+    NaN は自己不等のため write_indicator の同値判定をすり抜けて revision を
+    無限に進める素地になる(base.write_indicator の既存規約)。fail-closed で拒否。
+    """
+    assert fundamentals._num({"x": "NaN"}, "x") is None
+    assert fundamentals._num({"x": "Infinity"}, "x") is None
+    assert fundamentals._num({"x": "-Infinity"}, "x") is None
+    assert fundamentals._num({"x": "1e999"}, "x") is None  # float 化で inf になる
+    # 正常値は通る。
+    assert fundamentals._num({"x": "123.45"}, "x") == 123.45
+
+
+# ── 追加(C-10): NxF* に実値があるケース(FY_NEXT 経路)の書込 ─────────────
+def test_promotes_next_fiscal_year_forecasts(conn, run, store):
+    """翌期予想(NxF*)に実値がある開示で ts=NxtFYEn・series *:FY_NEXT が書かれる。"""
+    payload = _payload_full()
+    # NxF* を実値で埋める(4Q 決算で翌期予想も同時開示するケースの再現)。
+    payload["NxFSales"] = "50000000000"
+    payload["NxFOP"] = "3800000000"
+    payload["NxFOdP"] = "3900000000"
+    payload["NxFNp"] = "2800000000"  # 仕様の変則表記(NxFNp — Np 小文字 p)
+    payload["NxFEPS"] = "210.0"
+    _upsert_jquants_doc(conn, run, store, payload)
+    result = fundamentals.run_promotion(conn, run, store, limit=10)
+    # 実績 6 + 現行予想 5 + 翌期予想 5 = 16 点。
+    assert result.written == 16
+    assert result.skip["no_value"] == 0
+
+    # 翌期予想・売上(FY_NEXT・Consolidated・ts=NxtFYEn=2027-03-31)。
+    row = _fetch_indicator(
+        conn,
+        "JQUANTS:7203.T:NxFcstNetSales:FY_NEXT:Consolidated",
+        datetime(2027, 3, 31, tzinfo=UTC),
+    )
+    assert row is not None
+    assert float(row[0]) == 50000000000
+    # as_of は開示時刻(2026-05-14 15:00 JST = 06:00 UTC)で固定される(実績と同一)。
+    assert row[1] == datetime(2026, 5, 14, 6, 0, tzinfo=UTC)
+
+    # 翌期予想・EPS(FY_NEXT・Consolidated・NxtFYEn=2027-03-31)。
+    row = _fetch_indicator(
+        conn,
+        "JQUANTS:7203.T:NxFcstEarningsPerShare:FY_NEXT:Consolidated",
+        datetime(2027, 3, 31, tzinfo=UTC),
+    )
+    assert row is not None
+    assert float(row[0]) == 210.0
 
 
 # ── 追加: load_field_maps は config を bucket ごとに正しく読む ──────────────

@@ -37,9 +37,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -114,25 +115,38 @@ def _period_kind_actual(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def _basis_from_doctype(payload: dict[str, Any]) -> str | None:
-    """DocType の中央要素から連結/単体を導出する(例: "3QFinancialStatements_Consolidated_IFRS")。
+def _basis_from_doctype(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    """DocType から (basis, skip_reason) を返す。
 
     仕様書 https://jpx-jquants.com/en/spec/fin-summary/typeofdocument に列挙された
-    パターン(Consolidated / NonConsolidated)のみ受け付ける。それ以外(REIT・
-    Foreign 単独名 etc.)は None → skip。DocType 自体が Forecast/Dividend 系
-    (DividendForecastRevision 等)の場合も None を返して skip する(そもそも
-    財務諸表本体ではない)。
+    DocType は ``<Period>_<Basis>_<Standard>`` の 3 要素構成。本関数は中央要素
+    (連結/単体)を basis として返す。仕様上の派生形の扱い:
+
+    - ``FYFinancialStatements_Consolidated_REIT`` /
+      ``..._Consolidated_Foreign`` などの中央要素が ``Consolidated``/``NonConsolidated``
+      であるものは通過して昇格される(basis が導出できるため書いてよい)。
+    - 中央要素が ``Consolidated``/``NonConsolidated`` 以外(すなわち basis 未定)は
+      skip_reason=``no_basis`` で返す。
+    - DocType 自体が ``EarnForecastRevision`` / ``DividendForecastRevision`` 等の
+      財務諸表本体でない開示(3 要素構成でない)は skip_reason=``not_statement``
+      で返す(``no_basis`` と分離することで運用時の診断を分けやすくする)。
+
+    返り値のいずれかは必ず None:
+      - (basis, None): 正常導出
+      - (None, "not_statement"): 財務諸表本体でない DocType
+      - (None, "no_basis"): 財務諸表本体だが basis 未定
     """
     dt = payload.get("DocType")
     if not dt:
-        return None
+        return None, "not_statement"
     parts = str(dt).split("_")
     if len(parts) < 2:
-        return None
+        # 3 要素構成でない DocType(EarnForecastRevision 等)= 財務諸表本体ではない
+        return None, "not_statement"
     b = parts[1]
     if b in ("Consolidated", "NonConsolidated"):
-        return b
-    return None
+        return b, None
+    return None, "no_basis"
 
 
 def _parse_date(value: str | None) -> datetime | None:
@@ -153,21 +167,33 @@ def _parse_date(value: str | None) -> datetime | None:
 def _parse_as_of(payload: dict[str, Any]) -> datetime | None:
     """開示日時(DiscDate + DiscTime, JST)を UTC の datetime に変換する。
 
-    ``DiscTime`` は "HH:MM:SS" 形式。欠測時は 00:00:00 JST として扱う(日付だけでも
-    情報を知り得た時点を刻むほうが、無為に None にして as_of を「実行時点」に落とすより
-    point-in-time の意味に忠実 — 実行時刻に落とすと同じ開示を再取り込みしたら
-    as_of が動いてしまう)。
+    ``DiscTime`` は "HH:MM:SS" 形式。欠測時は**翌日 00:00 JST(=開示日の JST 終端)**へ
+    フォールバックする(保守側 — 開示より**前**に as_of を倒さない。不変原則4)。
+    「00:00 JST」フォールバックは最大約 24 時間の look-ahead を許すため採らない
+    (実開示は 15:00 JST 以降が典型だが、それを 00:00 JST に丸めると当日の判断で
+    「開示前に知っていた」ことになる系列を作り得る)。開示日の JST 終端に倒せば、
+    ・実行時点に落として as_of が再取り込みで動く問題は避けられ、
+    ・かつ point-in-time の「開示以降にしか使えない」条件を厳格に満たす。
     """
     disc_date = payload.get("DiscDate")
     if not disc_date:
         return None
-    disc_time = payload.get("DiscTime") or "00:00:00"
     from zoneinfo import ZoneInfo
+    jst = ZoneInfo("Asia/Tokyo")
+    disc_time = payload.get("DiscTime")
+    if disc_time:
+        try:
+            naive = datetime.fromisoformat(f"{disc_date}T{disc_time}")
+        except ValueError:
+            return None
+        return naive.replace(tzinfo=jst).astimezone(UTC)
+    # DiscTime 欠測: 翌日 00:00 JST(=開示日の JST 終端)に倒す(look-ahead を防ぐ)。
     try:
-        naive = datetime.fromisoformat(f"{disc_date}T{disc_time}")
+        d = datetime.fromisoformat(str(disc_date))
     except ValueError:
         return None
-    return naive.replace(tzinfo=ZoneInfo("Asia/Tokyo")).astimezone(UTC)
+    end_of_day_jst = (d + timedelta(days=1)).replace(tzinfo=jst)
+    return end_of_day_jst.astimezone(UTC)
 
 
 # ─── payload の抽出(bucket ごとに ts と period_kind を変える)────────────────
@@ -181,17 +207,23 @@ class Extraction:
 
 
 def _num(payload: dict[str, Any], key: str) -> float | None:
-    """payload の当該キーを float 化する。空文字・None・非数値は None(→ skip)。
+    """payload の当該キーを float 化する。空文字・None・非数値・非有限は None(→ skip)。
 
     J-Quants の一部フィールドは "" を返す(該当項目なし)。fail-closed に None 化する。
+    ``float("NaN")`` / ``float("Infinity")`` / ``float("1e999")`` などの非有限値は
+    ``math.isfinite`` で拒否する(NaN は自己不等のため write_indicator の同値判定を
+    すり抜けて revision を無限に進める素地になり、Infinity は numeric 列を汚す)。
     """
     v = payload.get(key)
     if v is None or v == "":
         return None
     try:
-        return float(v)
+        f = float(v)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(f):
+        return None
+    return f
 
 
 def _extract(
@@ -204,18 +236,23 @@ def _extract(
 
     skip 集計のキー:
       - ``no_period_kind``: 実績で ``CurPerType`` が空/未知
-      - ``no_basis``: DocType から連結/単体を導出できない(REIT/Foreign 等)
+      - ``not_statement``: DocType が財務諸表本体でない(EarnForecastRevision 等)
+      - ``no_basis``: 財務諸表本体だが連結/単体(basis)を導出できない
       - ``no_end_date``: 期末日フィールドが空(実績 CurPerEn / 現行予想 CurFYEn / 翌期予想 NxtFYEn)
       - ``no_value``: 対象フィールド自体が欠測 or 非数値
     """
-    skip: dict[str, int] = {"no_period_kind": 0, "no_basis": 0, "no_end_date": 0, "no_value": 0}
+    skip: dict[str, int] = {
+        "no_period_kind": 0, "not_statement": 0, "no_basis": 0,
+        "no_end_date": 0, "no_value": 0,
+    }
     out: list[Extraction] = []
 
-    basis = _basis_from_doctype(payload)
+    basis, basis_skip = _basis_from_doctype(payload)
     if basis is None:
-        # 財務諸表本体でない DocType(DividendForecastRevision 等)や、REIT/Foreign。
         # 全 field が書けないので 1 回だけ加算して返す(bucket ごとの二重計上を避ける)。
-        skip["no_basis"] += 1
+        # skip_reason("not_statement" or "no_basis")で運用診断を分ける。
+        assert basis_skip is not None
+        skip[basis_skip] += 1
         return out, skip
 
     # 実績: period_kind = CurPerType、ts = CurPerEn
@@ -456,7 +493,7 @@ class RunResult:
     total_extractions: int = 0    # 抽出できた候補点数(書込 revision 同値含む)
     skip: dict[str, int] = field(
         default_factory=lambda: {
-            "no_period_kind": 0, "no_basis": 0,
+            "no_period_kind": 0, "not_statement": 0, "no_basis": 0,
             "no_end_date": 0, "no_value": 0,
         }
     )
@@ -472,25 +509,35 @@ def run_promotion(
     limit: int = 500,
     field_maps: list[FieldMap] | None = None,
 ) -> RunResult:
-    """未処理の J-Quants 財務諸表文書を一括で昇格する。
+    """未処理の J-Quants 財務諸表文書を全て昇格する。
 
-    バックフィルは呼び出し側で ``limit`` を十分大きくすることで実現する(冪等マーカが
-    あるので単に「未処理を上限まで処理」を繰り返せば全件処理できる)。
+    ``limit`` は 1 バッチの SELECT 上限(既定 500)。決算集中日(1000 件超/日)でも
+    当日中に処理しきるため、**未処理が尽きるまでループ**する(冪等マーカで再取得は
+    安全 — 処理済み文書は ``find_unprocessed`` の SELECT で除外される)。無限ループ
+    防止のため、1 バッチで進捗ゼロ(processed 増分なし)なら打ち切る。
     """
     field_maps = field_maps if field_maps is not None else load_field_maps()
-    docs = find_unprocessed(conn, version=version, limit=limit)
     result = RunResult()
-    for doc in docs:
-        outcome = promote_document(
-            conn, run, store, doc, field_maps=field_maps, version=version
-        )
-        result.processed += 1
-        result.written += outcome.written
-        result.total_extractions += outcome.total
-        for k, v in outcome.skip.items():
-            result.skip[k] = result.skip.get(k, 0) + v
-        if outcome.error:
-            result.errors[outcome.error] = result.errors.get(outcome.error, 0) + 1
+    while True:
+        docs = find_unprocessed(conn, version=version, limit=limit)
+        if not docs:
+            break
+        batch_processed = 0
+        for doc in docs:
+            outcome = promote_document(
+                conn, run, store, doc, field_maps=field_maps, version=version
+            )
+            result.processed += 1
+            batch_processed += 1
+            result.written += outcome.written
+            result.total_extractions += outcome.total
+            for k, v in outcome.skip.items():
+                result.skip[k] = result.skip.get(k, 0) + v
+            if outcome.error:
+                result.errors[outcome.error] = result.errors.get(outcome.error, 0) + 1
+        if batch_processed == 0:
+            # 進捗ゼロ(全件が processed マーカーを刻めなかった)= 無限ループ回避で打ち切る
+            break
     return result
 
 

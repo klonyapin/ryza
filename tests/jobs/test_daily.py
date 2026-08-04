@@ -685,14 +685,19 @@ def test_run_ingest_sources_dry_run_skips_network():
 
 
 def test_default_ingest_sources_are_wired():
-    # T-009 6 ソース + T-012 3 ソースが名前付きで登録されている(呼び出しはしない)。
+    # T-009 6 ソース + T-012 3 ソース + T-029 jquants_fundamentals が名前付きで登録
+    # されている(呼び出しはしない)。fundamentals は jquants 取込の**直後**に置く
+    # 配線意図(T-029 §1-4)を順序でアサートする。
     from ryza.jobs.daily import _default_ingest_sources
 
     names = [n for n, _ in _default_ingest_sources()]
     assert names == [
-        "jquants", "tdnet", "edinet", "news_rss", "fred", "calendar",
+        "jquants", "jquants_fundamentals",
+        "tdnet", "edinet", "news_rss", "fred", "calendar",
         "edgar", "estat", "intl_banks",
     ]
+    # jquants_fundamentals は jquants の直後(index+1)に位置する。
+    assert names.index("jquants_fundamentals") == names.index("jquants") + 1
 
 
 def test_daily_with_default_ingest_stage(
