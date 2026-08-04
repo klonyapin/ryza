@@ -1485,13 +1485,19 @@ reminders:
     status: pending
 
   - id: ledger-evidence-full-append-only
-    what: "ledger.evidence の完全追記オンリー化(未参照行の DELETE 封鎖)を Issue #23 完了後に再評価する(T-022 / Issue #128 で保留した後半)"
+    what: "ledger.evidence の完全追記オンリー化(未参照行の DELETE 封鎖)を再評価する(T-022 / Issue #128 で保留した後半)"
+    # 条件の是正(T-022 独立審査 所見7・設計リード裁定): 当初の issue_label_open は
+    # (a) 該当ラベルが repo に無い、(b) Issue #23 は既に CLOSED、(c) 意味論が「open な間
+    # fire」で意図(完了後に fire)と逆向き — の三重で発火不能だった。実際の前提条件は
+    # #23 の完了そのものではなく「共有 DB 実行時の残留データ隔離が conftest の
+    # _CLEAR_EVIDENCE_SQL(evidence DELETE)に依存しなくなること」であり、機械可読な
+    # 完了シグナルが無いため、決定論的に発火する date_after で再評価日を固定する。
     conditions:
-      - type: issue_label_open
-        label: test-isolation-dedicated-db
+      - type: date_after
+        date: "2026-09-01"
     action:
       type: issue_create
       title: "ledger.evidence の DELETE 封鎖(完全追記オンリー化)を再評価する"
       labels: [governance, impl]
-      body: "T-022(migrations/0036)は ledger.evidence の UPDATE / TRUNCATE を封鎖したが、行 DELETE は封鎖しなかった。理由は Issue #128 本文と 0036 冒頭コメントに記す: (1) UPDATE 封鎖で sha256 / payload_ref の不変性は確立し改竄検知(A-1)の前提は満たす、(2) 参照済み行の DELETE は既に FK が拒否する、(3) 未参照行の DELETE 封鎖は tests/conftest.py `_CLEAR_EVIDENCE_SQL`(残留データ隔離の第二層)と衝突するため、Issue #23(テスト専用 DB 化)による隔離戦略の再設計とセットでしか導入できない。**Issue #23 が完了した時点で本件を再評価する** — 具体的には (i) 未参照行の DELETE を封鎖する行トリガと REVOKE DELETE を 0036 と同じ様式で追加できるか、(ii) conftest の evidence 掃除経路をテスト DB 分離だけで担保でき DELETE を残す必要が無いか、(iii) 取込ジョブ側で『記帳に至らなかった証憑』をどう処理するか(封鎖後は削除できないため、記帳側でダミー逆仕訳を切るなり、専用の quarantine スキーマへ隔離するなりの経路が要る)を判断する。保護領域(migrations・会計エンジン)のため、独立役員審査 → #承認 → みなし承認の手続を経ること。出典: T-022 実装指示書(docs/tasks/T-022-ledger-evidence-guard.md)、Issue #128、migrations/0036 冒頭コメント。"
+      body: "T-022(migrations/0036)は ledger.evidence の UPDATE / TRUNCATE を封鎖したが、行 DELETE は封鎖しなかった。理由は Issue #128 本文と 0036 冒頭コメントに記す: (1) UPDATE 封鎖で sha256 / payload_ref の不変性は確立し改竄検知(A-1)の前提は満たす、(2) 参照済み行の DELETE は既に FK が拒否する、(3) 未参照行の DELETE 封鎖は tests/conftest.py `_CLEAR_EVIDENCE_SQL`(残留データ隔離の第二層)と衝突するため、テスト隔離戦略の再設計とセットでしか導入できない(Issue #23 は CLOSED だが、共有 DB 実行時=RYZA_TEST_DATABASE_URL 上書き時の残留データ隔離は依然この DELETE 経路に依存する)。**再評価では** 具体的には (i) 未参照行の DELETE を封鎖する行トリガと REVOKE DELETE を 0036 と同じ様式で追加できるか、(ii) conftest の evidence 掃除経路をテスト DB 分離だけで担保でき DELETE を残す必要が無いか、(iii) 取込ジョブ側で『記帳に至らなかった証憑』をどう処理するか(封鎖後は削除できないため、記帳側でダミー逆仕訳を切るなり、専用の quarantine スキーマへ隔離するなりの経路が要る)を判断する。保護領域(migrations・会計エンジン)のため、独立役員審査 → #承認 → みなし承認の手続を経ること。出典: T-022 実装指示書(docs/tasks/T-022-ledger-evidence-guard.md)、Issue #128、migrations/0036 冒頭コメント。"
     status: pending
