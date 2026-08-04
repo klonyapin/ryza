@@ -382,7 +382,13 @@ def test_pit_status_uncovered_before_history_starts(conn, run_id):
 
 # ── IPS §8.1 資産クラス列(0028)─────────────────────────────────────────────
 def _constraint_vocabulary(conn, name: str) -> set[str]:
-    """CHECK 制約の定義から許可リテラルを抜き出す(DB 側の語彙の実測)。"""
+    """CHECK 制約の定義から許可リテラルを抜き出す(DB 側の語彙の実測)。
+
+    正規表現は ``'([^']+)'::text`` で拡張的に読む(pass5-5 の指摘)。狭い
+    ``[a-z_]+`` は「英小文字とアンダースコアだけ」の暗黙前提を持ち、将来 0028 以降で
+    語彙が拡張される(ハイフン・数字・大文字)と**検査から漏れる**。三者一致の
+    fail-closed を維持するには、DB から抜くのは「クオート内の任意文字列」でよい。
+    """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = %s",
@@ -390,7 +396,7 @@ def _constraint_vocabulary(conn, name: str) -> set[str]:
         )
         row = cur.fetchone()
     assert row is not None, f"CHECK 制約 {name} が無い(0028 が未適用の可能性)"
-    return set(re.findall(r"'([a-z_]+)'::text", row[0]))
+    return set(re.findall(r"'([^']+)'::text", row[0]))
 
 
 def test_asset_class_vocabulary_is_the_same_in_config_code_and_db(conn, ips):
