@@ -1321,7 +1321,29 @@ reminders:
       title: "A-18-1: 受容エントリの supersedes 機構(または再受容手続)を定め、src/ryza/execution/** を登録する"
       labels: [governance, impl]
       body: "phase-2(2026-08-04)の登録作業で判明した構造的な問題。A-18-1 の受容キーは commit + 保護パス集合の**完全一致**であり、保護領域を後から追加して同じコミットが新しい保護パスにも触れていたと判明すると受容は自動的に外れる(config/governance.yaml が明記する意図どおりの挙動)。ところが**再受容の経路が無い**: ①既存エントリの paths 書換は追記オンリー規則で禁止、②新エントリを足すと旧エントリが『陳腐化』注記になり CI の tests/audit/test_a18.py::test_real_repo_acknowledged_findings_are_matched が落ちる。結果、**受容済み evil merge が触れたファイルを含む tree は以後 protected_areas に追加できない**というラチェットが生じている(過去の git 事故が将来の統制強化を縛る)。実害の実例: 受容済みの `7a56c98…` が `git diff-tree --cc` で src/ryza/execution/close.py に触れているため、`src/ryza/execution/**`(demo.py = コストモデルの実体・runner.py = 発注から記帳への唯一の経路・close.py = MTM/NAV 確定)を登録できず phase-2 で見送った。是正案: (a) 受容エントリに `supersedes: <旧キー>` を持たせ、supersede された旧エントリは陳腐化注記の対象外にする(src/ryza/audit/** = 保護領域の変更)、または (b) 『保護領域追加でパス集合が変わった場合に限り、追記オンリーの例外として paths を拡張してよい(拡張は縮小でないため隠蔽にならない)』を governance.yaml に明文化する。(a) の方が履歴が残り望ましい。どちらも L1 手続。是正後、同じ PR で `src/ryza/execution/**`(area: execution_engine)を登録すること。"
-    status: pending
+    # 2026-08-04 実装(案 a を採用): 受容エントリに `supersedes: {commit, paths}` を追加。
+    # 承継の成立条件は4つ全て — ①同一コミット ②旧エントリが自分より前に存在(追記オンリーの
+    # 順序 = 循環の封鎖)③paths が真の拡張(旧 ⊂ 新)④新エントリに reason がある。
+    # **拡張だけを正当な理由**とし、縮小・入替・理由なき差し替えは受容の隠蔽と機械的に区別
+    # できないため却下、そのエントリは受容として効かない(fail-safe: 違反は出たまま)。
+    # 承継された旧エントリは陳腐化注記の対象外になるが、承継の事実は毎回 notes に出る。
+    # 案 b(paths 拡張を追記オンリーの例外として明文化)を採らなかった理由: 書換は「拡張だった
+    # のか縮小だったのか」を後から検証できず、A-18-1 の履歴突合が効かなくなる — 承継なら旧
+    # エントリが残るので拡張であることを機械検査できる(実際 4 条件のうち③がそれ)。
+    # 適用: 7a56c98… の受容を承継する新エントリ(paths に src/ryza/execution/close.py を追加)を
+    # 登録し、src/ryza/execution/**(area: execution_engine)を protected_areas に登録した。
+    # 実走(マージ前ブランチ HEAD・verify_prs=False): violations = ①既存の 392bb7b…
+    # (boardroom.py・本件と無関係)1 件 + ②**本 PR の各コミット自身**(保護領域
+    # config/governance.yaml・src/ryza/audit/a18.py に触れ、マージ前は Approved トレーラを持たない)。
+    # ②は監査が本 PR を正しく捕捉している証拠であって欠陥ではなく、PR マージコミットに Approved
+    # トレーラが載れば PR 承継の規則で解消される。acknowledged 1 件(3 パス)、陳腐化注記なし、
+    # 承継注記1行。件数を数値で固定しないのは、この記録を書き足すコミット自身が次の 1 件になる
+    # (自己言及の追いかけっこになる)ため。
+    # (当初の記録「violations 1 件」はコミット前の計測。独立役員審査 低-4 で追試・是正)
+    # 独立役員審査(docs/reviews/ack-supersede-review.md)は**承認可(修正条件なし)**。低-1〜低-5 と
+    # 「懸念」は設計リード裁定により本 PR 内で是正済み(重複キー無効化+開示・様式の正規化明記・
+    # paths 型検査・実走記録の是正・ダイヤモンド許容の明記・執行層テスト3件の invariant_tests 登録)。
+    status: done # 2026-08-04 supersedes 機構(案 a)+ src/ryza/execution/** 登録
 
   - id: ips-line10-draft-rights-consistency
     what: "80-ips.md L10「ユーザーのみ起票可」と定款第4条(L2=CIO 起票可)の矛盾解消"

@@ -304,6 +304,16 @@ protected_areas:
   #   暫定の担保: demo.py・runner.py・close.py の振る舞いは tests/execution/(test_demo・
   #   test_runner・test_close)と ledger 側の保護領域が押さえており、コストモデルの発効値は
   #   下の tests/execution/test_config.py(本 PR で登録)が固定する。
+  #   → **解消(2026-08-04・reminder ack-supersede-mechanism)**。受容エントリに ``supersedes``
+  #   (承継)を入れてラチェットを外し、7a56c98… の受容を承継する新エントリ(paths に
+  #   src/ryza/execution/close.py を追加)を下の acknowledged_findings に登録したうえで、
+  #   本節の統制上の結論どおり src/ryza/execution/** を登録した(次行)。上の段落は
+  #   「なぜ phase-2 で見送ったか」の判断経緯として残す。
+  #   glob 単位にした理由は fm/** ・risk/** と同じ — ファイル単位では「新しいモジュールを
+  #   足して迂回する」形が残る(demo.py の率を無視する新ブローカーアダプタ等)。
+  #   コスト(明示): 執行層の変更(ブローカー追加・約定処理の改修)に承認手続が要る。
+  - path: src/ryza/execution/**
+    area: execution_engine
   # (4) 対応するテスト3件(area: invariant_tests)。上の登録基準(= テストが実装から独立した
   #   参照を保持し、その参照を先に書き換えると以後の保護領域変更がテスト差分に現れなくなる)
   #   への適合を各行に示す。(1)〜(3)で実装側を登録したため、phase-1 の保留理由は解消している。
@@ -325,6 +335,27 @@ protected_areas:
   #   IPS 発効値の写しとして登録したのと同じ形 — 写しを先に書き換えると、保護領域になった
   #   config/execution.yaml を緩める変更が CI 差分に出なくなる。
   - path: tests/execution/test_config.py
+    area: invariant_tests
+  # ── 執行層テストの登録(2026-08-04・supersedes PR の独立役員審査「懸念」を採用)──
+  #   phase-2 は src/ryza/execution/** を保護できなかったため、demo.py・runner.py・close.py の
+  #   振る舞いは「暫定の担保」としてテスト群に委ねていた(上の (3) の段落)。本 PR で実装側を
+  #   保護登録したので、対になるテストも登録して二段手順(先にテストを無承認で弱め、後で実装
+  #   変更を審査に通す — 審査者は緑の CI を見て等価と誤認する)を塞ぐ。実装側が保護されたため
+  #   実害は限定的だが、**審査品質の担保**として登録する(登録基準への適合を各行に示す)。
+  #   コストモデルの唯一の振る舞い執行点。実装から独立した参照 = **手計算の期待値**
+  #   (スリッページ適用後の約定価格・手数料の上限クランプ)。期待値を先に書き換えれば、
+  #   config/execution.yaml の率を無視する demo.py の改変が緑のまま通る。
+  - path: tests/execution/test_demo.py
+    area: invariant_tests
+  #   「passed 注文 → ブローカー → trading.executions → ledger 記帳」の唯一の経路の回帰。
+  #   実装から独立した参照 = **原子性と帳簿分離の対照**(仕訳が失敗した約定は executions に
+  #   残らない・運営帳簿への記帳は落ちる・buy/sell 以外はブローカーへ出さず記帳もしない)。
+  #   これらを先に緩めると、約定だけ残って仕訳が落ちる改変が緑のまま通る。
+  - path: tests/execution/test_runner.py
+    area: invariant_tests
+  #   MTM/NAV 確定(保護領域 ledger への書込配線)の回帰。実装から独立した参照 = 評価損益と
+  #   NAV の手計算値。書き換えれば close.py の評価替えの誤りが検出されなくなる。
+  - path: tests/execution/test_close.py
     area: invariant_tests
   # 棚卸しの記録(2026-08-04・phase-2): 以下は **今回は対象外** と判断した。
   #   config/fm_ben.yaml・config/fm_jim.yaml … max_slots は1銘柄あたりの金額を動かすが、
@@ -396,7 +427,9 @@ approval_trailer: "Approved:"
 #
 # 運用規則:
 #   - **追記オンリー**。既存エントリの削除・書換は受容の隠蔽にあたり禁止(A-18-1 の履歴突合が
-#     効かなくなる)。誤登録は削除でなく新エントリの注記で是正する
+#     効かなくなる)。誤登録は削除でなく新エントリの注記で是正する。
+#     **同一キー(commit + paths)の重複追記も「書換」とみなし禁止**(独立役員審査 低-1 — 追記の
+#     形をとった表示メタデータの差し替えになるため。検出時は後のエントリが無効・下記参照)
 #   - 本ファイル自身が protected_areas(area: constitution)であり、エントリの追加は
 #     独立役員審査 → #承認 通知 → みなし承認の L1 手続を要する(定款第3条・第5条)
 #   - **kind**(省略時 `a18-1`)で受容の対象検査を区別する。`a18-1` = 保護領域の無承認変更
@@ -409,7 +442,43 @@ approval_trailer: "Approved:"
 #     どちらかが違えば受容は効かず従来どおり違反として表示される。保護領域を後から追加して
 #     同じコミットが別の保護パスにも触れていたと判明した場合、paths 集合が変わるため受容は
 #     自動的に外れる(将来の別の違反を巻き込まない)
+#   - **承継(supersedes)— 2026-08-04 追加・reminder ack-supersede-mechanism**。上の「保護領域を
+#     追加すると受容が自動的に外れる」挙動は、追記オンリー規則(既存 paths の書換は禁止)と
+#     組み合わさると **受容済み evil merge が触れたファイルを含む tree は以後 protected_areas に
+#     追加できない** というラチェットになる。過去の git 事故が将来の統制強化を縛るのは本末転倒
+#     なので、新エントリに次の形で旧エントリを承継させる:
+#
+#         supersedes:
+#           commit: <旧エントリと同じ 40 桁 SHA>
+#           paths: [<旧エントリの paths>]   # kind は省略時 a18-1
+#
+#     paths は **集合として照合**する(順序・重複・前後の空白は無視して正規化してから一致を見る。
+#     独立役員審査 低-2 の様式明確化 — 「逐語で」は実装より厳しい記述だった)。スカラ文字列は
+#     1文字ずつ分解されるため無効として開示する(低-3): 必ずリストで書くこと。
+#
+#     承継が成立する条件は4つすべて: ①同一コミット ②旧エントリが**自分より前に**存在
+#     ③paths が**真の拡張**(旧 ⊂ 新)④新エントリに reason がある。拡張だけを正当な理由と
+#     するのは、縮小・入替・理由なき差し替えが「受容の隠蔽」と機械的に区別できないため。
+#     条件を満たさない supersedes を持つエントリは **受容として効かない**(fail-safe: 違反は
+#     出たまま)。承継が成立した旧エントリは陳腐化注記の対象から外れるが、**承継の事実は毎回
+#     notes に出る**(誰が何を承継したかが週次報告に残る)。旧エントリは削除しない
+#     (追記オンリーは維持 — 承継は「書換の代替」であって「削除の代替」ではない)。
+#     承継が受容の範囲を広げないことの担保: 一致は拡張後も **完全一致**のままなので、実在しない
+#     違反を先回りで受容することはできない(paths を水増ししたエントリはどの違反にも当たらず
+#     「陳腐化」として鳴る)。新しい違反を覆えるのは、保護領域の追加そのものが承認を経た場合の、
+#     同一コミットの同一違反に限られる。
+#     **ダイヤモンド承継は許容**(独立役員審査 低-5): 同一の旧エントリを複数の新エントリが承継して
+#     よい(保護領域を二度に分けて追加した場合に自然に生じる)。違反に当たらない側は陳腐化として
+#     鳴るため、隠蔽には転用できない
+#   - **同一キーの重複追記は後のエントリが無効**(独立役員審査 2026-08-04 低-1)。既存エントリと
+#     同じ (commit, paths) のエントリを追記すると、索引の後勝ち上書きで報告に出る
+#     ack_reason / approval_ref =「誰の・どの承認で受容されたか」が**無開示のまま差し替わる**
+#     (下の限界注記 低-8 は「書換」を想定しており、「同一キーの追記」は禁止列挙の外だった)。
+#     A-18-1 は重複を検出したら後のエントリを受容として効かせず(fail-safe)、両エントリの
+#     approval_ref・acknowledged_on・reason を notes に開示する。**同一キーの追記も書換とみなし
+#     禁止する** — 表示メタデータの是正は、承継(paths が変わる場合)か新規注記で行うこと
 #   - 一致する違反が無くなったエントリ(改番・登録漏れ)は報告 notes に「陳腐化」として出る
+#     (上の承継が成立した旧エントリだけが例外で、代わりに承継の注記が毎回出る)
 #   - commit は **40 桁 hex の完全 SHA** のみ有効。短縮 SHA・欠落エントリは索引に入れず
 #     「無効」として notes に開示する(黙って落とすと受容できたと誤認するため)
 #   - **限界と担保(独立役員審査 2026-08-04 低-8)**: reason / approval_ref の**書換**は
@@ -437,6 +506,61 @@ acknowledged_findings:
       是正できない。
     approval_ref: https://github.com/klonyapin/ryza/pull/56
     acknowledged_on: "2026-08-03"
+  # 上のエントリの承継(2026-08-04・reminder ack-supersede-mechanism)。同じ evil merge が
+  # `git diff-tree --cc` で src/ryza/execution/close.py にも触れており、本 PR で
+  # src/ryza/execution/** を protected_areas に登録した結果、違反のパス集合が3件になった。
+  # 旧エントリは削除も書換もせず(追記オンリー)、supersedes で承継する。受容の実体
+  # (是正不能な過去の evil merge であること・承認記録 PR #56)は変わっていない。
+  - commit: 7a56c98fb624f2c72288c73b47018cbf63c253a1
+    paths:
+      - migrations/0016_nav_daily.sql
+      - src/ryza/execution/close.py
+      - src/ryza/risk/daily.py
+    supersedes:
+      commit: 7a56c98fb624f2c72288c73b47018cbf63c253a1
+      paths:
+        - migrations/0016_nav_daily.sql
+        - src/ryza/risk/daily.py
+    reason: >-
+      2026-08-03 受容の承継。受容理由は旧エントリと同一(origin/main 統合時のコンフリクト解消
+      差分に Approved トレーラが無く、親 PR #56 のマージにもトレーラが無いため PR 承継でも
+      カバーできない。git 履歴の書き換えなしに是正できない)。パス集合が増えたのは
+      src/ryza/execution/** を protected_areas に登録したためであり、受容の範囲を広げる意図では
+      なく、同じ1件の違反が新しい保護領域から見て何に触れていたかの追認である。
+    approval_ref: https://github.com/klonyapin/ryza/pull/56
+    acknowledged_on: "2026-08-04"
+  # 役員室チャットの直 push(2026-08-04 追加・設計リード指示)。**保護領域の遡及検出**の受容。
+  # 判断メモ(paths の実測・2026-08-04):
+  #   `git show --stat 392bb7b` が触れたのは3ファイル — dashboard/app.py・
+  #   src/ryza/governance/boardroom.py・tests/governance/test_boardroom.py。
+  #   現在の protected_areas に **一致するのは boardroom.py のみ**(`src/ryza/governance/**`
+  #   = governance_engine)。glob 照合で確認済み:
+  #     - dashboard/app.py … dashboard 配下の登録は dashboard/Dockerfile のみ(稼働イメージ定義)。
+  #       app.py は未登録であり一致しない
+  #     - tests/governance/test_boardroom.py … invariant_tests の登録に無い(phase-1 の棚卸しは
+  #       tests/governance/test_notices.py を「振る舞い回帰であり実装から独立した参照を持たない」
+  #       として対象外にしており、本ファイルも同じ分類)
+  #   よって paths は boardroom.py 単独。将来この2ファイルが保護登録されたら受容キーが変わるため、
+  #   そのときは supersedes で承継すること(上の 7a56c98 と同じ形)。
+  # A-18-4(全変更 PR 化)側の確認: 本コミットは first-parent 上の**直 push**(親1)だが、
+  #   A-18-4 の基準コミット 4c7f6e9(2026-08-03 16:52:33 JST)より **前**(16:40:03 JST)に
+  #   あるため `rev-list since..HEAD` の対象外で、A-18-4 としては鳴らない(baseline 制で解消済み)。
+  #   したがって受容は a18-1 の1エントリで足りる。なお check_direct_pushes には受容機構が無く、
+  #   基準コミット以降の直 push は受容できない(全 PR 化ルールに例外なし)。
+  - commit: 392bb7b01435969a32d2b2fff85f4bbea1f8e991
+    paths:
+      - src/ryza/governance/boardroom.py
+    reason: >-
+      main への直 push(2026-08-03 16:40 JST)で src/ryza/governance/boardroom.py を新規追加した。
+      当時は全変更 PR 化ルールの基準コミット(4c7f6e9・同日 16:52 JST)より前であり、
+      src/ryza/governance/** の保護登録(PR #108・2026-08-04)よりも前だったため、押した時点では
+      承認トレーラを要求する規則も PR 経由の義務も存在しなかった。両制度の導入により**遡及的に**
+      無承認変更として検出されている(規則違反ではなく規則導入前の履歴)。直 push は非マージ
+      コミットであり PR 承継では永遠に解消されず、git 履歴の書き換えなしに是正できない。
+      実体面の担保: 本モジュールはその後の会議形式化とあわせて独立役員審査を受け(条件付き承認・
+      C-1〜C-10 は是正済み)、意見書が approval_ref のファイルに残っている。
+    approval_ref: docs/reviews/boardroom-meeting-independent-review.md
+    acknowledged_on: "2026-08-04"
 
 # 定款第6条: 統制テーブル(J-SOX RCM 様式の応用)。A-18 監査ジョブが verification を実行する。
 # enforcement: schema(DB 制約)| gate(実行時ゲート)| ci(テスト・lint)| audit(監査ジョブ)| declaration(宣言のみ)

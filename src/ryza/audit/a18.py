@@ -142,6 +142,24 @@ A-18-1 は一致した違反を ``violations`` から外す代わりに ``acknow
 別フィールドとして **必ず表示** する(黙って消さない)。一致は commit と paths の完全一致を要求し、
 一致しない受容エントリは notes に「陳腐化」として開示する。
 
+**受容の承継(supersedes — reminder ack-supersede-mechanism)**: 受容キーが完全一致である以上、
+保護領域を後から追加して同じコミットが新しい保護パスにも触れていたと判明すると受容は自動的に
+外れる。受容記録は追記オンリー(既存エントリの書換は隠蔽)なので、これは「受容済み evil merge が
+触れたファイルを含む tree は以後 protected_areas に追加できない」というラチェットになっていた
+(過去の git 事故が将来の統制強化を縛る)。是正として、新エントリは
+``supersedes: {commit: <40桁 SHA>, paths: [...]}`` で旧エントリを承継できる。承継が成立する条件は
+**同一コミット・旧エントリが自分より前に存在・パス集合が真に拡張・理由あり** の4つで、
+拡張(保護領域の追加による)だけを正当な理由とする —— 縮小・入替・理由なしの差し替えは受容の
+隠蔽と区別できないため却下し、そのエントリは受容として効かせない(fail-safe)。承継された旧
+エントリは陳腐化注記の対象外になるが、承継の事実は毎回 notes に出す(履歴が残る)。
+同一の旧エントリを複数の新エントリが承継する形(ダイヤモンド)は許容する —— 違反に当たらない
+側が陳腐化として鳴るため隠蔽に転用できない(独立役員審査 2026-08-04 低-5)。
+
+**同一キーの重複追記**(独立役員審査 2026-08-04 低-1): 既存エントリと同じ (commit, paths) の
+エントリを追記すると、索引の後勝ち上書きで報告の ack_reason / approval_ref =「誰の・どの承認で
+受容されたか」が**無開示のまま差し替わる**(追記オンリー規則の禁止列挙は削除・書換のみだった)。
+後のエントリを無効とし(fail-safe)、両エントリの承認記録・受容日・理由を notes に開示する。
+
 **evil merge 対策**: マージコミット自身のコンフリクト解消差分は ``git diff-tree --cc``
 (全親と異なるファイルのみ列挙)で検査する。保護パスに触れる場合は **マージコミット自身の**
 ``Approved:`` トレーラを必須とし、PR マージ件名だけでは承認と見なさない(レビュー承認は
@@ -1206,23 +1224,108 @@ def _ack_kind(entry: dict[str, Any]) -> str:
 
 
 def _ack_key(commit: str, files: list[str] | tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
-    """受容記録の一致キー: (完全 SHA, 保護パスの正規化集合)。順序差では外れない。"""
+    """受容記録の一致キー: (完全 SHA, 保護パスの正規化集合)。順序差・重複では外れない。"""
     return commit.strip().lower(), tuple(sorted({str(f).strip() for f in files}))
+
+
+def _one_line(text: Any, limit: int = 60) -> str:
+    """注記に埋める1行要約(改行を潰し長すぎる本文を切る)。"""
+    s = " ".join(str(text or "").split())
+    return (s[:limit] + "…") if len(s) > limit else (s or "(なし)")
+
+
+def _paths_are_list(paths: Any) -> bool:
+    """``paths`` がパスの列か(スカラ文字列を弾く)。
+
+    文字列は反復可能なので、``paths: docs/x.md`` と書くと1文字ずつ分解された無意味なキーに
+    なる(独立役員審査 2026-08-04 低-3)。結果は fail-safe(受容が効かない)だが開示文言が
+    不可解になるため、型として明示的に拒否する。
+    """
+    return isinstance(paths, (list, tuple, set))
+
+
+def _supersede_target_key(
+    raw: Any,
+) -> tuple[tuple[str, tuple[str, ...]] | None, str]:
+    """``supersedes`` 宣言を旧エントリの一致キーへ変換する。
+
+    戻り値は ``(キー, "")`` か ``(None, 無効の理由)``。宣言は旧エントリと同じ形
+    (``commit`` + ``paths``、``kind`` は省略時 a18-1)で書く —— 一致キーが
+    (commit, paths) である以上、commit だけでは同一コミットの複数エントリを指し分けられない。
+    """
+    if not isinstance(raw, dict):
+        return None, "commit / paths を持つマップで書く(スカラでは旧エントリを一意に指せない)"
+    kind = str(raw.get("kind") or ACK_KIND_PROTECTED).strip().lower()
+    if kind != ACK_KIND_PROTECTED:
+        return None, f"承継できない kind を指している(A-18-1 の受容のみ承継できる): {kind}"
+    commit = str(raw.get("commit", "")).strip()
+    paths = raw.get("paths") or []
+    if not commit or not paths:
+        return None, "commit / paths のいずれかが欠落"
+    if not _paths_are_list(paths):
+        return None, "paths はリストであること(スカラ文字列は1文字ずつ分解され旧キーを指せない)"
+    if not _FULL_SHA_RE.match(commit):
+        return None, f"commit が 40 桁 hex の完全 SHA でない: {commit}"
+    return _ack_key(commit, paths), ""
+
+
+def _supersede_is_legitimate(
+    key: tuple[str, tuple[str, ...]],
+    target: tuple[str, tuple[str, ...]],
+    earlier: set[tuple[str, tuple[str, ...]]],
+    entry: dict[str, Any],
+) -> str:
+    """承継が正当か検査する(正当なら空文字、そうでなければ却下理由を返す)。
+
+    正当な承継理由は **保護領域の追加によるパス集合の拡張だけ** である。同じコミットの
+    同じ違反が、保護パスが増えたことで別のキーになった —— という事実の追認に限る。
+    縮小・別コミットへの差し替え・理由なしの置換は「受容の隠蔽」と区別できないため却下し、
+    旧エントリは通常どおり陳腐化として開示する(追記オンリー規則の趣旨を保つ)。
+    """
+    if target not in earlier:
+        return (
+            "承継先の受容エントリが(自エントリより前に)存在しない"
+            f": {target[0][:12]}({', '.join(target[1])})"
+        )
+    if target[0] != key[0]:
+        return (
+            "承継は同一コミットの受容に限る(別コミットの受容の差し替えは隠蔽と区別できない)"
+            f": {target[0][:12]} → {key[0][:12]}"
+        )
+    old, new = set(target[1]), set(key[1])
+    if not new > old:
+        return (
+            "パス集合が拡張になっていない(保護領域の追加による拡張のみ承継の理由になる。"
+            "縮小・入替は受容の隠蔽にあたる): "
+            f"{sorted(old)} → {sorted(new)}"
+        )
+    if not str(entry.get("reason", "")).strip():
+        return "承継するエントリに reason が無い(理由なき差し替えは承継として扱わない)"
+    return ""
 
 
 def acknowledged_index(
     gov: dict[str, Any],
-) -> tuple[dict[tuple[str, tuple[str, ...]], dict[str, Any]], list[str]]:
-    """``acknowledged_findings`` を(一致キー → エントリ の索引, 無効エントリの注記)に変換する。
+) -> tuple[
+    dict[tuple[str, tuple[str, ...]], dict[str, Any]],
+    list[str],
+    set[tuple[str, tuple[str, ...]]],
+]:
+    """``acknowledged_findings`` を(一致キー → エントリ の索引, 注記, 承継された旧キー)に変換する。
 
     無効(commit / paths 欠落・40 桁 hex でない SHA)なエントリは索引に入れず、注記で開示する。
     黙って落とすと運用者が「受容できた」と誤認する(独立役員審査 2026-08-04 低-7)。
 
     ``kind: a18-8`` のエントリは A-18-8 の受容なので本索引には入れない
     (:func:`acknowledged_reviewed_index` が扱う)。
+
+    第3の戻り値は ``supersedes`` によって承継された旧エントリのキー集合で、
+    :func:`partition_acknowledged` の陳腐化判定から除外される(承継の詳細は下の節を参照)。
     """
     index: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
     notes: list[str] = []
+    superseded: set[tuple[str, tuple[str, ...]]] = set()
+    earlier: set[tuple[str, tuple[str, ...]]] = set()
     for entry in gov.get("acknowledged_findings") or []:
         if _ack_kind(entry) != ACK_KIND_PROTECTED:
             continue
@@ -1235,14 +1338,59 @@ def acknowledged_index(
                 f"{commit or '(commit なし)'}"
             )
             continue
+        if not _paths_are_list(paths):
+            # スカラ文字列は1文字ずつ分解され不可解なキーになる(独立役員審査 低-3)。
+            notes.append(
+                "acknowledged_findings のエントリが無効(paths はリストであること — "
+                f"スカラ文字列は1文字ずつ分解される): {commit[:12]}"
+            )
+            continue
         if not _FULL_SHA_RE.match(commit):
             notes.append(
                 f"acknowledged_findings のエントリが無効(40 桁 hex の完全 SHA が必要 — "
                 f"短縮 SHA は曖昧なため受け付けない): {commit}"
             )
             continue
-        index[_ack_key(commit, paths)] = entry
-    return index, notes
+        key = _ack_key(commit, paths)
+        if key in index:
+            # 同一キーの重複追記(独立役員審査 低-1)。後勝ち上書きを許すと、報告に出る
+            # ack_reason / approval_ref =「誰の・どの承認で受容されたか」が**追記だけで**
+            # 無開示のまま差し替わる(追記オンリー規則の禁止列挙は削除・書換のみだった)。
+            # 後のエントリを無効にし(fail-safe)、両者の内容を開示する。
+            first = index[key]
+            notes.append(
+                "acknowledged_findings に同一キーの重複エントリ(後のエントリは無効 — "
+                "受容の表示メタデータの無開示な差し替えを防ぐ): "
+                f"{commit[:12]}({', '.join(key[1])}) / "
+                f"有効(先): approval_ref={first.get('approval_ref') or '(なし)'}・"
+                f"acknowledged_on={first.get('acknowledged_on') or '(なし)'}・"
+                f"reason={_one_line(first.get('reason'))} / "
+                f"無効(後): approval_ref={entry.get('approval_ref') or '(なし)'}・"
+                f"acknowledged_on={entry.get('acknowledged_on') or '(なし)'}・"
+                f"reason={_one_line(entry.get('reason'))}"
+            )
+            continue
+        if entry.get("supersedes") is not None:
+            target, why = _supersede_target_key(entry["supersedes"])
+            if target is not None:
+                why = _supersede_is_legitimate(key, target, earlier, entry)
+            if why:
+                # 不当な承継宣言を持つエントリは **受容として効かせない**(fail-safe)。
+                # 効かせてしまうと、承継を口実にした差し替えが違反を静かに覆う。
+                notes.append(
+                    f"acknowledged_findings の supersedes が無効({why}): "
+                    f"{commit[:12]} — 承継は成立せず、本エントリは受容として効かない"
+                )
+                continue
+            superseded.add(target)
+            notes.append(
+                f"受容の承継: {target[0][:12]} の受容(パス {len(target[1])} 件)を "
+                f"同コミットの新エントリ(パス {len(key[1])} 件)が承継 — 追加された保護パス: "
+                f"{', '.join(sorted(set(key[1]) - set(target[1])))}"
+            )
+        earlier.add(key)
+        index[key] = entry
+    return index, notes, superseded
 
 
 def partition_acknowledged(
@@ -1253,8 +1401,11 @@ def partition_acknowledged(
     一致条件は **完全 SHA と保護パス集合の完全一致**。片方でも違えば受容は効かず、違反として
     残る(将来の別の違反や、保護領域追加でパス集合が変わったケースを巻き込まない)。
     受容済みは捨てずに返し、報告側で必ず可視化する(黙って消さない)。
+
+    保護領域の追加でパス集合が変わった旧エントリは、新エントリの ``supersedes`` によって
+    承継されていれば陳腐化注記の対象から外れる(承継そのものは注記に必ず出る)。
     """
-    index, notes = acknowledged_index(gov)
+    index, notes, superseded = acknowledged_index(gov)
     matched: set[tuple[str, tuple[str, ...]]] = set()
     unacknowledged: list[dict[str, Any]] = []
     acknowledged: list[dict[str, Any]] = []
@@ -1277,7 +1428,7 @@ def partition_acknowledged(
         f"acknowledged_findings のエントリが一致する違反を持たない(陳腐化・SHA/パスの誤り"
         f"の可能性): {key[0][:12]}({', '.join(key[1])})"
         for key in index
-        if key not in matched
+        if key not in matched and key not in superseded
     ]
     return unacknowledged, acknowledged, notes
 
