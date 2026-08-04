@@ -529,6 +529,38 @@ acknowledged_findings:
       なく、同じ1件の違反が新しい保護領域から見て何に触れていたかの追認である。
     approval_ref: https://github.com/klonyapin/ryza/pull/56
     acknowledged_on: "2026-08-04"
+  # 役員室チャットの直 push(2026-08-04 追加・設計リード指示)。**保護領域の遡及検出**の受容。
+  # 判断メモ(paths の実測・2026-08-04):
+  #   `git show --stat 392bb7b` が触れたのは3ファイル — dashboard/app.py・
+  #   src/ryza/governance/boardroom.py・tests/governance/test_boardroom.py。
+  #   現在の protected_areas に **一致するのは boardroom.py のみ**(`src/ryza/governance/**`
+  #   = governance_engine)。glob 照合で確認済み:
+  #     - dashboard/app.py … dashboard 配下の登録は dashboard/Dockerfile のみ(稼働イメージ定義)。
+  #       app.py は未登録であり一致しない
+  #     - tests/governance/test_boardroom.py … invariant_tests の登録に無い(phase-1 の棚卸しは
+  #       tests/governance/test_notices.py を「振る舞い回帰であり実装から独立した参照を持たない」
+  #       として対象外にしており、本ファイルも同じ分類)
+  #   よって paths は boardroom.py 単独。将来この2ファイルが保護登録されたら受容キーが変わるため、
+  #   そのときは supersedes で承継すること(上の 7a56c98 と同じ形)。
+  # A-18-4(全変更 PR 化)側の確認: 本コミットは first-parent 上の**直 push**(親1)だが、
+  #   A-18-4 の基準コミット 4c7f6e9(2026-08-03 16:52:33 JST)より **前**(16:40:03 JST)に
+  #   あるため `rev-list since..HEAD` の対象外で、A-18-4 としては鳴らない(baseline 制で解消済み)。
+  #   したがって受容は a18-1 の1エントリで足りる。なお check_direct_pushes には受容機構が無く、
+  #   基準コミット以降の直 push は受容できない(全 PR 化ルールに例外なし)。
+  - commit: 392bb7b01435969a32d2b2fff85f4bbea1f8e991
+    paths:
+      - src/ryza/governance/boardroom.py
+    reason: >-
+      main への直 push(2026-08-03 16:40 JST)で src/ryza/governance/boardroom.py を新規追加した。
+      当時は全変更 PR 化ルールの基準コミット(4c7f6e9・同日 16:52 JST)より前であり、
+      src/ryza/governance/** の保護登録(PR #108・2026-08-04)よりも前だったため、押した時点では
+      承認トレーラを要求する規則も PR 経由の義務も存在しなかった。両制度の導入により**遡及的に**
+      無承認変更として検出されている(規則違反ではなく規則導入前の履歴)。直 push は非マージ
+      コミットであり PR 承継では永遠に解消されず、git 履歴の書き換えなしに是正できない。
+      実体面の担保: 本モジュールはその後の会議形式化とあわせて独立役員審査を受け(条件付き承認・
+      C-1〜C-10 は是正済み)、意見書が approval_ref のファイルに残っている。
+    approval_ref: docs/reviews/boardroom-meeting-independent-review.md
+    acknowledged_on: "2026-08-04"
 
 # 定款第6条: 統制テーブル(J-SOX RCM 様式の応用)。A-18 監査ジョブが verification を実行する。
 # enforcement: schema(DB 制約)| gate(実行時ゲート)| ci(テスト・lint)| audit(監査ジョブ)| declaration(宣言のみ)
