@@ -427,6 +427,55 @@ def test_g6_new_short_at_or_above_floor_passes(ips, mandates):
     assert result.verdict == "pass"
 
 
+def test_g6_flip_sell_below_floor_blocks(ips, mandates):
+    """フリップ売り(保有超の sell → 実質ネットショート)も担保拘束扱いで評価する
+    (独立役員審査 2026-08-04 O-1/R-2)。
+
+    保有 100 に対し sell 300 → post_pod_qty = −200。side 文字列だけで分岐すると
+    売却代金全額を自由現金と数えて素通しし、同一建玉の side="short" と判定が
+    食い違う(IPS ショート許可のため G-9 はこの経路を止めない — 抜け穴は live)。
+    """
+    nav = Decimal(10_000_000)
+    floor = _dec(ips.guardrails.cash_nav_min) * nav
+    positions = (PositionState("loose", 1, "equity_jp", Decimal(100), Decimal(1000)),)
+    proposal = jp_stock_proposal(fm="loose", side="sell", qty=Decimal(300))
+    result = evaluate(
+        proposal,
+        make_state(nav=nav, cash=floor - Decimal(1), positions=positions),
+        ips,
+        {**mandates, "loose": _loose_short_mandate()},
+    )
+    assert result.verdict == "block"
+    assert "G-6" in rules_of(result)
+
+
+def test_g6_flip_sell_at_or_above_floor_passes(ips, mandates):
+    """現金が下限以上ならフリップ売り自体は G-6 で殺さない(side="short" と同じ扱い)。"""
+    nav = Decimal(10_000_000)
+    floor = _dec(ips.guardrails.cash_nav_min) * nav
+    positions = (PositionState("loose", 1, "equity_jp", Decimal(100), Decimal(1000)),)
+    proposal = jp_stock_proposal(fm="loose", side="sell", qty=Decimal(300))
+    result = evaluate(
+        proposal,
+        make_state(nav=nav, cash=floor, positions=positions),
+        ips,
+        {**mandates, "loose": _loose_short_mandate()},
+    )
+    assert result.verdict == "pass"
+
+
+def test_g6_full_liquidation_sell_passes_below_floor(ips, mandates):
+    """保有全量ちょうどの sell(post_pod_qty = 0)は従来どおり現金増として素通し(境界回帰)。"""
+    positions = (PositionState("loose", 1, "equity_jp", Decimal(100), Decimal(1000)),)
+    result = evaluate(
+        jp_stock_proposal(fm="loose", side="sell", qty=Decimal(100)),
+        make_state(cash=Decimal(400_000), positions=positions),
+        ips,
+        {**mandates, "loose": _loose_short_mandate()},
+    )
+    assert result.verdict == "pass"
+
+
 def test_g6_cover_evaluated_as_cash_decrease(ips, mandates):
     """cover(買い戻し)は現金減 → 従来どおり通常評価(回帰)。"""
     nav = Decimal(10_000_000)

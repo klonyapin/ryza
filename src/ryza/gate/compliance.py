@@ -488,28 +488,34 @@ def _g6_cash_floor(ctx: _Ctx) -> list[Reason]:
     — ショート自体は殺さず、現金が下限未満のときにだけ止める。
     sell(ロング解消の売り・現金増)と cover(買い戻し・現金減)は従来どおり。
 
-    **既知の非対称(フリップ売り・独立役員審査 2026-08-04 O-1)**: ``side == "sell"``
+    **フリップ売りの対称化(独立役員審査 2026-08-04 O-1/R-2)**: ``side == "sell"``
     で保有ロング数量を超える qty を出すと約定後は実質ネットショート
-    (``post_pod_qty < 0``)になるが、本関数は side 文字列でしか分岐しないため
-    売却代金全額を自由現金と数えて早期リターンする(担保拘束を見ない)。
-    現状このフリップは G-9 が ``side == "short" or ctx.post_pod_qty < 0``
-    (:func:`_g9_short`)で全て block するため無防備な経路は存在しないが、
-    ショート解禁(G-9 緩和)の際に G-6 だけこの非対称が残ると穴になる。
-    完全な対称化(``or ctx.post_pod_qty < 0`` で担保拘束扱い)は
-    g6-short-margin-model のスコープに含めて G-9 緩和と同時に実装する。
+    (``post_pod_qty < 0``)になる。side 文字列だけで分岐すると、このフリップは
+    売却代金全額を自由現金と数えて早期リターンし(担保拘束を見ない)、同一の
+    約定後建玉を ``side == "short"`` で出した場合と判定が食い違う。IPS はショート
+    許可(``short_selling.allowed: true``)・stan マンデートも ``short: true`` の
+    ため G-9 はこの経路を止めず、抜け穴は現に有効だった。よってショート性の
+    判定は G-9 と同じ ``side == "short" or ctx.post_pod_qty < 0``(約定後の建玉
+    方向)で行い、該当時は ``post_cash = min(cash − delta×price, cash)`` の
+    fail-closed 近似で評価する — **代金の増加は担保拘束として数えず、現金の
+    減少(部分カバー等・約定後もネットショートが残る買い戻し)はそのまま
+    数える**。単純に ``post_cash = cash`` とすると部分カバーの現金流出を
+    無視して fail-open になるため min を取る。ロング解消分の代金も数えない
+    過保守側の近似だが、担保モデル不在の間は安全側に倒す(F-5 の方針と同一)。
 
     TODO(g6-short-margin-model / ops/reminders.yaml):
       担保モデル導入時に精緻化する(必要担保・維持証拠金・クローズ売りの
-      avg_cost 考慮・フリップ売りの対称化など)。
+      avg_cost 考慮・フリップ売りのロング解消分代金の算入など)。
     """
     assert ctx.state.nav is not None and ctx.state.cash is not None
-    # ショートの売却代金は担保拘束 → 自由現金には加算しない(fail-closed 近似)。
-    if ctx.proposal.side == "short":
-        post_cash = ctx.state.cash
-    else:
-        post_cash = ctx.state.cash - ctx.delta * ctx.price
-        if post_cash >= ctx.state.cash:  # 売り等で現金が増える注文は現金下限を悪化させない
-            return []
+    post_cash = ctx.state.cash - ctx.delta * ctx.price
+    # ショート性は約定後の建玉方向で判定(G-9 と同じ基準 — フリップ売りも捕捉)。
+    if ctx.proposal.side == "short" or ctx.post_pod_qty < 0:
+        # 売却代金は担保拘束 → 自由現金の増加とは数えない(fail-closed 近似)。
+        # 現金減(部分カバー等)はそのまま数える — cash に丸めると fail-open になる。
+        post_cash = min(post_cash, ctx.state.cash)
+    elif post_cash >= ctx.state.cash:  # 売り等で現金が増える注文は現金下限を悪化させない
+        return []
     floor = _dec(ctx.ips.guardrails.cash_nav_min) * ctx.state.nav
     if post_cash < floor:
         return [
