@@ -49,9 +49,36 @@ PR 番号だけで発効させる簡易形(参照・種別・文面を ``gh api`
 これにより監査 A-18-8 が「トレーラの ``reviewed=<sha>``」と「承認記録の ``reviewed_sha``」を
 突合できる —— **別経路で書かれた2つの申告**なので、片方だけを書き換えた偽装は不一致で出る。
 
-**残る限界**: どちらの値も発効を起票した側が書く。審査エージェント自身の署名ではないため、
-起票者が両方に同じ嘘を書けば一致する。``--review`` の実在検査もリポジトリ内パス形式に
-限られ、**不在でも拒否はしない**(過去の審査を遡って登録する経路を塞がないため — 警告のみ)。
+**審査記録からの採用(2026-08-04・reminder ``reviewed-sha-from-review-agent``)**: ``--review``
+がリポジトリ内の意見書を指し、そのファイルが front matter(:mod:`ryza.reviews`)で
+``reviewed_sha`` を宣言している場合、``reviewed_sha`` は**審査側の記録を採る**。起票者が
+``--reviewed-sha`` で別の値を渡していれば **発効を止める**(fail-safe)—— 起票者の申告と
+審査側の記録が食い違う発効は、どちらが正しいにせよ人が確認すべき事象であり、片方を黙って
+採ると「どちらの値で発効したのか」が事後に判別できなくなる。front matter を持たない旧様式の
+意見書では従来どおり(起票者の申告 / PR の head SHA)に落ちる。
+
+**この検査を writer(:func:`record_deemed_approval`)ではなく CLI に置く理由**: 意見書は
+リポジトリ内のファイルであり、読めるのは作業ツリーを持つ実行だけである。writer は Bot・
+ジョブなど**チェックアウトを前提できない経路**からも呼ばれるため、そこで意見書の実在を
+発効条件にすると、リポジトリを持たない正当な経路が一律に落ちる(fail-closed の副作用が
+統制の意図を超える)。事後の観測は監査側(A-18-8 の ``from_review_artifact``)が担う。
+
+**発効を中止する条件**(いずれも DB へ何も書かない・exit 1。独立役員審査 2026-08-04):
+
+- 起票者の ``--reviewed-sha`` が審査記録と食い違う(:class:`ReviewedShaConflictError`)
+- 審査記録の判定が ``reject`` / ``request_changes``(:class:`ReviewVerdictBlocksError` — C-1。
+  否認された審査を「独立役員審査」として ``#承認`` に掲示させない。強行経路は無い)
+- ``--kind pr`` で審査参照がリポジトリ内に実在しない(:class:`MissingReviewArtifactError`
+  — C-2(c)。リポジトリ外の審査・遡及登録は ``--review-missing-ok`` の明示で通し、
+  その事実を ``meta.runs`` に残す)
+- 参照がリポジトリ外へ出る・symlink 経由・front matter が壊れている
+  (:class:`ryza.reviews.ReviewArtifactError` — C-2/C-6/C-7)
+
+**残る限界**: 意見書はリポジトリ内の平文であり審査エージェントの署名は無い。起票者が
+front matter を書き換える・消す・front matter の無いファイルを ``--review`` に指す経路は
+残る(いずれも意見書そのものの改変であり diff に残る)。本配線が足すのは「食い違えば
+止まる」ことと、A-18-8 が**審査記録に由来する ``reviewed_sha`` の割合**を毎週開示すること
+(由来のない申告が緑に埋もれない)である。
 
 **この CLI を叩き忘れると通知なき発効になる**。自動起票(PR イベント駆動)は未実装で
 (ops/reminders.yaml ``deemed-auto-announce``)、叩き忘れは監査 A-18-7(保護領域 PR の
@@ -145,6 +172,38 @@ class NotVetoableError(ValueError):
 
     否認は「発効している決定を止める」操作であり、却下・質問には適用できない。
     却下を否認可能にすると、現決定を読んで発効を止める判定が fail-open で外れる。
+    """
+
+
+class ReviewedShaConflictError(ValueError):
+    """起票者の ``--reviewed-sha`` が審査記録(意見書の front matter)と食い違う。
+
+    **なぜ発効を止めるか**(fail-safe): 0029 + A-18-8 の突合は「起票者が書いた2つの値」の
+    比較でしかなく、同じ嘘を両方に書けば通る。審査側が独立に書いた ``reviewed_sha`` が
+    手元にある場面は、その申告性を初めて外から検証できる唯一の地点である。ここで起票者の
+    値を黙って採る(または審査側の値へ黙って寄せる)と、食い違いの事実がどこにも残らない。
+    """
+
+
+class ReviewVerdictBlocksError(ValueError):
+    """審査記録の ``verdict`` が発効を許さない値(``reject`` / ``request_changes``)。
+
+    **なぜ中止か**(独立役員審査 2026-08-04 C-1): 旧実装は判定を読んだうえで捨て、通知に
+    「独立役員審査: <その意見書>」を掲示して発効していた。これは**本実装が新たに作った
+    偽の保証**である —— 変更前はシステムが意見書の中身を読んでいなかったので、否認を見て
+    無視するという事態自体が存在しなかった。48h 異議期間に代表が見る唯一の成果物が通知で
+    ある以上、否認された審査を裏付けとして掲示するのは定款第3条・第5条が定める「審査を
+    前置する」手続の逆転にあたる。**強行フラグは作らない** —— 是正して意見書を更新するのが
+    正規の経路であり、抜け道を用意すればこの検査は儀式になる。
+    """
+
+
+class MissingReviewArtifactError(ValueError):
+    """``--kind pr`` の発効で審査参照がリポジトリ内に実在しない(審査 C-2(c))。
+
+    警告のままにすると ``--review docs/reviews/存在しない.md`` が審査の代用になる。
+    リポジトリ外の審査・遡及登録は ``--review-missing-ok`` の明示で通し、その事実を
+    ``meta.runs`` に残す。
     """
 
 
@@ -310,13 +369,16 @@ def missing_review_ref_warning(
 ) -> str | None:
     """``review_ref`` がリポジトリ内パス形式なのに実在しないなら警告文を返す。
 
-    **拒否ではなく警告にする理由**: 審査意見書がリポジトリ外(Discord スレッド・Issue)に
-    ある運用と、過去に完了した審査を後から遡って登録する運用(``docs/reviews`` に無い・
-    別ブランチにしか無いファイルを指す)を塞いでしまうため。実在検査の目的は「``--review 嘘``
-    をタイプミスや出まかせのまま通さない」ことであって、発効そのものの可否判定ではない。
+    **これは警告であって可否判定ではない**。``--kind pr`` の発効では
+    :func:`require_existing_review` が同じ事実を**中止**として扱う(審査 C-2(c))が、
+    それ以外の kind(戦略昇格・IPS 改訂など独立役員審査が前置されない手続)と
+    ``--review-missing-ok`` を付けた遡及登録では、従来どおり警告にとどめる。
 
-    URL(``http://`` / ``https://``)や ``discord://`` 等のスキーム付き参照は対象外
-    —— ネットワーク越しの実在確認は CLI の責務にしない(gh 以外の到達手段を増やさない)。
+    参照の解決は :func:`ryza.reviews.resolve_review_path` に委ねる。旧実装は
+    ``(root / ref).exists()`` で判定していたため、``docs/reviews/../reviews/x.md`` のような
+    脱出表記を**実在と見なして無警告**にする一方、採用側 (:func:`resolve_reviewed_sha`) は
+    同じ参照を「審査記録なし」に落としていた —— 判定が二重定義で食い違い、迂回がどの層からも
+    見えなかった(審査 C-2)。両者を同じ解決関数に揃える。
 
     **リポジトリルートが決められない実行では検査そのものを行わない**(独立役員審査 SHA-6):
     ``__file__`` からの相対位置はソースチェックアウト前提であり、パッケージとして設置された
@@ -324,18 +386,157 @@ def missing_review_ref_warning(
     諦めて ``None`` を返す —— 誤警告は「警告が出ていても実在する」学習を生み、警告そのものを
     無意味にするので、検査できないときは黙るほうが安全である。
     """
-    if not review_ref:
-        return None
-    ref = review_ref.strip()
-    if "://" in ref or ref.startswith("#"):
-        return None
-    root = repo_root or _repo_root()
-    if root is None or (root / ref).exists():
+    path = _review_path(review_ref, repo_root)
+    if path is None or path.is_file():
         return None
     return (
-        f"--review の参照 '{ref}' がリポジトリ内に見つからない"
-        "(パス形式に見えるが実在しない — 発効は妨げないが、審査意見書の所在を確認すること)"
+        f"--review の参照 '{review_ref.strip()}' がリポジトリ内に見つからない"
+        "(パス形式に見えるが実在しない — 審査意見書の所在を確認すること)"
     )
+
+
+def _review_path(review_ref: str | None, repo_root: Path | None) -> Path | None:
+    """``--review`` の解決結果(リポジトリ外参照・ルート不明なら ``None``)。
+
+    :class:`ryza.reviews.ReviewArtifactError`(脱出表記・symlink・絶対パス)はそのまま
+    送出する —— 呼び出し側は中止する。
+    """
+    from ryza.reviews import resolve_review_path
+
+    if not review_ref:
+        return None
+    return resolve_review_path(review_ref, repo_root=repo_root or _repo_root())
+
+
+def require_existing_review(
+    review_ref: str | None,
+    kind: str | None,
+    *,
+    missing_ok: bool = False,
+    repo_root: Path | None = None,
+) -> None:
+    """``--kind pr`` で審査参照が実在しないなら発効を中止する(審査 C-2(c))。
+
+    **なぜ pr だけ中止か**: 保護領域 PR のみなし承認は独立役員審査を前置する手続であり
+    (定款第5条・07-development §3-1)、意見書はリポジトリ内 ``docs/reviews`` に保存する
+    義務がある。その手続で「パス形式に見えるが実在しない参照」を警告のまま通すと、
+    ``--review docs/reviews/存在しない.md`` が審査の代用になる —— 警告は stderr に流れて
+    消えるので、実質的に無検査と変わらない。
+
+    **遡late な登録の口は塞がない**: リポジトリ外(Discord スレッド・Issue)の審査や、
+    別ブランチにしか無い意見書を指す運用は ``--review-missing-ok`` で明示する。明示は
+    ``meta.runs`` の params に残るため、「どの発効が実在検査を外したか」が事後に数えられる
+    (黙って通すのとは統制上まったく違う)。
+
+    Raises:
+        ReviewArtifactError: 参照がリポジトリ外へ出る・symlink・絶対パス
+        MissingReviewArtifactError: ``kind`` が pr で参照が実在せず ``missing_ok`` でない
+    """
+    if kind not in REVIEW_REQUIRED_KINDS or missing_ok:
+        return
+    path = _review_path(review_ref, repo_root)
+    if path is None or path.is_file():
+        return
+    raise MissingReviewArtifactError(
+        f"--review の参照 '{str(review_ref).strip()}' がリポジトリ内に実在しない。発効を中止した"
+        "(--kind pr は独立役員審査を前置する手続 — 意見書を docs/reviews に保存するか、"
+        "リポジトリ外の審査なら --review-missing-ok を明示すること)"
+    )
+
+
+#: ``reviewed_sha`` の由来ラベル(run params と CLI 出力で開示する)。
+#: 「どこから来た値か」を記録しないと、A-18-8 の一致が審査記録の裏付けを持つのか
+#: 起票者の申告どうしの一致なのかを事後に区別できない。
+SHA_SOURCE_ARTIFACT = "review_artifact"  # 意見書の front matter(審査側の記録)
+SHA_SOURCE_ARGUMENT = "argument"         # --reviewed-sha(起票者の申告)
+SHA_SOURCE_PR_HEAD = "pr_head"           # gh api の PR head SHA(起票者側の自動取得)
+
+
+@dataclass(frozen=True)
+class ReviewedShaChoice:
+    """``reviewed_sha`` に何を採用したか(値・由来・開示すべき注記)。"""
+
+    sha: str | None
+    source: str | None
+    notes: tuple[str, ...] = ()
+
+
+def resolve_reviewed_sha(
+    review_ref: str | None,
+    declared: str | None,
+    *,
+    fallback: str | None = None,
+    fallback_source: str = SHA_SOURCE_PR_HEAD,
+    repo_root: Path | None = None,
+) -> ReviewedShaChoice:
+    """審査記録・起票者の申告・PR head の3経路から ``reviewed_sha`` を決める。
+
+    優先順位は **審査記録 > 起票者の申告 > PR の head SHA**。審査側を最優先にするのは、
+    これが唯一「発効を起票した側とは別の主体が書いた」値だからである(reminders
+    ``reviewed-sha-from-review-agent``)。
+
+    Args:
+        review_ref: ``--review`` の値。リポジトリ内パス形式のときだけ意見書を読む
+        declared: ``--reviewed-sha``(起票者の明示指定)
+        fallback: 明示指定も審査記録も無いときの既定(``--deemed-for-pr`` の head SHA)
+        fallback_source: ``fallback`` を採ったときの由来ラベル
+        repo_root: 意見書を探すルート。省略時は :func:`_repo_root`
+
+    Raises:
+        ReviewedShaConflictError: ``declared`` と審査記録が食い違う(発効を止める)
+        ReviewVerdictBlocksError: 審査記録の判定が ``reject`` / ``request_changes``(C-1)
+        ryza.reviews.ReviewArtifactError: front matter が壊れている・参照がリポジトリ外へ
+            出る・symlink 経由(様式不備や表記を「旧様式」「審査記録なし」に読み替えない —
+            壊すこと・書式を変えることが回避策にならないようにする)
+        ValueError: SHA の様式不備(:func:`normalize_reviewed_sha`)
+
+    **``fallback`` との食い違いは止めない**(注記のみ)。``--deemed-for-pr`` の head SHA は
+    起票者の「申告」ではなく発効時点のブランチ先端であり、意見書のコミット自身が head を
+    進めるため、審査対象 SHA と head はむしろ**通常一致しない**。ここを致命にすると、
+    front matter を書いた PR が軒並み発効できなくなる。
+    """
+    from ryza.reviews import BLOCKING_VERDICTS, VERDICTS, load_review_artifact
+
+    declared_sha = normalize_reviewed_sha(declared)
+    fallback_sha = normalize_reviewed_sha(fallback)
+    artifact = load_review_artifact(review_ref, repo_root=repo_root or _repo_root())
+    notes: list[str] = []
+    if artifact is not None:
+        notes += [f"審査記録 {artifact.path}: {w}" for w in artifact.warnings]
+        # C-1: 判定の検査は SHA の有無より先。reviewed_sha を書かない reject の意見書でも
+        # 「否認された審査を裏付けとして掲示する」ことに変わりはない。
+        if artifact.verdict in BLOCKING_VERDICTS:
+            raise ReviewVerdictBlocksError(
+                f"審査記録 {artifact.path} の判定は '{artifact.verdict}' であり発効できない。"
+                "発効を中止した(是正のうえ意見書を更新すること — 強行経路は無い。"
+                f"発効できる判定: {'/'.join(v for v in VERDICTS if v not in BLOCKING_VERDICTS)})"
+            )
+    if artifact is None or artifact.reviewed_sha is None:
+        # 旧様式(front matter 無し)・reviewed_sha を書いていない front matter は
+        # 0029 以前と同じ動作。**遡及改変しない**方針の裏返しであり、欠落を致命にすると
+        # 「front matter ごと消せば通る」という逆インセンティブになる。
+        if declared_sha:
+            return ReviewedShaChoice(declared_sha, SHA_SOURCE_ARGUMENT, tuple(notes))
+        return ReviewedShaChoice(
+            fallback_sha, fallback_source if fallback_sha else None, tuple(notes)
+        )
+
+    sha = artifact.reviewed_sha
+    if declared_sha and declared_sha != sha:
+        raise ReviewedShaConflictError(
+            f"--reviewed-sha={declared_sha[:12]} は審査記録 {artifact.path} の "
+            f"reviewed_sha={sha[:12]} と一致しない。発効を中止した"
+            "(審査側の記録が正 — どちらが実際の審査対象かを確認し、"
+            "意見書を訂正するか --reviewed-sha を外して再実行すること)"
+        )
+    if fallback_sha and fallback_sha != sha:
+        notes.append(
+            f"reviewed_sha は審査記録 {artifact.path} の {sha[:12]} を採用した"
+            f"(PR の head は {fallback_sha[:12]} — 審査後に積んだコミットは承継されない)"
+        )
+    if artifact.verdict:
+        notes.append(f"審査記録の判定: {artifact.verdict}(発効の可否判断には使っていない)")
+    return ReviewedShaChoice(sha, SHA_SOURCE_ARTIFACT, tuple(notes))
 
 
 def _repo_root() -> Path | None:
@@ -795,8 +996,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reviewed-sha", default=None, metavar="SHA40",
         help=(
             "審査対象コミットの完全 SHA(decisions.reviewed_sha)。--deemed-for-pr では"
-            "PR の head SHA が自動で入るため通常は不要。監査 A-18-8 が Approved トレーラの"
-            "reviewed=<sha40> と突合する"
+            "PR の head SHA が自動で入るため通常は不要。--review の意見書が front matter で"
+            "reviewed_sha を宣言している場合は**審査側の記録が優先**され、本指定と食い違えば"
+            "発効を中止する。監査 A-18-8 が Approved トレーラの reviewed=<sha40> と突合する"
+        ),
+    )
+    parser.add_argument(
+        "--review-missing-ok", action="store_true",
+        help=(
+            "--kind pr でも審査参照の実在検査を外す(リポジトリ外の審査・遡及登録の明示)。"
+            "指定した事実は meta.runs の params に残り、事後に件数を数えられる"
         ),
     )
     parser.add_argument(
@@ -870,6 +1079,10 @@ class DeemedTarget:
     notice: str
     reviewed_sha: str | None = None
     review_ref: str | None = None
+    #: ``reviewed_sha`` の由来(:data:`SHA_SOURCE_ARTIFACT` 等)。開示専用
+    reviewed_sha_source: str | None = None
+    #: 由来にまつわる注記(head SHA との相違・front matter の様式不備など)
+    reviewed_notes: tuple[str, ...] = ()
 
 
 def _resolve_deemed_args(args: argparse.Namespace) -> DeemedTarget:
@@ -884,8 +1097,12 @@ def _resolve_deemed_args(args: argparse.Namespace) -> DeemedTarget:
 
     **審査参照と審査対象 SHA は構造化列になる**(0029): ``--review`` は ``review_ref``、
     ``--deemed-for-pr`` の head SHA(または ``--reviewed-sha``)は ``reviewed_sha`` に入り、
-    監査 A-18-8 が ``Approved:`` トレーラの ``reviewed=`` と突合する。**それでも証明では
-    ない** —— どちらも起票者の申告であり、審査エージェント自身の署名は無い。同じ嘘を両方に
+    監査 A-18-8 が ``Approved:`` トレーラの ``reviewed=`` と突合する。
+
+    ``--review`` が front matter 付きの意見書(新様式 — :mod:`ryza.reviews`)を指す場合、
+    ``reviewed_sha`` は**審査側の記録**を採り、``--reviewed-sha`` との食い違いは
+    :class:`ReviewedShaConflictError` で発効を止める(:func:`resolve_reviewed_sha`)。
+    旧様式ではそれでも**証明ではない** —— 値はどちらも起票者の申告であり、同じ嘘を両方に
     書けば一致する。突合が効くのは「トレーラだけ後から書き換えた」「別 PR の SHA を写した」
     といった片側の食い違いに対してである。
     """
@@ -908,7 +1125,11 @@ def _resolve_deemed_args(args: argparse.Namespace) -> DeemedTarget:
                 f"--kind {args.kind} のみなし承認には --review(独立役員審査の参照)が必須。"
                 "保護領域 PR は審査を前置する手続であり、--notice では代替できない"
             )
-        reviewed_sha = normalize_reviewed_sha(args.reviewed_sha)
+        require_existing_review(
+            args.review, args.kind, missing_ok=args.review_missing_ok
+        )
+        choice = resolve_reviewed_sha(args.review, args.reviewed_sha)
+        reviewed_sha = choice.sha
         notice = args.notice
         if reviewed_sha:
             notice = _with_reviewed_line(notice, reviewed_sha)
@@ -920,6 +1141,8 @@ def _resolve_deemed_args(args: argparse.Namespace) -> DeemedTarget:
             notice=notice,
             reviewed_sha=reviewed_sha,
             review_ref=args.review,
+            reviewed_sha_source=choice.source,
+            reviewed_notes=choice.notes,
         )
 
     if not args.review:
@@ -928,12 +1151,20 @@ def _resolve_deemed_args(args: argparse.Namespace) -> DeemedTarget:
             "審査を経ていない変更をワンコマンドで発効させないための入口検査であり、"
             "--notice で文面を差し替えても免除されない"
         )
+    # 実在検査は gh を呼ぶ前に済ませる(存在しない審査参照でネットワークを使わない)。
+    # --deemed-for-pr の kind 既定は 'pr' なので、明示指定が無ければ pr として検査する。
+    require_existing_review(
+        args.review, args.kind or "pr", missing_ok=args.review_missing_ok
+    )
     pr = fetch_pull_request(args.deemed_for_pr, repo=args.gh_repo)
     if not pr.url:
         raise ValueError(f"PR #{args.deemed_for_pr} の URL を取得できなかった")
-    # 明示指定 > gh の head SHA。手で書けるのは、審査が head より前のコミットを対象とした
-    # 場合(審査後に無関係な追従コミットを積んだ等)に**実際に見た SHA** を残せるようにするため。
-    reviewed_sha = normalize_reviewed_sha(args.reviewed_sha) or normalize_reviewed_sha(pr.head_sha)
+    # 審査記録 > 明示指定 > gh の head SHA(:func:`resolve_reviewed_sha`)。手で書けるのは、
+    # 審査が head より前のコミットを対象とした場合(審査後に無関係な追従コミットを積んだ等)に
+    # **実際に見た SHA** を残せるようにするため。審査記録がある場合はそちらが正であり、
+    # 明示指定との食い違いは :class:`ReviewedShaConflictError` で発効を止める。
+    choice = resolve_reviewed_sha(args.review, args.reviewed_sha, fallback=pr.head_sha)
+    reviewed_sha = choice.sha
     if args.notice:
         notice = args.notice
         if reviewed_sha:
@@ -947,6 +1178,8 @@ def _resolve_deemed_args(args: argparse.Namespace) -> DeemedTarget:
         notice=notice,
         reviewed_sha=reviewed_sha,
         review_ref=args.review,
+        reviewed_sha_source=choice.source,
+        reviewed_notes=choice.notes,
     )
 
 
@@ -989,14 +1222,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"みなし承認の対象を解決できませんでした: {exc}", file=sys.stderr)
         return 1
 
-    # 審査参照の実在検査は**警告**であって発効の可否ではない(遡及登録・リポジトリ外の
-    # 審査を塞がないため)。黙って通すと `--review 嘘` がタイプミスのまま記録に残る。
+    # 審査参照の実在検査は、``--kind pr`` では既に require_existing_review が中止として
+    # 扱っている(審査 C-2(c))。ここに残るのは他 kind と --review-missing-ok の実行であり、
+    # そこでは従来どおり**警告**にとどめる(遡及登録・リポジトリ外の審査を塞がないため)。
     # 警告は stderr だけに出すと**痕跡が残らず**、事後監査から「警告が出たか」を判別できない
     # (独立役員審査 SHA-6)。Run の params と決定の note に載せて DB 側にも残す。
-    warning = missing_review_ref_warning(target.review_ref)
+    try:
+        warning = missing_review_ref_warning(target.review_ref)
+    except ValueError as exc:  # 脱出表記・symlink は解決時点で落ちているはずの保険
+        print(f"みなし承認の対象を解決できませんでした: {exc}", file=sys.stderr)
+        return 1
     if warning:
         print(f"警告: {warning}", file=sys.stderr)
         log.warning("%s", warning)
+    # 審査記録からの採用・front matter の様式不備は**発効を止めない**種類の事実なので、
+    # 黙らせずに出す(止める種類の食い違い・判定は既に例外で落ちている)。
+    for note in target.reviewed_notes:
+        print(f"注記: {note}", file=sys.stderr)
+        log.info("%s", note)
 
     import json
 
@@ -1020,9 +1263,18 @@ def main(argv: list[str] | None = None) -> int:
             "kind": target.kind,
             "source": args.source,
             "reviewed_sha": target.reviewed_sha,
+            # 由来を残すのは、A-18-8 の一致が審査記録の裏付けを持つのか起票者の申告
+            # どうしの一致なのかを事後に区別するため(reviewed-sha-from-review-agent)。
+            "reviewed_sha_source": target.reviewed_sha_source,
             "review_ref": target.review_ref,
             # 警告が出た実行かどうかを meta.runs に残す(stderr は消える — SHA-6)。
             "review_ref_warning": warning,
+            # 同じ原則を reviewed_notes にも適用する(審査 C-5)。head SHA との相違・
+            # front matter の様式警告・判定は stderr と log にしか出ておらず、
+            # 「30 行下で同じ原則を適用し忘れている」状態だった。
+            "reviewed_notes": list(target.reviewed_notes),
+            # 実在検査を明示的に外した実行を数えられるようにする(審査 C-2(c))。
+            "review_missing_ok": bool(args.review_missing_ok),
         },
     )
     conn = connect()
@@ -1050,7 +1302,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"みなし承認を記録し通知を投入しました: decision_id={result.decision.id} "
         f"notice_ref={result.notice_ref} decided_by={result.decision.decided_by} "
-        f"reviewed_sha={result.decision.reviewed_sha or '(未申告)'}",
+        f"reviewed_sha={result.decision.reviewed_sha or '(未申告)'} "
+        f"由来={target.reviewed_sha_source or '(なし)'}",
         file=sys.stderr,
     )
     return 0
@@ -1063,6 +1316,9 @@ __all__ = [
     "REVIEWED_LINE_PREFIX",
     "REVIEW_LINE_PREFIX",
     "REVIEW_REQUIRED_KINDS",
+    "SHA_SOURCE_ARGUMENT",
+    "SHA_SOURCE_ARTIFACT",
+    "SHA_SOURCE_PR_HEAD",
     "SYSTEM_ACTOR_PREFIX",
     "VETOABLE_DECISIONS",
     "VETO_KINDS",
@@ -1074,7 +1330,11 @@ __all__ = [
     "ProposalRefMismatchError",
     "PullRequestLookupError",
     "PullRequestRef",
+    "MissingReviewArtifactError",
     "ReservedMatterError",
+    "ReviewVerdictBlocksError",
+    "ReviewedShaChoice",
+    "ReviewedShaConflictError",
     "Veto",
     "build_pr_notice",
     "current_decision",
@@ -1087,6 +1347,8 @@ __all__ = [
     "record_revert_completion",
     "record_veto",
     "record_veto_withdrawal",
+    "require_existing_review",
+    "resolve_reviewed_sha",
 ]
 
 
