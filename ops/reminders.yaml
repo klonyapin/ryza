@@ -1332,11 +1332,13 @@ reminders:
     # エントリが残るので拡張であることを機械検査できる(実際 4 条件のうち③がそれ)。
     # 適用: 7a56c98… の受容を承継する新エントリ(paths に src/ryza/execution/close.py を追加)を
     # 登録し、src/ryza/execution/**(area: execution_engine)を protected_areas に登録した。
-    # 実走(コミット後 HEAD・verify_prs=False): violations 2 件 — ①既存の 392bb7b…
-    # (boardroom.py・本件と無関係)②**本変更のコミット自身**(保護領域 config/governance.yaml・
-    # src/ryza/audit/a18.py に触れ、この時点では Approved トレーラを持たない)。②は監査が本 PR を
-    # 正しく捕捉している証拠であって欠陥ではなく、PR マージコミットに Approved トレーラが載れば
-    # PR 承継の規則で解消される。acknowledged 1 件(3 パス)、陳腐化注記なし、承継注記1行。
+    # 実走(マージ前ブランチ HEAD・verify_prs=False): violations = ①既存の 392bb7b…
+    # (boardroom.py・本件と無関係)1 件 + ②**本 PR の各コミット自身**(保護領域
+    # config/governance.yaml・src/ryza/audit/a18.py に触れ、マージ前は Approved トレーラを持たない)。
+    # ②は監査が本 PR を正しく捕捉している証拠であって欠陥ではなく、PR マージコミットに Approved
+    # トレーラが載れば PR 承継の規則で解消される。acknowledged 1 件(3 パス)、陳腐化注記なし、
+    # 承継注記1行。件数を数値で固定しないのは、この記録を書き足すコミット自身が次の 1 件になる
+    # (自己言及の追いかけっこになる)ため。
     # (当初の記録「violations 1 件」はコミット前の計測。独立役員審査 低-4 で追試・是正)
     # 独立役員審査(docs/reviews/ack-supersede-review.md)は**承認可(修正条件なし)**。低-1〜低-5 と
     # 「懸念」は設計リード裁定により本 PR 内で是正済み(重複キー無効化+開示・様式の正規化明記・
